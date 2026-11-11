@@ -26,25 +26,36 @@
 
 插件是纯 JavaScript，无构建、无第三方依赖，直接从 GitHub 装：
 
-```bash
-# 方式 A：CLI（推荐用分支，不用 tag，见下面「更新」）
-dsh plugin install github:9Ashwin/dsh-computers
+**推荐从 npm 安装**（和官方插件包一样）：
 
-# 方式 B：DSH 设置 → 插件市场 → 安装，粘贴
-#   https://github.com/9Ashwin/dsh-computers
+```bash
+# 方式 A：CLI
+dsh plugin install dsh-computers
+
+# 方式 B：DSH 设置 → 插件市场 → 安装，搜 dsh-computers
+```
+
+也可以直接从 GitHub 装（跟随仓库最新提交）：
+
+```bash
+dsh plugin install github:9Ashwin/dsh-computers
 ```
 
 ### 更新
 
-GitHub 安装的插件在 profile 里是**按 spec 固定**的（`github:user/repo` 或 `github:user/repo#v1.0.2`，lockfile 会钉到具体 commit），所以：
+**npm 安装**：插件市场 → 已安装 → 「检查更新」即可，或者在 CLI 里装具体版本：
 
-- **装 tag（`#v1.0.2`）= 冻在那个版本**，插件市场的「检查更新」永远发现不了新版本。
-- **装分支（不带 `#`）= 可更新**：插件市场 → 已安装 → 「检查更新」会重新解析分支 HEAD 并自动重装，不需要手动卸载。
-- 手动更新时**必须换 spec 才会生效**：用同样的 spec 再装一次只会得到 `already-installed`（这就是"再安装没法更新"的原因）。要升级到某个新版本，直接装新 tag：
-  ```bash
-  dsh plugin install github:9Ashwin/dsh-computers#v1.0.2
-  ```
-  或者先移除再装；种 spec 变了才会真正重新拉取。
+```bash
+dsh plugin install dsh-computers@1.1.0
+```
+
+**GitHub 安装**：profile 里是按 spec + commit 固定的（`github:user/repo` 或 `#v1.0.2`），所以
+
+- 用**同一个 spec** 再装一次只会得到 `already-installed`（这就是「再安装没法更新」的原因）；
+- 装 **tag** 会被冻住，市场永远检测不到更新；装**分支**（不带 `#`）才能被市场「检查更新」发现新提交；
+- 手动升级到某个版本要**换 spec**：`dsh plugin install github:9Ashwin/dsh-computers#v1.1.0`。
+
+> 更新完记得重启 Host 并刷新页面，具体见 [docs/deploy.md](./docs/deploy.md)。
 
 装好后重启 `dsh web`，设置里会出现 **电脑** 页。
 
