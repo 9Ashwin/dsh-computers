@@ -32,7 +32,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 
 // Keep in sync with package.json. The server compares this for display only.
-export const AGENT_VERSION = '1.3.1'
+export const AGENT_VERSION = '1.4.0'
 
 const DEFAULT_EXEC_TIMEOUT_MS = 120_000
 const MAX_EXEC_TIMEOUT_MS = 24 * 60 * 60 * 1000
@@ -159,12 +159,22 @@ function normalizeWorkspaceBase(value) {
   return path.resolve(text)
 }
 
+/**
+ * How this agent instance is running. `service` = the CLI/launchd one-liner
+ * (there is a file at ~/.dsh-computers/agent.mjs to upgrade); `embedded` = the
+ * plugin's in-process runtime (upgrade the DSH plugin instead).
+ */
+function normalizeRuntimeMode(value) {
+  return value === 'embedded' ? 'embedded' : 'service'
+}
+
 /** PROTOCOL §11.6 handshake metadata, reported at enroll and on every connect. */
-function handshakeMetadata(workspaceBase) {
+function handshakeMetadata(workspaceBase, mode) {
   const info = machineInfo('')
   return {
     version: HANDSHAKE_VERSION,
     agentVersion: AGENT_VERSION,
+    mode: normalizeRuntimeMode(mode),
     hostname: info.hostname,
     os: info.os,
     arch: info.arch,
@@ -572,7 +582,7 @@ async function probeEventStream(config, timeoutMs = 5000) {
   timer.unref?.()
   try {
     const response = await fetch(eventsUrl(config.serverUrl), {
-      headers: sseHeaders(config.token, handshakeMetadata(config.workspaceBase)),
+      headers: sseHeaders(config.token, handshakeMetadata(config.workspaceBase, config.mode)),
       signal: controller.signal,
     })
     if (response.status === 401) {
@@ -834,6 +844,7 @@ async function sendHeartbeat(runtime) {
           memoryBytes: os.totalmem(),
           agentVersion: AGENT_VERSION,
           capabilities: [...AGENT_CAPABILITIES],
+          mode: config.mode,
         },
       },
       timeoutMs: 15_000,
@@ -1651,6 +1662,7 @@ function createRuntime(options) {
     computerId: requireOptionString(options.computerId, 'computerId'),
     name: typeof options.name === 'string' ? options.name.trim() : '',
     workspaceBase: normalizeWorkspaceBase(options.workspaceBase),
+    mode: normalizeRuntimeMode(options.mode),
   }
   return {
     config,
@@ -1693,14 +1705,16 @@ function createRuntime(options) {
  *   computerId: string,
  *   name?: string,
  *   heartbeatMs?: number,
+ *   mode?: 'embedded' | 'service',   // default 'service'; the plugin passes 'embedded'
  *   log?: (level: 'info'|'warn'|'error', message: string) => void,
  *   onState?: (state: object) => void,
  * }} options
  * @returns {{ stop: () => Promise<void>, status: () => object }}
  *
  * `status()` is synchronous and returns
- * `{ running, connected, serverUrl, computerId, name, heartbeatMs, since,
- *    lastConnectedAt, lastError, attempts, exitCode }` —
+ * `{ running, connected, serverUrl, computerId, name, mode, workspaceBase,
+ *    capabilities, features, heartbeatMs, since, lastConnectedAt, lastError,
+ *    attempts, exitCode }` —
  * the host manager only needs `connected` / `since` / `lastError` from it.
  *
  * A fatal `{"error":"invalid-token"}` 401 does NOT throw: the loop ends, sets
@@ -1736,6 +1750,7 @@ function runtimeStatus(runtime) {
     serverUrl: runtime.config.serverUrl,
     computerId: runtime.config.computerId,
     name: state.name || runtime.config.name,
+    mode: runtime.config.mode,
     workspaceBase: runtime.config.workspaceBase,
     capabilities: [...AGENT_CAPABILITIES],
     features: [...state.features],
@@ -1903,7 +1918,7 @@ async function runRuntimeLoop(runtime) {
 async function runOneSession(runtime, signal) {
   const config = runtime.config
   const response = await fetch(eventsUrl(config.serverUrl), {
-    headers: sseHeaders(config.token, handshakeMetadata(config.workspaceBase)),
+    headers: sseHeaders(config.token, handshakeMetadata(config.workspaceBase, config.mode)),
     signal,
   })
   if (response.status === 401) {
@@ -2026,6 +2041,7 @@ async function cmdRun(argv) {
     computerId: config.computerId,
     name: config.name,
     workspaceBase: config.workspaceBase,
+    mode: 'service',
     heartbeatMs: DEFAULT_HEARTBEAT_MS,
     log: sink,
     onState: (state) => {
@@ -2108,7 +2124,7 @@ async function cmdEnroll(argv) {
     // PROTOCOL §11.1 (top-level capabilities) + §11.6 (handshake metadata).
     capabilities: [...AGENT_CAPABILITIES],
     machine: machineInfo(requestedName),
-    metadata: handshakeMetadata(workspaceBase),
+    metadata: handshakeMetadata(workspaceBase, 'service'),
   }
   if (values.replace) body.replace = true
 

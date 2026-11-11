@@ -128,6 +128,7 @@ const runtime = startRuntime({
   token: 'dshc_…',            // from the hub's enroll response
   computerId: 'cmp_…',
   name: 'Desk Mac mini',      // optional display name
+  mode: 'embedded',           // 'service' (default) or 'embedded'; shown to the UI
   heartbeatMs: 20000,         // optional; `hello` overrides it
   log: (level, message) => {}, // 'info' | 'warn' | 'error'
   onState: (state) => {},      // connect/disconnect/error/stop transitions
@@ -179,13 +180,16 @@ what is enabled per connection —
 
 ### Handshake metadata (§11.6)
 
-Enroll sends `metadata: { version: 1, agentVersion, hostname, os, arch,
+Enroll sends `metadata: { version: 1, agentVersion, mode, hostname, os, arch,
 capabilities, workspaceBase }`, and every SSE connect (probe and each
 reconnect) carries the same JSON in the `x-dsh-computers-metadata` header as
 base64url — an SSE GET has no body, so the header is how the reference-product
-handshake metadata maps onto this wire. `workspaceBase` comes from
-`config.json` (`--workspace-base`, default `$HOME`), is the default `cwd` for
-`exec`, and is the base for relative `glob`/`grep` patterns.
+handshake metadata maps onto this wire. `mode` is `service` for the CLI/launchd
+install (there *is* `~/.dsh-computers/agent.mjs` to upgrade) and `embedded` for
+the plugin's in-process runtime (upgrade the DSH plugin instead); it is also in
+the heartbeat `meta` and in `startRuntime().status()`. `workspaceBase` comes
+from `config.json` (`--workspace-base`, default `$HOME`), is the default `cwd`
+for `exec`, and is the base for relative `glob`/`grep` patterns.
 
 ### Streaming results (§11.2 + §11.6 frames)
 

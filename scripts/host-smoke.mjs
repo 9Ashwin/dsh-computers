@@ -34,6 +34,8 @@ import { createSelectionStore, MAX_SELECTIONS } from '../lib/selection.js'
 import { MAX_ACCESS_SESSIONS, createAccessStore } from '../lib/access.js'
 import { mintSecret, newComputerId, normalizeDisplayName, sha256Hex, tokenMatches } from '../lib/keys.js'
 import { normalizeState, prunePendingKeys } from '../lib/state.js'
+import { collectServerUrls, resolveAddressPayload } from '../lib/addresses.js'
+import { createTunnel } from '../lib/tunnel.js'
 
 const ROOT = new URL('../', import.meta.url).pathname
 const API = '/api/dsh-computers'
@@ -71,6 +73,7 @@ const iso = (ms) => new Date(ms).toISOString()
  * real webServer), and lets a test swap the `connection` service.
  */
 function createFakeContext() {
+  let fakeHost = '127.0.0.1'
   const routes = new Map()
   const tools = new Map()
   const sections = []
@@ -118,10 +121,21 @@ function createFakeContext() {
       get port() {
         return origin === null ? undefined : (Number(new URL(origin).port) || undefined)
       },
+      // v1.4.0: the real service exposes the actual bind host; tests override it.
+      get host() {
+        return fakeHost
+      },
       getOrigin() {
         if (origin === null) throw new Error('webserver: origin read before the listener bound a port')
         return origin
       },
+    },
+    // Reachable-address probe seam (v1.3.3): deterministic loopback-only by
+    // default so HTTP assertions do not depend on the test machine's NICs.
+    addressDeps: {
+      probeTailscale: async () => null,
+      interfaces: { lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }] },
+      hostname: 'smoke-host.local',
     },
     tools: {
       register(definition) {
@@ -139,6 +153,9 @@ function createFakeContext() {
     sections,
     setOrigin(value) {
       origin = value
+    },
+    setHost(value) {
+      fakeHost = value
     },
     setGate(value) {
       connection = value
@@ -200,8 +217,11 @@ async function startListener(fake) {
 }
 
 /** Mount the plugin against a fresh fake context and a real listener. */
-async function mount(config) {
+async function mount(config, { addressDeps, webServerHost, tunnelExec } = {}) {
   const fake = createFakeContext()
+  if (addressDeps !== undefined) fake.ctx.addressDeps = addressDeps
+  if (typeof webServerHost === 'string' && webServerHost !== '') fake.setHost(webServerHost)
+  if (typeof tunnelExec === 'function') fake.ctx.tunnelExec = tunnelExec
   apply(fake.ctx, config)
   const listener = await startListener(fake)
   return {
@@ -1074,6 +1094,8 @@ async function phaseC(root) {
         body: {
           key: freshKey,
           agentVersion: PLUGIN_VERSION,
+          capabilities: ['exec', 'fs'],
+          metadata: { version: 1, agentVersion: PLUGIN_VERSION, mode: 'embedded', workspaceBase: '/home/smoke' },
           machine: { hostname: 'linux-box.local', name: 'ignored-name', os: 'linux', arch: 'x64', platform: 'linux' },
         },
       })
@@ -1089,6 +1111,9 @@ async function phaseC(root) {
       const state = await call(origin, `${API}/state`)
       assert.equal(state.data.computers[0].platformLabel, 'Linux')
       assert.equal(state.data.computers[0].name, 'Smoke Linux')
+      assert.equal(state.data.computers[0].mode, 'embedded', 'mode is stored from the enroll metadata block')
+      assert.equal(state.data.computers[0].workspaceBase, '/home/smoke')
+      assert.deepEqual(state.data.computers[0].capabilities, ['exec', 'fs'])
     })
 
     await check('keys: minted through the API carries the replacement flag', async () => {
@@ -1167,6 +1192,8 @@ async function phaseD() {
       publicUrl: '',
       promoteOnTimeout: true,
       minAgentVersion: '',
+      preferAddress: 'auto',
+      tailscaleServe: { enabled: false, httpsPort: 8443 },
       stateDir: '',
       keyTtlMinutes: 15,
       heartbeatMs: 20_000,
@@ -1179,6 +1206,14 @@ async function phaseD() {
     assert.throws(() => resolveConfig({ heartbeatMs: 5 }), /heartbeatMs must be an integer between/)
     assert.throws(() => resolveConfig({ execEnabled: 'yes' }), /execEnabled must be a boolean/)
     assert.throws(() => resolveConfig({ maxOutputBytes: 0 }), /maxOutputBytes must be an integer between/)
+    assert.deepEqual(resolveConfig({ tailscaleServe: true }).tailscaleServe, { enabled: true, httpsPort: 8443 })
+    assert.deepEqual(resolveConfig({ tailscaleServe: { enabled: true, httpsPort: 9443 } }).tailscaleServe, { enabled: true, httpsPort: 9443 })
+    assert.deepEqual(resolveConfig({ tailscaleServe: {} }).tailscaleServe, { enabled: false, httpsPort: 8443 })
+    assert.throws(() => resolveConfig({ tailscaleServe: { enabled: 'yes' } }), /tailscaleServe\.enabled must be a boolean/)
+    assert.throws(() => resolveConfig({ tailscaleServe: { httpsPort: 70000 } }), /tailscaleServe\.httpsPort must be an integer/)
+    assert.throws(() => resolveConfig({ tailscaleServe: 'yes' }), /tailscaleServe must be an object/)
+    assert.equal(resolveConfig({ preferAddress: 'lan' }).preferAddress, 'lan')
+    assert.throws(() => resolveConfig({ preferAddress: 'wan' }), /preferAddress must be one of/)
     assert.throws(() => resolveConfig('nope'), /config must be an object/)
   })
 }
@@ -1224,6 +1259,7 @@ async function createFakeHub() {
     results: [],
     heartbeats: [],
     lastAuth: null,
+    lastStreamMetadata: null,
     server: null,
   }
 
@@ -1272,6 +1308,17 @@ async function createFakeHub() {
       const header = typeof req.headers.authorization === 'string' ? req.headers.authorization : ''
       const token = header.replace(/^bearer[ \t]+/i, '').trim()
       state.lastAuth = token
+      // v1.3.2: record the connect handshake so the embedded-runtime mode can
+      // be asserted end to end.
+      const metadataHeader = req.headers['x-dsh-computers-metadata']
+      const metadataText = Array.isArray(metadataHeader) ? metadataHeader[0] : metadataHeader
+      if (typeof metadataText === 'string' && metadataText !== '') {
+        try {
+          state.lastStreamMetadata = JSON.parse(Buffer.from(metadataText, 'base64url').toString('utf8'))
+        } catch {
+          state.lastStreamMetadata = null
+        }
+      }
       if (state.issuedToken === null || token !== state.issuedToken) {
         hubJson(res, 401, { error: 'invalid-token', message: 'bad smoke token' })
         return
@@ -1604,6 +1651,32 @@ async function phaseF(root) {
         assert.equal(status.data.connected, false)
         assert.match(status.data.lastError, /does not export startRuntime|embedded runtime is unavailable/)
       }
+    })
+
+    await check(`runtime: the embedded manager enrolls with metadata.mode='embedded'${connectionNote}`, async () => {
+      if (!hasStartRuntime) {
+        // Without the agent export the enroll still happens; the metadata block
+        // is host-owned so it is assertable either way.
+      }
+      const enroll = hub.state.enrollBodies.at(-1)
+      assert.ok(enroll, 'the hub received the enroll POST')
+      assert.equal(enroll.metadata.mode, 'embedded', 'enroll metadata declares the embedded runtime')
+      assert.equal(enroll.metadata.version, 1)
+      assert.equal(typeof enroll.metadata.hostname, 'string')
+      assert.equal(typeof enroll.metadata.os, 'string')
+      assert.equal(typeof enroll.metadata.arch, 'string')
+      assert.equal(typeof enroll.metadata.workspaceBase, 'string')
+      assert.ok(Array.isArray(enroll.metadata.capabilities) && enroll.metadata.capabilities.includes('exec'))
+      assert.deepEqual(enroll.capabilities, enroll.metadata.capabilities)
+      assert.equal(enroll.agentVersion, enroll.metadata.agentVersion)
+    })
+
+    await check(`runtime: startRuntime passes mode='embedded' to the agent (connect handshake)${connectionNote}`, async () => {
+      if (!hasStartRuntime) return
+      await hub.waitForConnections(1)
+      assert.ok(hub.state.lastStreamMetadata, 'the agent sent the connect handshake header')
+      assert.equal(hub.state.lastStreamMetadata.mode, 'embedded')
+      assert.ok(Array.isArray(hub.state.lastStreamMetadata.capabilities))
     })
 
     await check(`runtime: enable(false) stops the runtime and persists the switch${connectionNote}`, async () => {
@@ -2606,9 +2679,11 @@ async function phaseJ(root) {
   const v2Id = newComputerId()
   const oldId = newComputerId()
   const noFsId = newComputerId()
+  const embeddedOldId = newComputerId()
   const v2Token = mintSecret()
   const oldToken = mintSecret()
   const noFsToken = mintSecret()
+  const embeddedOldToken = mintSecret()
   seedState(dir, {
     version: 1,
     computers: [
@@ -2621,6 +2696,12 @@ async function phaseJ(root) {
       }),
       seedComputer(oldId, 'Old Mac', { tokenHash: sha256Hex(oldToken), capabilities: ['exec'], agentVersion: '1.0.0' }),
       seedComputer(noFsId, 'No FS Mac', { tokenHash: sha256Hex(noFsToken), capabilities: ['exec'], agentVersion: PLUGIN_VERSION }),
+      seedComputer(embeddedOldId, 'Embedded Old Mac', {
+        tokenHash: sha256Hex(embeddedOldToken),
+        capabilities: ['exec'],
+        agentVersion: '1.0.0',
+        mode: 'embedded',
+      }),
     ],
     pendingKeys: [],
   })
@@ -2640,6 +2721,7 @@ async function phaseJ(root) {
       arch: 'arm64',
       capabilities: ['exec', 'fs'],
       workspaceBase: '/Users/smoke',
+      mode: 'embedded',
     }
     const metadataHeader = Buffer.from(JSON.stringify(metadata), 'utf8').toString('base64url')
     const v2Sse = await openSse(origin, `${API}/agent/events`, {
@@ -2651,7 +2733,20 @@ async function phaseJ(root) {
     const oldSse = await openSse(origin, `${API}/agent/events`, { authorization: `Bearer ${oldToken}` })
     sseClients.push(oldSse)
     await oldSse.nextEvent('hello', 2000)
-    const noFsSse = await openSse(origin, `${API}/agent/events`, { authorization: `Bearer ${noFsToken}` })
+    const noFsMetadata = Buffer.from(JSON.stringify({
+      version: 1,
+      agentVersion: PLUGIN_VERSION,
+      hostname: 'nofs.local',
+      os: 'darwin',
+      arch: 'arm64',
+      capabilities: ['exec'],
+      workspaceBase: '/Users/nofs',
+      mode: 'embedded',
+    }), 'utf8').toString('base64url')
+    const noFsSse = await openSse(origin, `${API}/agent/events`, {
+      authorization: `Bearer ${noFsToken}`,
+      'x-dsh-computers-metadata': noFsMetadata,
+    })
     sseClients.push(noFsSse)
     await noFsSse.nextEvent('hello', 2000)
 
@@ -2702,16 +2797,27 @@ async function phaseJ(root) {
       assert.equal(v2.workspaceBase, '/Users/smoke')
       assert.equal(v2.drift, false)
       assert.equal(v2.updateRequired, false)
-      const old = state.data.computers.find((computer) => computer.id === oldId)
-      assert.equal(old.drift, true)
-      assert.equal(old.updateRequired, true)
+      // v1.3.2: mode from the connect handshake; legacy rows read as service.
+      assert.equal(v2.mode, 'embedded', 'mode is stored from the handshake header')
+      const noFsState = state.data.computers.find((computer) => computer.id === noFsId)
+      assert.equal(noFsState.mode, 'embedded')
+      const legacy = state.data.computers.find((computer) => computer.id === oldId)
+      assert.equal(legacy.mode, 'service', 'a legacy record without mode defaults to service')
+      const embOld = state.data.computers.find((computer) => computer.id === embeddedOldId)
+      assert.equal(embOld.mode, 'embedded')
+      assert.equal(legacy.drift, true)
+      assert.equal(legacy.updateRequired, true)
       const health = await call(origin, `${API}/health`)
       const healthV2 = health.data.agents.find((agent) => agent.id === v2Id)
       assert.deepEqual(healthV2.capabilities, ['exec', 'fs'])
+      assert.equal(healthV2.mode, 'embedded')
+      assert.equal(health.data.agents.find((agent) => agent.id === oldId).mode, 'service')
       assert.equal(healthV2.drift, false)
       const value = await listTool.execute({}, { agent: session })
       const listV2 = value.computers.find((computer) => computer.id === v2Id)
       assert.deepEqual(listV2.capabilities, ['exec', 'fs'])
+      assert.equal(listV2.mode, 'embedded')
+      assert.equal(value.computers.find((computer) => computer.id === oldId).mode, 'service')
       assert.equal(listV2.drift, false)
       assert.equal(listV2.updateRequired, false)
     })
@@ -2831,14 +2937,25 @@ async function phaseJ(root) {
       assert.deepEqual(record.chunks.map((chunk) => chunk.text), ['late output'])
     })
 
-    await check('exec: the version gate rejects an old agent with an upgrade hint', async () => {
-      const denied = execTool.execute({ computer: 'Old Mac', command: 'echo old' }, { agent: session })
+    await check('exec: the version gate wording depends on the machine mode', async () => {
+      const serviceDenied = execTool.execute({ computer: 'Old Mac', command: 'echo old' }, { agent: session })
         .then((value) => ({ value }), (error) => ({ error }))
-      const settled = await denied
-      assert.ok(settled.error)
-      assert.match(settled.error.message, /older than the required/)
-      assert.match(settled.error.message, /upgrade/i)
+      const serviceSettled = await serviceDenied
+      assert.ok(serviceSettled.error)
+      assert.match(serviceSettled.error.message, /older than the required/)
+      assert.match(serviceSettled.error.message, /重新运行安装命令/, 'service machines get the one-liner hint')
+      assert.match(serviceSettled.error.message, /re-run the one-line install command/)
+      assert.doesNotMatch(serviceSettled.error.message, /插件市场/)
       assert.equal(oldSse.events.filter((frame) => frame.name === 'exec').length, 0)
+
+      const embeddedDenied = execTool.execute({ computer: 'Embedded Old Mac', command: 'echo old' }, { agent: session })
+        .then((value) => ({ value }), (error) => ({ error }))
+      const embeddedSettled = await embeddedDenied
+      assert.ok(embeddedSettled.error)
+      assert.match(embeddedSettled.error.message, /older than the required/)
+      assert.match(embeddedSettled.error.message, /设置 → 插件市场 → 检查更新/, 'embedded machines get the plugin-update hint')
+      assert.match(embeddedSettled.error.message, /重启 DSH/)
+      assert.doesNotMatch(embeddedSettled.error.message, /重新运行安装命令/)
     })
 
     await check('fs: the five file tools run end to end over the stream', async () => {
@@ -2929,7 +3046,8 @@ async function phaseJ(root) {
         .then((value) => ({ value }), (error) => ({ error }))
       assert.ok(settled.error)
       assert.match(settled.error.message, /does not support remote file access/)
-      assert.match(settled.error.message, /upgrade/i)
+      assert.match(settled.error.message, /设置 → 插件市场 → 检查更新/, 'this machine is embedded, so the plugin-update hint is used')
+      assert.doesNotMatch(settled.error.message, /重新运行安装命令/)
       assert.equal(noFsSse.events.filter((frame) => frame.name === 'fs').length, 0)
     })
 
@@ -2975,6 +3093,451 @@ async function phaseJ(root) {
 }
 
 // ---------------------------------------------------------------------------
+// Phase K — reachable-address candidates (v1.3.3)
+// ---------------------------------------------------------------------------
+
+async function phaseK(root) {
+  const dir = join(root, 'k')
+  seedState(dir, { version: 1, computers: [], pendingKeys: [] })
+
+  const ctxOf = (port = 49749, host = '127.0.0.1') => ({
+    webServer: { host, port, protocol: 'http:', getOrigin: () => `http://127.0.0.1:${port}` },
+  })
+  const reqOf = (host = '127.0.0.1:49749') => ({ headers: { host } })
+  const loopbackOnlyDeps = {
+    probeTailscale: async () => null,
+    interfaces: { lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }] },
+    hostname: 'smoke-host.local',
+  }
+  // A machine with both Tailscale and a LAN address, plus the desktop bind.
+  const tailscaleDeps = {
+    probeTailscale: async () => '100.121.33.106',
+    interfaces: {
+      lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }],
+      en0: [{ address: '192.168.8.198', family: 'IPv4', internal: false }],
+    },
+    hostname: 'desk.local',
+  }
+  const BASE_CONFIG = { publicUrl: '', preferAddress: 'auto' }
+
+  await check('addresses: desktop bind (127.0.0.1) marks tailscale/lan unreachable and recommends loopback', async () => {
+    const options = { ctx: ctxOf(49749, '127.0.0.1'), config: BASE_CONFIG, req: reqOf(), ...tailscaleDeps }
+    const payload = await resolveAddressPayload(options)
+    assert.equal(payload.serverUrl, 'http://127.0.0.1:49749')
+    assert.equal(payload.loopbackOnly, true)
+    assert.deepEqual(payload.listener, { host: '127.0.0.1', port: 49749, loopback: true })
+    assert.deepEqual(payload.serverUrls, [
+      { url: 'http://100.121.33.106:49749', kind: 'tailscale', label: 'Tailscale', recommended: false, reachable: false },
+      { url: 'http://192.168.8.198:49749', kind: 'lan', label: '局域网', recommended: false, reachable: false },
+      { url: 'http://127.0.0.1:49749', kind: 'loopback', label: '本机', recommended: true, reachable: true },
+    ])
+  })
+
+  await check('addresses: server bind (100.x) makes tailscale reachable and recommended, LAN unreachable', async () => {
+    const payload = await resolveAddressPayload({
+      ctx: ctxOf(49749, '100.121.33.106'), config: BASE_CONFIG, req: reqOf(), ...tailscaleDeps,
+    })
+    assert.equal(payload.serverUrl, 'http://100.121.33.106:49749')
+    assert.equal(payload.loopbackOnly, false)
+    assert.deepEqual(payload.listener, { host: '100.121.33.106', port: 49749, loopback: false })
+    assert.deepEqual(payload.serverUrls, [
+      { url: 'http://100.121.33.106:49749', kind: 'tailscale', label: 'Tailscale', recommended: true, reachable: true },
+      { url: 'http://192.168.8.198:49749', kind: 'lan', label: '局域网', recommended: false, reachable: false },
+      { url: 'http://127.0.0.1:49749', kind: 'loopback', label: '本机', recommended: false, reachable: false },
+    ])
+  })
+
+  await check('addresses: CGNAT interface scan finds Tailscale when the binary is missing', async () => {
+    const list = await collectServerUrls({
+      ctx: ctxOf(49749, '100.121.33.106'),
+      config: BASE_CONFIG,
+      req: reqOf(),
+      probeTailscale: async () => null,
+      interfaces: {
+        lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }],
+        utun0: [{ address: '100.121.33.106', family: 'IPv4', internal: false }],
+      },
+      hostname: 'desk.local',
+    })
+    assert.equal(list[0].kind, 'tailscale')
+    assert.equal(list[0].url, 'http://100.121.33.106:49749')
+    assert.equal(list[0].recommended, true)
+    assert.equal(list[0].reachable, true)
+  })
+
+  await check('addresses: publicUrl always wins and is reachable by promise', async () => {
+    const payload = await resolveAddressPayload({
+      ctx: ctxOf(49749, '127.0.0.1'),
+      config: { publicUrl: 'https://dsh.example.com', preferAddress: 'auto' },
+      req: reqOf(),
+      ...tailscaleDeps,
+    })
+    assert.equal(payload.serverUrl, 'https://dsh.example.com')
+    assert.equal(payload.loopbackOnly, false)
+    assert.deepEqual(payload.serverUrls[0], {
+      url: 'https://dsh.example.com', kind: 'public', label: '公网', recommended: true, reachable: true,
+    })
+    assert.ok(payload.serverUrls.some((item) => item.kind === 'tailscale'), 'other candidates are still offered')
+  })
+
+  await check('addresses: preferAddress=lan with a LAN bind picks the LAN candidate', async () => {
+    const payload = await resolveAddressPayload({
+      ctx: ctxOf(49749, '192.168.8.198'),
+      config: { publicUrl: '', preferAddress: 'lan' },
+      req: reqOf(),
+      ...tailscaleDeps,
+    })
+    const recommended = payload.serverUrls.filter((item) => item.recommended)
+    assert.equal(recommended.length, 1)
+    assert.equal(recommended[0].kind, 'lan')
+    assert.equal(recommended[0].url, 'http://192.168.8.198:49749')
+    assert.equal(recommended[0].reachable, true)
+    assert.equal(payload.serverUrls.find((item) => item.kind === 'tailscale').reachable, false)
+  })
+
+  await check('addresses: preferAddress never recommends an unreachable kind (falls back)', async () => {
+    // The LAN is preferred but the listener is a desktop bind: LAN is not reachable.
+    const unreachablePreference = await resolveAddressPayload({
+      ctx: ctxOf(49749, '127.0.0.1'),
+      config: { publicUrl: '', preferAddress: 'lan' },
+      req: reqOf(),
+      ...tailscaleDeps,
+    })
+    assert.equal(unreachablePreference.serverUrl, 'http://127.0.0.1:49749')
+    assert.equal(unreachablePreference.loopbackOnly, true)
+    // Public is preferred but not configured: auto order decides.
+    const missingKind = await resolveAddressPayload({
+      ctx: ctxOf(49749, '127.0.0.1'),
+      config: { publicUrl: '', preferAddress: 'public' },
+      req: reqOf(),
+      ...loopbackOnlyDeps,
+    })
+    assert.deepEqual(missingKind.serverUrls.map((item) => item.kind), ['loopback'])
+    assert.equal(missingKind.serverUrls[0].recommended, true)
+  })
+
+  await check('addresses: dedupe keeps one entry per url (single loopback)', async () => {
+    const list = await collectServerUrls({
+      ctx: ctxOf(49749, '192.168.8.198'),
+      config: { publicUrl: 'http://192.168.8.198:49749', preferAddress: 'auto' },
+      req: reqOf('192.168.8.198:49749'),
+      probeTailscale: async () => '100.64.1.2',
+      interfaces: {
+        lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }],
+        en0: [{ address: '192.168.8.198', family: 'IPv4', internal: false }],
+        utun0: [{ address: '100.64.1.2', family: 'IPv4', internal: false }],
+      },
+      hostname: 'desk.local',
+    })
+    const urls = list.map((item) => item.url)
+    assert.equal(new Set(urls).size, urls.length, 'no duplicate urls')
+    assert.equal(urls.filter((url) => url === 'http://127.0.0.1:49749').length, 1)
+    assert.equal(urls.filter((url) => url === 'http://192.168.8.198:49749').length, 1)
+    assert.equal(urls.filter((url) => url === 'http://100.64.1.2:49749').length, 1)
+    assert.equal(list.filter((item) => item.recommended).length, 1)
+  })
+
+  await check('addresses: item shape and kind/label vocabulary are stable', async () => {
+    const list = await collectServerUrls({
+      ctx: ctxOf(49749, '100.121.33.106'),
+      config: { publicUrl: 'https://dsh.example.com' },
+      req: reqOf(),
+      ...tailscaleDeps,
+    })
+    const expected = {
+      public: '公网', forwarded: '转发地址', host: '当前访问地址',
+      tailscale: 'Tailscale', lan: '局域网', mdns: '本机名', loopback: '本机',
+    }
+    for (const item of list) {
+      assert.deepEqual(Object.keys(item).sort(), ['kind', 'label', 'reachable', 'recommended', 'url'])
+      assert.equal(typeof item.url, 'string')
+      assert.equal(typeof item.recommended, 'boolean')
+      assert.equal(typeof item.reachable, 'boolean')
+      assert.ok(item.kind in expected, `unexpected kind ${item.kind}`)
+      assert.equal(item.label, expected[item.kind])
+    }
+  })
+
+  // --- HTTP wiring: the payload the settings modal consumes -----------------
+  const app = await mount({ ...FAST_CONFIG, stateDir: dir }, { addressDeps: tailscaleDeps, webServerHost: '127.0.0.1' })
+  try {
+    const origin = app.origin
+    const port = new URL(origin).port
+    const loopbackUrl = `http://127.0.0.1:${port}`
+
+    await check('addresses: desktop /state is honest about the loopback bind', async () => {
+      const state = await call(origin, `${API}/state`)
+      assert.equal(state.data.serverUrl, loopbackUrl)
+      assert.equal(state.data.loopbackOnly, true)
+      assert.deepEqual(state.data.listener, { host: '127.0.0.1', port: Number(port), loopback: true })
+      assert.deepEqual(state.data.serverUrls.map((item) => [item.kind, item.reachable, item.recommended]), [
+        ['tailscale', false, false],
+        ['lan', false, false],
+        ['loopback', true, true],
+      ])
+    })
+
+    await check('addresses: desktop /keys embeds the loopback address, not an unreachable one', async () => {
+      const response = await call(origin, `${API}/keys`, { method: 'POST', body: { os: 'macos' } })
+      assert.equal(response.status, 200)
+      assert.equal(response.data.serverUrl, loopbackUrl)
+      assert.equal(response.data.loopbackOnly, true)
+      assert.deepEqual(response.data.listener, { host: '127.0.0.1', port: Number(port), loopback: true })
+      assert.ok(response.data.command.includes(`${loopbackUrl}/api/dsh-computers/join.sh?key=`))
+      assert.ok(!response.data.command.includes('100.121.33.106'), 'never advertise an address the listener cannot serve')
+      assert.ok(!response.data.command.includes('192.168.8.198'))
+    })
+  } finally {
+    await app.close()
+  }
+
+  // --- server-like deployment: bind on the Tailscale interface ---------------
+  const serverApp = await mount({ ...FAST_CONFIG, stateDir: dir }, { addressDeps: tailscaleDeps, webServerHost: '100.121.33.106' })
+  try {
+    const origin = serverApp.origin
+    const port = new URL(origin).port
+    const tailscaleUrl = `http://100.121.33.106:${port}`
+    await check('addresses: server bind recommends tailscale and flags LAN unreachable', async () => {
+      const state = await call(origin, `${API}/state`)
+      assert.equal(state.data.serverUrl, tailscaleUrl)
+      assert.equal(state.data.loopbackOnly, false)
+      assert.deepEqual(state.data.listener, { host: '100.121.33.106', port: Number(port), loopback: false })
+      const byKind = new Map(state.data.serverUrls.map((item) => [item.kind, item]))
+      assert.equal(byKind.get('tailscale').reachable, true)
+      assert.equal(byKind.get('tailscale').recommended, true)
+      assert.equal(byKind.get('lan').reachable, false)
+      assert.equal(byKind.get('loopback').reachable, false)
+      const response = await call(origin, `${API}/keys`, { method: 'POST', body: { os: 'macos' } })
+      assert.ok(response.data.command.includes(`${tailscaleUrl}/api/dsh-computers/join.sh?key=`))
+    })
+  } finally {
+    await serverApp.close()
+  }
+
+  // --- loopback-only deployment: loopbackOnly true + command embeds loopback --
+  const loopbackApp = await mount({ ...FAST_CONFIG, stateDir: dir }, { addressDeps: loopbackOnlyDeps })
+  try {
+    const origin = loopbackApp.origin
+    const port = new URL(origin).port
+    await check('addresses: loopback-only deployment reports loopbackOnly and embeds 127.0.0.1', async () => {
+      const state = await call(origin, `${API}/state`)
+      assert.equal(state.data.loopbackOnly, true)
+      assert.deepEqual(state.data.serverUrls.map((item) => item.kind), ['loopback'])
+      assert.equal(state.data.serverUrl, `http://127.0.0.1:${port}`)
+      const response = await call(origin, `${API}/keys`, { method: 'POST', body: { os: 'macos' } })
+      assert.equal(response.data.loopbackOnly, true)
+      assert.ok(response.data.command.includes(`http://127.0.0.1:${port}/api/dsh-computers/join.sh?key=`))
+    })
+  } finally {
+    await loopbackApp.close()
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Phase L — owned Tailscale Serve tunnel (v1.4.0)
+// ---------------------------------------------------------------------------
+
+/** Stub for the tunnel's exec seam: record invocations, answer by argv. */
+function createTunnelExecPlan({ serveStatus = '', serveCode = 0, serveError = null, dnsName = 'hub.tail1234.ts.net.' } = {}) {
+  const calls = []
+  const run = async ({ args }) => {
+    calls.push([...args])
+    if (args[0] === 'serve' && args[1] === 'status') {
+      return { code: 0, stdout: serveStatus, stderr: '', error: null }
+    }
+    if (args[0] === 'serve') {
+      return serveCode === 0
+        ? { code: 0, stdout: '', stderr: '', error: null }
+        : { code: serveCode, stdout: '', stderr: 'Error: serve failed', error: serveError }
+    }
+    if (args[0] === 'status') {
+      return {
+        code: dnsName === null ? 1 : 0,
+        stdout: dnsName === null ? '' : JSON.stringify({ Self: { DNSName: dnsName } }),
+        stderr: '',
+        error: dnsName === null ? 'status failed' : null,
+      }
+    }
+    return { code: 0, stdout: '', stderr: '', error: null }
+  }
+  return { calls, run }
+}
+
+/** Poll /state until `predicate` accepts the payload (tunnel setup is async). */
+async function waitForTunnelState(origin, predicate, timeoutMs = 4000) {
+  const deadline = Date.now() + timeoutMs
+  let last = null
+  while (Date.now() < deadline) {
+    const response = await call(origin, `${API}/state`)
+    last = response.data
+    if (predicate(last)) return last
+    await sleep(40)
+  }
+  throw new Error(`tunnel state did not settle; last = ${JSON.stringify(last)}`)
+}
+
+async function phaseL(root) {
+  const dir = join(root, 'l')
+  seedState(dir, { version: 1, computers: [], pendingKeys: [] })
+
+  const makeManager = async (tunnelConfig, plan) => {
+    const manager = createTunnel({
+      ctx: { webServer: { port: 49749 }, tunnelExec: plan.run },
+      config: tunnelConfig,
+      onWarn: () => {},
+    })
+    await manager.start()
+    return manager
+  }
+
+  await check('tunnel: serves our bound port and derives the ts.net URL', async () => {
+    const plan = createTunnelExecPlan()
+    const manager = await makeManager({ enabled: true, httpsPort: 8443 }, plan)
+    assert.deepEqual(manager.status(), {
+      enabled: true,
+      configured: true,
+      url: 'https://hub.tail1234.ts.net:8443',
+      targetPort: 49749,
+      error: null,
+    })
+    assert.ok(
+      plan.calls.some((args) => args.join(' ') === 'serve --bg --https=8443 http://127.0.0.1:49749'),
+      `serve command line: ${JSON.stringify(plan.calls)}`,
+    )
+    assert.ok(plan.calls.some((args) => args.join(' ') === 'status --json'))
+  })
+
+  await check('tunnel: re-point is idempotent when Serve already targets our port', async () => {
+    const plan = createTunnelExecPlan({
+      serveStatus: JSON.stringify({
+        Web: { 'hub.tail1234.ts.net:8443': { Handlers: { '/': { Proxy: 'http://127.0.0.1:49749' } } } },
+      }),
+    })
+    const manager = await makeManager({ enabled: true, httpsPort: 8443 }, plan)
+    assert.equal(manager.status().configured, true)
+    assert.equal(manager.status().url, 'https://hub.tail1234.ts.net:8443')
+    assert.equal(
+      plan.calls.some((args) => args[0] === 'serve' && args[1] !== 'status'),
+      false,
+      'an existing mapping to our port is not re-pointed',
+    )
+  })
+
+  await check('tunnel: custom httpsPort and a clean DNS name', async () => {
+    const plan = createTunnelExecPlan({ dnsName: 'workstation.tail9999.ts.net' })
+    const manager = await makeManager({ enabled: true, httpsPort: 9443 }, plan)
+    assert.equal(manager.status().url, 'https://workstation.tail9999.ts.net:9443')
+    assert.ok(plan.calls.some((args) => args.join(' ') === 'serve --bg --https=9443 http://127.0.0.1:49749'))
+  })
+
+  await check('tunnel: a failing serve command surfaces an error and no URL', async () => {
+    const plan = createTunnelExecPlan({ serveCode: 1, serveError: 'permission denied' })
+    const manager = await makeManager({ enabled: true, httpsPort: 8443 }, plan)
+    const state = manager.status()
+    assert.equal(state.enabled, true)
+    assert.equal(state.configured, false)
+    assert.equal(state.url, '')
+    assert.equal(state.targetPort, 49749)
+    assert.match(state.error, /permission denied|serve failed|status/)
+  })
+
+  await check('tunnel: disabled by default does nothing', async () => {
+    const plan = createTunnelExecPlan()
+    const manager = await makeManager({ enabled: false, httpsPort: 8443 }, plan)
+    assert.deepEqual(manager.status(), {
+      enabled: false, configured: false, url: '', targetPort: null, error: null,
+    })
+    assert.deepEqual(plan.calls, [])
+  })
+
+  // --- HTTP integration: /state.tunnel + the tunnel address candidate ------
+  const addressDeps = {
+    probeTailscale: async () => '100.121.33.106',
+    interfaces: { lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }] },
+    hostname: 'smoke-host.local',
+  }
+  const plan = createTunnelExecPlan()
+  const app = await mount(
+    { ...FAST_CONFIG, stateDir: dir, tailscaleServe: { enabled: true, httpsPort: 8443 } },
+    { addressDeps, tunnelExec: plan.run },
+  )
+  try {
+    const origin = app.origin
+    const port = new URL(origin).port
+    await check('tunnel: /state exposes it and the tunnel URL becomes the recommendation', async () => {
+      const state = await waitForTunnelState(origin, (data) => data.tunnel.configured === true)
+      assert.deepEqual(state.tunnel, {
+        enabled: true,
+        configured: true,
+        url: 'https://hub.tail1234.ts.net:8443',
+        targetPort: Number(port),
+        error: null,
+      })
+      assert.equal(state.serverUrl, 'https://hub.tail1234.ts.net:8443')
+      assert.equal(state.loopbackOnly, false)
+      assert.deepEqual(state.serverUrls[0], {
+        url: 'https://hub.tail1234.ts.net:8443',
+        kind: 'tunnel',
+        label: 'Tailscale Serve',
+        recommended: true,
+        reachable: true,
+      })
+      // The serve target really is the port this listener bound.
+      assert.ok(plan.calls.some((args) => args.join(' ') === `serve --bg --https=8443 http://127.0.0.1:${port}`))
+    })
+
+    await check('tunnel: /keys embeds the ts.net URL, never loopback', async () => {
+      const response = await call(origin, `${API}/keys`, { method: 'POST', body: { os: 'macos' } })
+      assert.equal(response.status, 200)
+      assert.equal(response.data.serverUrl, 'https://hub.tail1234.ts.net:8443')
+      assert.equal(response.data.loopbackOnly, false)
+      assert.ok(response.data.command.includes('https://hub.tail1234.ts.net:8443/api/dsh-computers/join.sh?key='))
+      assert.ok(!response.data.command.includes('127.0.0.1'))
+      assert.ok(!response.data.command.includes('100.121.33.106'))
+    })
+  } finally {
+    await app.close()
+  }
+
+  // --- failure integration: no candidate, the error is surfaced -------------
+  const failingPlan = createTunnelExecPlan({ serveCode: 1, serveError: 'tailscale is not running' })
+  const failingApp = await mount(
+    { ...FAST_CONFIG, stateDir: dir, tailscaleServe: { enabled: true, httpsPort: 8443 } },
+    { addressDeps, tunnelExec: failingPlan.run },
+  )
+  try {
+    const origin = failingApp.origin
+    const port = new URL(origin).port
+    await check('tunnel: a failed serve keeps loopback recommended and surfaces the error', async () => {
+      const state = await waitForTunnelState(origin, (data) => data.tunnel.error !== null)
+      assert.equal(state.tunnel.enabled, true)
+      assert.equal(state.tunnel.configured, false)
+      assert.equal(state.tunnel.url, '')
+      assert.match(state.tunnel.error, /tailscale is not running|serve failed/)
+      assert.equal(state.serverUrl, `http://127.0.0.1:${port}`)
+      assert.equal(state.loopbackOnly, true)
+      assert.equal(state.serverUrls.some((item) => item.kind === 'tunnel'), false, 'no fake tunnel candidate')
+      const response = await call(origin, `${API}/keys`, { method: 'POST', body: { os: 'macos' } })
+      assert.ok(response.data.command.includes(`http://127.0.0.1:${port}/api/dsh-computers/join.sh?key=`))
+    })
+  } finally {
+    await failingApp.close()
+  }
+
+  // --- disabled integration: the default shape stays inert ------------------
+  const disabledApp = await mount({ ...FAST_CONFIG, stateDir: dir }, { addressDeps })
+  try {
+    await check('tunnel: disabled config reports the inert shape and adds no candidate', async () => {
+      const state = await call(disabledApp.origin, `${API}/state`)
+      assert.deepEqual(state.data.tunnel, { enabled: false, configured: false, url: '', targetPort: null, error: null })
+      assert.equal(state.data.serverUrls.some((item) => item.kind === 'tunnel'), false)
+    })
+  } finally {
+    await disabledApp.close()
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -2997,6 +3560,8 @@ try {
   await phaseH(root)
   await phaseI(root)
   await phaseJ(root)
+  await phaseK(root)
+  await phaseL(root)
 } finally {
   rmSync(root, { recursive: true, force: true })
   clearTimeout(watchdog)

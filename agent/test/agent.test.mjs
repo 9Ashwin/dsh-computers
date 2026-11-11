@@ -386,6 +386,7 @@ test('run sends heartbeats and picks up the server display name', async (t) => {
   const heartbeat = await mock.waitForHeartbeat({ timeoutMs: 10_000 })
   assert.equal(heartbeat.body.meta.agentVersion, AGENT_VERSION)
   assert.deepEqual(heartbeat.body.meta.capabilities, ['exec', 'fs'])
+  assert.equal(heartbeat.body.meta.mode, 'service')
   assert.ok(heartbeat.body.meta.memoryBytes > 0)
 
   mock.pushConfig({ name: 'Renamed Mac' })
@@ -643,6 +644,7 @@ test('enroll reports capabilities and §11.6 handshake metadata', async (t) => {
   assert.deepEqual(enrollment.capabilities, ['exec', 'fs'])
   assert.equal(enrollment.metadata.version, 1)
   assert.equal(enrollment.metadata.agentVersion, AGENT_VERSION)
+  assert.equal(enrollment.metadata.mode, 'service', 'CLI enrollment is the service mode')
   assert.equal(enrollment.metadata.hostname, os.hostname())
   assert.equal(enrollment.metadata.os, process.platform)
   assert.equal(enrollment.metadata.arch, process.arch)
@@ -686,6 +688,7 @@ test('every reconnect carries the handshake metadata header (§11.6)', async (t)
   const metadata = JSON.parse(Buffer.from(header, 'base64url').toString('utf8'))
   assert.equal(metadata.version, 1)
   assert.equal(metadata.agentVersion, AGENT_VERSION)
+  assert.equal(metadata.mode, 'service', 'CLI run reports service mode on every reconnect')
   assert.deepEqual(metadata.capabilities, ['exec', 'fs'])
   assert.equal(await fs.realpath(metadata.workspaceBase), await fs.realpath(os.homedir()))
   assert.equal(metadata.hostname, os.hostname())
@@ -775,11 +778,11 @@ test('embedded status() exposes capabilities and the host feature set', async (t
   const script = [
     `import { startRuntime } from ${JSON.stringify(agentPath)}`,
     'const options = JSON.parse(process.env.DSHC_EMBEDDED_OPTIONS)',
-    'const runtime = startRuntime({ serverUrl: options.serverUrl, token: options.token, computerId: options.computerId, log: () => {}, onState: () => {} })',
+    'const runtime = startRuntime({ serverUrl: options.serverUrl, token: options.token, computerId: options.computerId, mode: "embedded", log: () => {}, onState: () => {} })',
     'const deadline = Date.now() + 10000',
     'while (!runtime.status().connected && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25))',
     'const status = runtime.status()',
-    'await new Promise((resolve) => process.stdout.write("STATUS " + JSON.stringify({ capabilities: status.capabilities, features: status.features, workspaceBase: status.workspaceBase }) + String.fromCharCode(10), resolve))',
+    'await new Promise((resolve) => process.stdout.write("STATUS " + JSON.stringify({ mode: status.mode, capabilities: status.capabilities, features: status.features, workspaceBase: status.workspaceBase }) + String.fromCharCode(10), resolve))',
     'await runtime.stop()',
     'process.exit(0)',
   ].join('\n')
@@ -792,8 +795,13 @@ test('embedded status() exposes capabilities and the host feature set', async (t
   t.after(() => embedded.stop())
   await embedded.waitForOutput(/STATUS /)
   const status = readJsonLine(embedded.stdout, 'STATUS ')
+  assert.equal(status.mode, 'embedded', 'the plugin host passes mode: "embedded"')
   assert.deepEqual(status.capabilities, ['exec', 'fs'])
   assert.deepEqual(status.features, ['stream', 'fs'])
+  // The connect header from the embedded runtime also says embedded.
+  const embeddedConnect = mock.eventsRequests.at(-1)
+  const embeddedMetadata = JSON.parse(Buffer.from(embeddedConnect.headers['x-dsh-computers-metadata'], 'base64url').toString('utf8'))
+  assert.equal(embeddedMetadata.mode, 'embedded')
   assert.equal(await fs.realpath(status.workspaceBase), await fs.realpath(os.homedir()))
   await embedded.closed
 })

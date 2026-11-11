@@ -35,6 +35,9 @@ window.__ModuleLoader__.load({
     const SECTION_ORDER = 45;
     const TARGET_SLOT_ID = 'computers-target';
     const TARGET_SLOT_ORDER = 20;
+    /* Sidebar panel-list row for the 电脑管理 main panel (order after the
+     * shipped plugin-manager row, which uses 0). */
+    const PANEL_ORDER = 20;
     const STYLE_ID = 'dsh-computers/client.css';
     const STATE_POLL_MS = 5000;
     const KEY_POLL_MS = 2000;
@@ -201,6 +204,35 @@ window.__ModuleLoader__.load({
       'drift.close': '关闭',
       'drift.unknownVersion': '未知版本',
       'drift.runtimeHint': '本机 agent 版本落后于服务器，升级 DSH 后重启生效',
+      'drift.embedded.body': '这台电脑是通过 DSH 插件自带的本机运行时接入的，升级插件本身即可。',
+      'drift.embedded.steps': '打开 设置 → 插件市场 → 已安装 → dsh-computers → 检查更新，然后重启 DSH。',
+      'drift.embedded.cliLabel': '或者在命令行里安装',
+      'mode.embedded': '插件运行时',
+      'mode.service': '系统服务',
+      'addr.title': '本机地址',
+      'addr.hint': '别的电脑用这个地址 + 一个加入密钥即可连到这台电脑',
+      'addr.recommended': '建议',
+      'addr.unreachable': '未监听',
+      'addr.loopbackOnly': '只有本机地址可用：其他电脑连不上。独立部署的 dsh web 可以绑 Tailscale/局域网地址（dsh web --host <ip>）；桌面端不要改 webserver.host（窗口会连不上），应在前面加一层 tailscale serve 并把它写进 publicUrl。',
+      'addr.loopbackHint': '443 可能已被占用，换一个端口即可。',
+      'addr.example': '例如',
+
+      'addr.loopbackOnlyShort': '只有本机地址可用，其他电脑连不上',
+      'addr.kind.public': '公网',
+      'addr.kind.forwarded': '代理',
+      'addr.kind.host': '主机',
+      'addr.kind.tailscale': 'Tailscale',
+      'addr.kind.lan': '局域网',
+      'addr.kind.mdns': '本机名',
+      'addr.kind.loopback': '本机',
+      'addr.kind.tunnel': 'Tailscale Serve',
+      'addr.tunnelPending': '正在配置 Tailscale Serve…',
+      'addr.tunnelError': 'Tailscale Serve 配置失败：{message}',
+      'addr.kind.other': '地址',
+      'addr.listLabel': '可用的服务器地址',
+      'addr.listening': '本机监听：{address}',
+      'upstream.title': '作为运行时',
+      'upstream.direction': '本机向这个服务器上报',
       'target.offline': '离线',
       'target.failed': '切换失败：{message}',
     };
@@ -342,6 +374,35 @@ window.__ModuleLoader__.load({
       'drift.close': 'Close',
       'drift.unknownVersion': 'unknown version',
       'drift.runtimeHint': 'This computer’s agent is behind the server; update DSH and restart',
+      'drift.embedded.body': 'This computer is connected through the DSH plugin’s own local runtime, so upgrading the plugin is what upgrades it.',
+      'drift.embedded.steps': 'Open Settings → Plugin Market → Installed → dsh-computers → Check for updates, then restart DSH.',
+      'drift.embedded.cliLabel': 'Or install it from the command line',
+      'mode.embedded': 'Plugin runtime',
+      'mode.service': 'System service',
+      'addr.title': 'This machine’s addresses',
+      'addr.hint': 'Another computer joins this one with this address plus an enrollment key',
+      'addr.recommended': 'Suggested',
+      'addr.unreachable': 'Not listening',
+      'addr.loopbackOnly': 'Only a local address is available, so other computers cannot connect. A standalone dsh web can bind a Tailscale/LAN address (dsh web --host <ip>); in the desktop app do NOT change webserver.host (the window stops connecting) — put tailscale serve in front and set publicUrl instead.',
+      'addr.loopbackHint': '443 may already be taken; another port is fine.',
+      'addr.example': 'e.g.',
+
+      'addr.loopbackOnlyShort': 'Only a loopback address is available; other computers cannot connect',
+      'addr.kind.public': 'Public',
+      'addr.kind.forwarded': 'Proxy',
+      'addr.kind.host': 'Host',
+      'addr.kind.tailscale': 'Tailscale',
+      'addr.kind.lan': 'LAN',
+      'addr.kind.mdns': 'Local name',
+      'addr.kind.loopback': 'Loopback',
+      'addr.kind.tunnel': 'Tailscale Serve',
+      'addr.tunnelPending': 'Configuring Tailscale Serve…',
+      'addr.tunnelError': 'Tailscale Serve failed: {message}',
+      'addr.kind.other': 'Address',
+      'addr.listLabel': 'Available server addresses',
+      'addr.listening': 'Listening on {address}',
+      'upstream.title': 'As a runtime',
+      'upstream.direction': 'This machine reports to this server',
       'target.offline': 'Offline',
       'target.failed': 'Could not switch: {message}',
     };
@@ -512,6 +573,17 @@ window.__ModuleLoader__.load({
      * declarations, and every token falls back to its contract sibling rather
      * than to a hard-coded page color. */
     const CSS = String.raw`
+.dshc-page {
+  box-sizing: border-box;
+  height: 100%;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 22px clamp(16px, 4vw, 48px) 32px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-primary);
+}
+.dshc-page *, .dshc-page *::before, .dshc-page *::after { box-sizing: border-box; }
+.dshc-pageContent { max-width: 880px; margin: 0 auto; }
 .dshc-root {
   box-sizing: border-box;
   display: flex;
@@ -1191,6 +1263,13 @@ window.__ModuleLoader__.load({
   font-weight: 500;
   white-space: nowrap;
 }
+.dshc-modeHint {
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 10.5px;
+  line-height: 15px;
+  white-space: nowrap;
+}
 .dshc-driftChip {
   flex: none;
   display: inline-flex;
@@ -1217,6 +1296,12 @@ window.__ModuleLoader__.load({
   font-size: 11.5px;
   line-height: 16px;
 }
+.dshc-runtimeDirection {
+  margin-top: 2px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  line-height: 16px;
+}
 .dshc-runtimeAgent {
   margin-top: 2px;
   color: var(--dsw-alias-label-secondary);
@@ -1230,6 +1315,156 @@ window.__ModuleLoader__.load({
   font-size: 11.5px;
   line-height: 16px;
 }
+
+/* Address candidates (本机地址) + the connect-modal combobox (task-18). */
+.dshc-addrList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 10px;
+}
+.dshc-addrRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 2px;
+}
+.dshc-addrRow[data-muted="true"] { opacity: 0.72; }
+.dshc-addrDot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dsw-alias-state-idle-primary);
+}
+.dshc-addrDot[data-recommended="true"] { background: var(--dsw-alias-state-success-primary); }
+.dshc-addrKind {
+  flex: none;
+  min-width: 44px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.dshc-addrUrl,
+.dshc-addrComboUrl {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--dsw-alias-label-primary);
+}
+.dshc-addrUrl { flex: 1 1 auto; }
+.dshc-addrComboUrl { flex: 1 1 auto; text-align: left; }
+.dshc-addrBadge {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 5px;
+  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
+  color: var(--dsw-alias-label-secondary);
+  font-size: 10.5px;
+  line-height: 15px;
+  font-weight: 500;
+}
+.dshc-addrBadge.dshc-addrUnreachable {
+  border: 1px solid currentColor;
+  background: transparent;
+  color: var(--dsw-alias-state-warn-primary);
+}
+.dshc-addrOption[disabled] {
+  opacity: 0.62;
+  cursor: default;
+}
+@media (hover: hover) {
+  .dshc-addrOption[disabled]:hover { background: transparent; }
+}
+.dshc-addrCombo[aria-expanded="true"] { background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2)); }
+.dshc-addrListen {
+  margin: 8px 0 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 15px;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+}
+.dshc-addrWarn {
+  margin-top: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-1));
+}
+.dshc-addrWarnText {
+  margin: 0;
+  color: var(--dsw-alias-state-warn-primary);
+  font-size: 12px;
+  line-height: 18px;
+}
+.dshc-addrInlineWarn {
+  margin: 6px 0 0;
+  color: var(--dsw-alias-state-warn-primary);
+  font-size: 11.5px;
+  line-height: 16px;
+}
+.dshc-addrCombo {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 26px;
+  padding: 0 6px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .dshc-addrCombo:hover { background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2)); }
+}
+.dshc-addrCombo:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
+.dshc-addrCombo .dshc-targetChevron { margin-left: auto; }
+.dshc-addrListbox {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 6px;
+  padding: 4px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 9px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+.dshc-addrOption {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 28px;
+  padding: 3px 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 17px;
+  text-align: left;
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .dshc-addrOption:hover { background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2)); }
+}
+.dshc-addrOption:focus-visible {
+  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
+  outline: none;
+}
+.dshc-addrOption[aria-selected="true"] { background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2)); }
+.dshc-addrOption .dshc-addrKind { min-width: 40px; }
 
 /* Composer menu: the manage-access row replaces the old muted footer. */
 .dshc-menuSep {
@@ -1616,7 +1851,7 @@ window.__ModuleLoader__.load({
   .dshc-switchThumb { transition: none; }
 }
 @media (max-width: 480px) {
-  .dshc-badge { display: none; }
+  .dshc-badge, .dshc-capChip, .dshc-modeHint { display: none; }
   .dshc-overlay { padding: 16px; }
   .dshc-card { padding: 20px 16px; border-radius: 14px; }
   .dshc-row { padding-left: 13px; }
@@ -1774,6 +2009,84 @@ window.__ModuleLoader__.load({
       }),
     };
 
+    /* Address kind ids → localized labels (task-17 serverUrls[].kind). */
+    const ADDRESS_KIND_KEYS = {
+      public: 'addr.kind.public',
+      forwarded: 'addr.kind.forwarded',
+      host: 'addr.kind.host',
+      tailscale: 'addr.kind.tailscale',
+      lan: 'addr.kind.lan',
+      mdns: 'addr.kind.mdns',
+      loopback: 'addr.kind.loopback',
+      tunnel: 'addr.kind.tunnel',
+    };
+
+    /** @param {string} kind - serverUrls[].kind. @returns {string} short label. */
+    function addressKindLabel(kind) {
+      const key = ADDRESS_KIND_KEYS[kind];
+      return key === undefined ? t('addr.kind.other') : t(key);
+    }
+
+    /**
+     * Whether another machine can actually reach this candidate.
+     * Old hosts send no flag; treat a missing flag as reachable.
+     * @param {object} entry - serverUrls[] item.
+     * @returns {boolean} reachable.
+     */
+    function isReachableAddress(entry) {
+      return !(entry === null || typeof entry !== 'object' || entry.reachable === false);
+    }
+
+    /**
+     * Order candidates for display: a reachable recommended one first, other
+     * reachable ones next, unreachable ones after them, loopback last.
+     * @param {Array} urls - serverUrls.
+     * @returns {Array} display order.
+     */
+    function orderServerUrls(urls) {
+      const rank = (entry) => {
+        if (entry === null || typeof entry !== 'object') return 50;
+        if (!isReachableAddress(entry)) return entry.kind === 'loopback' ? 95 : 80;
+        if (entry.kind === 'loopback') return 90;
+        if (entry.recommended === true) return 0;
+        return 10;
+      };
+      return urls
+        .filter((entry) => entry && typeof entry.url === 'string' && entry.url !== '')
+        .slice()
+        .sort((a, b) => rank(a) - rank(b));
+    }
+
+    /**
+     * The address that should be copied/used: the recommended reachable one,
+     * else any reachable one, else the first candidate.
+     * @param {Array} urls - serverUrls.
+     * @returns {string} url or ''.
+     */
+    function preferredServerUrl(urls) {
+      const ordered = orderServerUrls(urls);
+      const reachable = ordered.find((entry) => isReachableAddress(entry));
+      if (reachable !== undefined) return reachable.url;
+      return ordered.length > 0 ? ordered[0].url : '';
+    }
+
+    /**
+     * The TCP port behind the first candidate, for the tailscale example.
+     * (Regex only: the browser URL global is not worth trusting in every host.)
+     * @param {Array} urls - serverUrls.
+     * @returns {string} port or ''.
+     */
+    function addressPort(urls) {
+      for (const entry of urls) {
+        if (entry === null || typeof entry !== 'object' || typeof entry.url !== 'string') continue;
+        const explicit = /^[a-z][a-z0-9+.-]*:\/\/(?:[^/?#@]*@)?(?:\[[^\]]+\]|[^/?#:]*):(\d+)/i.exec(entry.url);
+        if (explicit !== null) return explicit[1];
+        if (/^https:/i.test(entry.url)) return '443';
+        if (/^http:/i.test(entry.url)) return '80';
+      }
+      return '';
+    }
+
     /* Capability ids → localized chip labels; unknown ids render raw. */
     const CAPABILITY_KEYS = { exec: 'cap.exec', fs: 'cap.fs', pty: 'cap.pty' };
 
@@ -1781,6 +2094,39 @@ window.__ModuleLoader__.load({
     function capabilityLabel(capability) {
       const key = CAPABILITY_KEYS[capability];
       return key === undefined ? String(capability) : t(key);
+    }
+
+    /* The client root context, kept for the few late-bound services
+     * (`layout` is optional: a shell without it still gets every surface). */
+    let rootCtx = null;
+
+    /**
+     * Switch the central column to the 电脑管理 panel.
+     * @returns {boolean} true when the shell accepted the navigation.
+     */
+    function selectMainPanel() {
+      if (rootCtx === null) return false;
+      let layout = null;
+      try {
+        layout = typeof rootCtx.get === 'function' ? rootCtx.get('layout') : null;
+      } catch (error) {
+        layout = null;
+      }
+      if (layout === null) {
+        try {
+          layout = rootCtx.layout === undefined ? null : rootCtx.layout;
+        } catch (error) {
+          layout = null;
+        }
+      }
+      if (layout === null || typeof layout.selectPanel !== 'function') return false;
+      try {
+        layout.selectPanel(SECTION_ID);
+        return true;
+      } catch (error) {
+        /* The panel is not registered in this shell (older build). */
+        return false;
+      }
     }
 
     /** @param {object|null} data - a /state payload. @returns {string} 'hub' | 'runtime' | 'both'. */
@@ -1882,6 +2228,29 @@ window.__ModuleLoader__.load({
       }, []);
     }
 
+    /* Nested Escape owners: the topmost layer consumes Escape before the
+     * dialog that contains it (a combobox inside the connect modal). */
+    const escapeLayers = [];
+
+    /**
+     * Register an Escape handler that wins over the enclosing dialog's.
+     * @param {boolean} active - whether this layer currently owns Escape.
+     * @param {Function} handler - called on Escape.
+     */
+    function useEscapeLayer(active, handler) {
+      const handlerRef = React.useRef(handler);
+      handlerRef.current = handler;
+      React.useEffect(() => {
+        if (!active) return undefined;
+        const entry = { handler: () => handlerRef.current() };
+        escapeLayers.push(entry);
+        return () => {
+          const index = escapeLayers.indexOf(entry);
+          if (index >= 0) escapeLayers.splice(index, 1);
+        };
+      }, [active]);
+    }
+
     const FOCUSABLE = 'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], [tabindex="0"]';
 
     /**
@@ -1937,6 +2306,11 @@ window.__ModuleLoader__.load({
           if (event.key === 'Escape' && !event.shiftKey) {
             event.preventDefault();
             event.stopPropagation();
+            const top = escapeLayers.length > 0 ? escapeLayers[escapeLayers.length - 1] : null;
+            if (top !== null) {
+              top.handler();
+              return;
+            }
             closeRef.current();
             return;
           }
@@ -2019,20 +2393,19 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * One copyable value row — the primary content of the connect modal
-     * (server URL and enrollment key).
-     * @param {object} props - `label`, `value`, optional `hint`.
-     * @returns {object} row element.
+     * Clipboard state for one value (check feedback for 1.6 s).
+     * @param {string} value - text to copy.
+     * @returns {{copied: boolean, failed: boolean, copy: Function}} copy state.
      */
-    function CopyRow(props) {
+    function useCopyText(value) {
       const [copied, setCopied] = React.useState(false);
       const [failed, setFailed] = React.useState(false);
       const alive = React.useRef(true);
       React.useEffect(() => () => { alive.current = false; }, []);
       const copy = async () => {
-        if (typeof props.value !== 'string' || props.value === '') return;
+        if (typeof value !== 'string' || value === '') return;
         try {
-          await copyText(props.value);
+          await copyText(value);
           if (!alive.current) return;
           setCopied(true);
           setFailed(false);
@@ -2043,6 +2416,20 @@ window.__ModuleLoader__.load({
           if (alive.current) setFailed(true);
         }
       };
+      return { copied, failed, copy };
+    }
+
+    /**
+     * One copyable value row — the primary content of the connect modal
+     * (server URL and enrollment key).
+     * @param {object} props - `label`, `value`, optional `hint`.
+     * @returns {object} row element.
+     */
+    function CopyRow(props) {
+      const state = useCopyText(props.value);
+      const copied = state.copied;
+      const failed = state.failed;
+      const copy = state.copy;
       const action = t('connect.copyField', { field: props.label });
       return h('div', { className: props.stacked === true ? 'dshc-copyRow dshc-copyRow--stacked' : 'dshc-copyRow' },
         h('div', { className: 'dshc-copyRowTop' },
@@ -2087,6 +2474,10 @@ window.__ModuleLoader__.load({
       const capabilities = Array.isArray(computer.capabilities)
         ? computer.capabilities.filter((capability) => typeof capability === 'string' && capability !== '')
         : [];
+      /* How this machine is connected decides the upgrade path (v1.3.2). */
+      const modeLabel = computer.mode === 'embedded'
+        ? t('mode.embedded')
+        : (computer.mode === 'service' ? t('mode.service') : null);
       const drift = computer.updateRequired === true || computer.drift === true;
       return h('div', { className: 'dshc-row', 'data-online': online ? 'true' : 'false' },
         h('div', { className: 'dshc-rowMain' },
@@ -2102,6 +2493,9 @@ window.__ModuleLoader__.load({
             key: `cap-${capability}`,
             className: 'dshc-capChip',
           }, capabilityLabel(capability))),
+          modeLabel !== null
+            ? h('span', { key: 'mode', className: 'dshc-modeHint' }, modeLabel)
+            : null,
           drift
             ? h('button', {
               key: 'drift',
@@ -2419,11 +2813,31 @@ window.__ModuleLoader__.load({
         };
       }, [keyInfo]);
 
-      const command = keyInfo === null
+      const allCandidates = orderServerUrls(Array.isArray(keyInfo && keyInfo.serverUrls)
+        ? keyInfo.serverUrls
+        : (Array.isArray(props.serverUrls) ? props.serverUrls : []));
+      /* Every candidate stays visible so the list matches the settings block,
+       * but the picker only lets a reachable one be chosen, and the command
+       * base prefers the recommended reachable address. */
+      const urlCandidates = allCandidates;
+      const baseServerUrl = keyInfo && typeof keyInfo.serverUrl === 'string' ? keyInfo.serverUrl : '';
+      const [selectedUrl, setSelectedUrl] = React.useState('');
+      React.useEffect(() => {
+        const preferred = preferredServerUrl(urlCandidates);
+        setSelectedUrl(preferred !== '' ? preferred : baseServerUrl);
+      }, [keyInfo]);
+
+      const rawCommand = keyInfo === null
         ? ''
         : (os === 'windows'
           ? (typeof keyInfo.windowsCommand === 'string' ? keyInfo.windowsCommand : '')
           : (typeof keyInfo.command === 'string' ? keyInfo.command : ''));
+      /* /keys mints the command for the recommended address; switching the
+       * candidate rewrites that base in the string we already have. */
+      const command = (typeof rawCommand === 'string' && rawCommand !== '' && baseServerUrl !== ''
+        && selectedUrl !== '' && selectedUrl !== baseServerUrl)
+        ? rawCommand.split(baseServerUrl).join(selectedUrl)
+        : (typeof rawCommand === 'string' ? rawCommand : '');
 
       const copy = async () => {
         if (command === '') return;
@@ -2468,9 +2882,11 @@ window.__ModuleLoader__.load({
         { id: 'linux', label: t('connect.os.linux') },
       ];
 
-      const primaryServerUrl = keyInfo && typeof keyInfo.serverUrl === 'string' && keyInfo.serverUrl !== ''
-        ? keyInfo.serverUrl
-        : (typeof props.serverUrl === 'string' ? props.serverUrl : '');
+      const primaryServerUrl = selectedUrl !== ''
+        ? selectedUrl
+        : (keyInfo && typeof keyInfo.serverUrl === 'string' && keyInfo.serverUrl !== ''
+          ? keyInfo.serverUrl
+          : (typeof props.serverUrl === 'string' ? props.serverUrl : ''));
       const primaryKey = keyInfo && typeof keyInfo.key === 'string' ? keyInfo.key : '';
 
       return h(Dialog, {
@@ -2488,12 +2904,20 @@ window.__ModuleLoader__.load({
       },
       /* PRIMARY (task-8): the plugin path — paste these into 本机运行时. */
       h('div', { className: 'dshc-copyStack' },
-        h(CopyRow, {
-          key: 'server',
-          label: t('connect.serverUrl'),
-          hint: t('connect.serverUrlHint'),
-          value: primaryServerUrl,
-        }),
+        urlCandidates.length > 1
+          ? h(AddressPicker, {
+            key: 'server',
+            urls: urlCandidates,
+            value: primaryServerUrl,
+            loopbackOnly: (keyInfo && keyInfo.loopbackOnly === true) || props.loopbackOnly === true,
+            onChange: (url) => setSelectedUrl(url),
+          })
+          : h(CopyRow, {
+            key: 'server',
+            label: t('connect.serverUrl'),
+            hint: t('connect.serverUrlHint'),
+            value: primaryServerUrl,
+          }),
         h(CopyRow, {
           key: 'key',
           label: t('connect.enrollmentKey'),
@@ -2695,6 +3119,7 @@ window.__ModuleLoader__.load({
         const drift = status.updateRequired === true || status.drift === true;
         body = h('div', null,
           h('div', { className: 'dshc-runtimeName', title: name }, name),
+          h('div', { className: 'dshc-runtimeDirection' }, t('upstream.direction')),
           agentParts.length > 0
             ? h('div', { className: 'dshc-runtimeAgent' }, agentParts.join(' · '))
             : null,
@@ -2728,7 +3153,7 @@ window.__ModuleLoader__.load({
 
       return h('div', { className: 'dshc-card2' },
         h('div', { className: 'dshc-card2Head' },
-          h('span', { className: 'dshc-card2Title' }, t('runtime.title')),
+          h('span', { className: 'dshc-card2Title' }, t('upstream.title')),
           configured
             ? h('span', { className: 'dshc-status', 'data-state': phase },
               h('span', { className: 'dshc-dot', 'data-state': phase, 'aria-hidden': 'true' }),
@@ -2916,6 +3341,8 @@ window.__ModuleLoader__.load({
       const showRuntime = role !== null && role !== 'hub';
       const showComputers = role !== 'runtime';
       const canConnect = role !== 'runtime';
+      const serverUrls = data && Array.isArray(data.serverUrls) ? data.serverUrls : null;
+      const loopbackOnly = data !== null && data.loopbackOnly === true;
 
       let body;
       if (view.phase === 'loading' && computers === null) body = h(Skeleton);
@@ -2945,6 +3372,8 @@ window.__ModuleLoader__.load({
       if (dialog !== null && dialog.kind === 'connect') {
         layer = h(ConnectModal, {
           serverUrl: data && typeof data.serverUrl === 'string' ? data.serverUrl : '',
+          serverUrls,
+          loopbackOnly,
           onClose: () => setDialog(null),
           onConnected: handleConnected,
         });
@@ -2970,6 +3399,9 @@ window.__ModuleLoader__.load({
           computer: dialog.computer,
           serverUrl: data && typeof data.serverUrl === 'string' ? data.serverUrl : '',
           expectedVersion: data && typeof data.agentVersion === 'string' ? data.agentVersion : '',
+          pluginVersion: data && typeof data.pluginVersion === 'string'
+            ? data.pluginVersion
+            : (data && typeof data.serverVersion === 'string' ? data.serverVersion : ''),
           onClose: () => setDialog(null),
         });
       } else if (dialog !== null && dialog.kind === 'delete' && dialog.computer) {
@@ -3020,6 +3452,15 @@ window.__ModuleLoader__.load({
             }, h(IconPlus, { size: 15 }), t('connect.action'))
             : null),
         notice !== null ? h(Notice, { kind: notice.kind, text: notice.text }) : null,
+        showComputers
+          ? h(AddressCard, {
+            serverUrls,
+            loopbackOnly,
+            listener: data && data.listener && typeof data.listener === 'object' ? data.listener : null,
+            tunnel: data && data.tunnel && typeof data.tunnel === 'object' ? data.tunnel : null,
+            serverUrl: data && typeof data.serverUrl === 'string' ? data.serverUrl : '',
+          })
+          : null,
         showRuntime
           ? h(RuntimeCard, {
             view: runtime,
@@ -3096,18 +3537,41 @@ window.__ModuleLoader__.load({
       const expected = typeof props.expectedVersion === 'string' && props.expectedVersion !== ''
         ? props.expectedVersion
         : '';
+      const pluginVersion = typeof props.pluginVersion === 'string' && props.pluginVersion !== ''
+        ? props.pluginVersion
+        : '';
+      const cliCommand = pluginVersion === ''
+        ? 'dsh plugin install dsh-computers'
+        : `dsh plugin install dsh-computers@${pluginVersion}`;
+      const footer = [
+        h('button', {
+          key: 'close',
+          type: 'button',
+          className: 'dshc-primary',
+          onClick: props.onClose,
+        }, t('drift.close')),
+      ];
+
+      /* A machine connected through the plugin's own runtime has no
+       * ~/.dsh-computers/agent.mjs: the upgrade is a plugin update. */
+      if (computer.mode === 'embedded') {
+        return h(Dialog, {
+          title: t('drift.title'),
+          size: 'sm',
+          onClose: props.onClose,
+          footer,
+        },
+        h('p', { className: 'dshc-dialogBody' }, t('drift.embedded.body')),
+        h('p', { className: 'dshc-dialogBody', style: { marginTop: '6px' } }, t('drift.embedded.steps')),
+        h('div', { className: 'dshc-copyStack', style: { marginTop: '12px' } },
+          h(CopyRow, { label: t('drift.embedded.cliLabel'), value: cliCommand, stacked: true })));
+      }
+
       return h(Dialog, {
         title: t('drift.title'),
         size: 'sm',
         onClose: props.onClose,
-        footer: [
-          h('button', {
-            key: 'close',
-            type: 'button',
-            className: 'dshc-primary',
-            onClick: props.onClose,
-          }, t('drift.close')),
-        ],
+        footer,
       },
       h('p', { className: 'dshc-dialogBody' }, t('drift.body', { current })),
       expected !== ''
@@ -3116,6 +3580,256 @@ window.__ModuleLoader__.load({
       h('div', { className: 'dshc-copyStack', style: { marginTop: '12px' } },
         h(CopyRow, { label: t('drift.commandLabel'), value: command, stacked: true })),
       h('p', { className: 'dshc-hint' }, t('drift.hint')));
+    }
+
+    /**
+     * Connect-modal address selector: a combobox over the reachable
+     * candidates, so nobody copies a loopback address by accident.
+     * @param {object} props - `urls`, `value`, `onChange`, `loopbackOnly`.
+     * @returns {object} row element.
+     */
+    function AddressPicker(props) {
+      const options = orderServerUrls(Array.isArray(props.urls) ? props.urls : []);
+      const choices = options.some((entry) => isReachableAddress(entry))
+        ? options.filter((entry) => isReachableAddress(entry))
+        : options;
+      const [open, setOpen] = React.useState(false);
+      const listRef = React.useRef(null);
+      const state = useCopyText(props.value);
+      useEscapeLayer(open, () => setOpen(false));
+      const current = choices.find((entry) => entry.url === props.value) || choices[0] || { url: '', kind: '' };
+
+      React.useEffect(() => {
+        if (!open) return undefined;
+        const list = listRef.current;
+        if (list === null || typeof list.querySelectorAll !== 'function') return undefined;
+        const focusOption = (offset) => {
+          let items = [];
+          try {
+            items = Array.prototype.slice.call(list.querySelectorAll('[role="option"]:not([disabled])'));
+          } catch (error) {
+            return;
+          }
+          if (items.length === 0) return;
+          const active = typeof document !== 'undefined' ? document.activeElement : null;
+          const index = items.indexOf(active);
+          const next = offset === 'first'
+            ? 0
+            : (offset === 'last'
+              ? items.length - 1
+              : (index < 0 ? 0 : (index + offset + items.length) % items.length));
+          try {
+            items[next].focus();
+          } catch (error) {
+            /* ignore */
+          }
+        };
+        focusOption(0);
+        const onKeyDown = (event) => {
+          if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            event.stopPropagation();
+            focusOption(1);
+          } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            event.stopPropagation();
+            focusOption(-1);
+          } else if (event.key === 'Home') {
+            event.preventDefault();
+            event.stopPropagation();
+            focusOption('first');
+          } else if (event.key === 'End') {
+            event.preventDefault();
+            event.stopPropagation();
+            focusOption('last');
+          }
+        };
+        list.addEventListener('keydown', onKeyDown);
+        return () => list.removeEventListener('keydown', onKeyDown);
+      }, [open]);
+
+      const action = t('connect.copyField', { field: props.value });
+      return h('div', { className: 'dshc-copyRow dshc-copyRow--stacked dshc-addrPicker' },
+        h('div', { className: 'dshc-copyRowTop' },
+          h('span', { className: 'dshc-copyRowKey' }, t('connect.serverUrl')),
+          h('button', {
+            type: 'button',
+            className: 'dshc-addrCombo',
+            role: 'combobox',
+            'aria-haspopup': 'listbox',
+            'aria-expanded': open ? 'true' : 'false',
+            'aria-controls': 'dshc-addr-listbox',
+            'aria-label': t('addr.listLabel'),
+            onClick: () => setOpen((value) => !value),
+            onKeyDown: (event) => {
+              if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+                event.preventDefault();
+                setOpen(true);
+              } else if ((event.key === 'Enter' || event.key === ' ') && open) {
+                event.preventDefault();
+                setOpen(false);
+              }
+            },
+          },
+            h('span', { className: 'dshc-addrKind' }, addressKindLabel(current.kind)),
+            h('code', { className: 'dshc-addrComboUrl', title: current.url }, current.url),
+            h(IconChevron, { size: 12, className: 'dshc-targetChevron' })),
+          h('button', {
+            type: 'button',
+            className: 'dshc-copyRowBtn',
+            'data-copied': state.copied ? 'true' : 'false',
+            'aria-label': action,
+            title: state.copied ? t('connect.copied') : action,
+            disabled: typeof props.value !== 'string' || props.value === '',
+            onClick: () => { void state.copy(); },
+          }, state.copied ? h(IconCheck, { size: 13 }) : h(IconCopy, { size: 13 }))),
+        open
+          ? h('div', {
+            ref: listRef,
+            id: 'dshc-addr-listbox',
+            className: 'dshc-addrListbox',
+            role: 'listbox',
+            'aria-label': t('addr.listLabel'),
+          }, options.map((entry) => {
+            const reachable = isReachableAddress(entry);
+            const selectable = choices.some((choice) => choice.url === entry.url);
+            return h('button', {
+              key: entry.url,
+              type: 'button',
+              role: 'option',
+              'aria-selected': entry.url === props.value ? 'true' : 'false',
+              'aria-disabled': selectable ? 'false' : 'true',
+              'data-unreachable': reachable ? 'false' : 'true',
+              className: 'dshc-addrOption',
+              tabIndex: -1,
+              disabled: !selectable,
+              onClick: () => {
+                if (!selectable) return;
+                props.onChange(entry.url);
+                setOpen(false);
+              },
+            },
+            h('span', { className: 'dshc-addrDot', 'data-recommended': entry.url === preferredServerUrl(options) ? 'true' : 'false', 'aria-hidden': 'true' }),
+            h('span', { className: 'dshc-addrKind' }, addressKindLabel(entry.kind)),
+            h('code', { className: 'dshc-addrComboUrl', title: entry.url }, entry.url),
+            !reachable
+              ? h('span', { className: 'dshc-addrBadge dshc-addrUnreachable' }, t('addr.unreachable'))
+              : null,
+            entry.url === props.value ? h(IconCheck, { size: 12, className: 'dshc-menuCheck' }) : null);
+          }))
+          : null,
+        props.loopbackOnly === true
+          ? h('p', { className: 'dshc-addrInlineWarn' }, t('addr.loopbackOnlyShort'))
+          : null,
+        h('p', { className: 'dshc-copyRowHint' }, t('connect.serverUrlHint')));
+    }
+
+    /**
+     * One reachable address of this machine (task-17 serverUrls[]).
+     * @param {object} props - `entry` ({url, kind, label, recommended}), `muted`.
+     * @returns {object} row element.
+     */
+    function AddressRow(props) {
+      const entry = props.entry || {};
+      const url = typeof entry.url === 'string' ? entry.url : '';
+      const state = useCopyText(url);
+      const kind = typeof entry.label === 'string' && entry.label !== ''
+        ? entry.label
+        : addressKindLabel(entry.kind);
+      const reachable = isReachableAddress(entry);
+      const preferred = props.preferred === true && reachable;
+      const loopback = entry.kind === 'loopback';
+      const action = t('connect.copyField', { field: url });
+      return h('div', {
+        className: 'dshc-addrRow',
+        'data-recommended': preferred ? 'true' : 'false',
+        'data-muted': loopback || !reachable ? 'true' : 'false',
+        'data-unreachable': reachable ? 'false' : 'true',
+      },
+      h('span', {
+        className: 'dshc-addrDot',
+        'data-recommended': preferred ? 'true' : 'false',
+        'aria-hidden': 'true',
+      }),
+      h('span', { className: 'dshc-addrKind' }, kind),
+      h('code', { className: 'dshc-addrUrl', title: url }, url),
+      !reachable
+        ? h('span', { className: 'dshc-addrBadge dshc-addrUnreachable' }, t('addr.unreachable'))
+        : null,
+      preferred ? h('span', { className: 'dshc-addrBadge' }, t('addr.recommended')) : null,
+      h('button', {
+        type: 'button',
+        className: 'dshc-copyRowBtn',
+        'data-copied': state.copied ? 'true' : 'false',
+        'aria-label': action,
+        title: state.copied ? t('connect.copied') : action,
+        disabled: url === '',
+        onClick: () => { void state.copy(); },
+      }, state.copied ? h(IconCheck, { size: 13 }) : h(IconCopy, { size: 13 })),
+      h('span', { className: 'dshc-sr', role: 'status', 'aria-live': 'polite' },
+        state.copied ? t('connect.copied') : (state.failed ? t('connect.copyFailed') : '')));
+    }
+
+    /**
+     * 「本机地址」 block: every reachable candidate, recommended first, loopback
+     * muted last, with the loopback-only warning when nothing else exists.
+     * @param {object} props - `serverUrls`, `loopbackOnly`.
+     * @returns {object|null} card element, or null when the host sends nothing.
+     */
+    function AddressCard(props) {
+      let urls = orderServerUrls(Array.isArray(props.serverUrls) ? props.serverUrls : []);
+      const fallbackUrl = typeof props.serverUrl === 'string' && props.serverUrl !== '' ? props.serverUrl : '';
+      /* No port to advertise: the host sends an empty list. Show the single
+       * serverUrl as a loopback candidate so the warning still explains it. */
+      if (urls.length === 0) {
+        if (fallbackUrl === '') return null;
+        urls = [{ url: fallbackUrl, kind: 'loopback', recommended: true }];
+      }
+      const loopbackOnly = props.loopbackOnly === true
+        || urls.every((entry) => entry.kind === 'loopback');
+      const preferredUrl = preferredServerUrl(urls);
+      const tunnel = props.tunnel && typeof props.tunnel === 'object' ? props.tunnel : null;
+      let tunnelLine = null;
+      if (tunnel !== null && tunnel.enabled === true) {
+        if (typeof tunnel.error === 'string' && tunnel.error !== '') {
+          tunnelLine = h('p', { className: 'dshc-addrInlineWarn' },
+            t('addr.tunnelError', { message: tunnel.error }));
+        } else if (tunnel.configured !== true) {
+          tunnelLine = h('p', { className: 'dshc-addrListen' }, t('addr.tunnelPending'));
+        }
+      }
+      const listenerPort = props.listener && typeof props.listener.port === 'number'
+        ? String(props.listener.port)
+        : addressPort(urls);
+      const listenerHost = props.listener && typeof props.listener.host === 'string' && props.listener.host !== ''
+        ? props.listener.host
+        : '';
+      const listenerAddress = listenerHost === ''
+        ? ''
+        : `${listenerHost}${listenerPort === '' ? '' : `:${listenerPort}`}`;
+      return h('div', { className: 'dshc-card2' },
+        h('div', { className: 'dshc-card2Head' },
+          h('span', { className: 'dshc-card2Title' }, t('addr.title'))),
+        h('div', { className: 'dshc-addrList' }, urls.map((entry) => h(AddressRow, {
+          key: entry.url,
+          entry,
+          preferred: entry.url === preferredUrl,
+        }))),
+        listenerAddress !== ''
+          ? h('p', { className: 'dshc-addrListen' }, t('addr.listening', { address: listenerAddress }))
+          : null,
+        tunnelLine,
+        loopbackOnly
+          ? h('div', { className: 'dshc-addrWarn' },
+            h('p', { className: 'dshc-addrWarnText' }, t('addr.loopbackOnly')),
+            h('div', { className: 'dshc-copyStack' },
+              h(CopyRow, {
+                label: t('addr.example'),
+                value: `tailscale serve --bg --https=8443 http://127.0.0.1:${listenerPort === '' ? '<port>' : listenerPort}`,
+                stacked: true,
+              })),
+            h('p', { className: 'dshc-hint' }, t('addr.loopbackHint')))
+          : h('p', { className: 'dshc-hint' }, t('addr.hint')));
     }
 
     /**
@@ -3390,6 +4104,34 @@ window.__ModuleLoader__.load({
       },
       body,
       failure !== null ? h('p', { className: 'dshc-formError', role: 'alert' }, failure) : null);
+    }
+
+    // #endregion
+
+    // #region main panel
+
+    /**
+     * `sidebar.panellist` icon: the shell owns the row button, label and the
+     * click that selects the matching `main` panel.
+     * @param {object} props - `{ size, active }` from the sidebar.
+     * @returns {object} monitor icon.
+     */
+    function SidebarPanelIcon(props) {
+      const size = props && typeof props.size === 'number' ? props.size : 16;
+      return h(IconMonitor, { size });
+    }
+
+    /**
+     * The `main` panel page: the same 电脑管理 view as the settings section,
+     * in a panel-scoped scroll container (the settings shell supplies its own
+     * padding; a main panel has none).
+     * @returns {object} page element.
+     */
+    function ComputersPanelPage() {
+      useStyles();
+      useLocaleRevision();
+      return h('div', { className: 'dshc-page' },
+        h('div', { className: 'dshc-pageContent' }, h(ComputersPanel)));
     }
 
     // #endregion
@@ -3804,7 +4546,12 @@ window.__ModuleLoader__.load({
               if (list === null) return;
               setAllowedIds(list.filter((entry) => entry.allowed === true).map((entry) => entry.id));
             },
-            onManageComputers: () => showNotice(t('target.manage')),
+            onManageComputers: () => {
+              /* A real destination: the 电脑管理 main panel. The notice stays
+               * as the fallback for a shell without ctx.layout. */
+              if (selectMainPanel()) return;
+              showNotice(t('target.manage'));
+            },
           })
           : null);
     }
@@ -3877,6 +4624,7 @@ window.__ModuleLoader__.load({
      * @param {object} ctx - client root context (services: slots, locale).
      */
     function apply(ctx) {
+      rootCtx = ctx;
       if (ctx && ctx.locale) {
         localeFace = ctx.locale;
         const register = () => ctx.locale.register(NS, { zh, en });
@@ -3950,6 +4698,12 @@ window.__ModuleLoader__.load({
           label: () => t('target.label'),
         }, TargetChip));
         if (targetStop !== null) stops.push(targetStop);
+        /* Keyed main panel: the destination behind 管理电脑 and the sidebar row. */
+        const panelStop = mount('main', () => ctx.slots.register({
+          name: 'main',
+          key: SECTION_ID,
+        }, ComputersPanelPage));
+        if (panelStop !== null) stops.push(panelStop);
         return () => {
           for (const stop of stops) {
             try {
@@ -3970,6 +4724,52 @@ window.__ModuleLoader__.load({
       } catch (error) {
         try {
           console.warn('[dsh-computers] slot registration failed:', error);
+        } catch (ignored) {
+          /* ignore */
+        }
+      }
+
+      /* The sidebar row is only a destination where there is a hub list to
+       * manage: a runtime-only deployment has none (§10.1). The role comes
+       * from /state, so the row appears one round trip after load; a failed
+       * read registers it (the settings page hides itself if it must). */
+      try {
+        if (typeof ctx.effect === 'function') {
+          ctx.effect(() => {
+            let cancelled = false;
+            let stop = null;
+            const register = () => {
+              stop = mount('sidebar.panellist', () => ctx.slots.register({
+                name: 'sidebar.panellist',
+                id: SECTION_ID,
+                order: PANEL_ORDER,
+                label: () => t('nav'),
+              }, SidebarPanelIcon));
+            };
+            void api.readState()
+              .then((payload) => {
+                if (cancelled) return;
+                if (roleOf(payload) !== 'runtime') register();
+              })
+              .catch(() => {
+                if (cancelled) return;
+                register();
+              });
+            return () => {
+              cancelled = true;
+              if (stop !== null) {
+                try {
+                  stop();
+                } catch (error) {
+                  /* ignore */
+                }
+              }
+            };
+          }, 'dsh-computers: sidebar panel');
+        }
+      } catch (error) {
+        try {
+          console.warn('[dsh-computers] sidebar panel registration failed:', error);
         } catch (ignored) {
           /* ignore */
         }

@@ -16,6 +16,8 @@ import { createHub } from './lib/hub.js'
 import { createRoutes, createRuntimeRoutes, createRuntimeStatusRoutes } from './lib/routes.js'
 import { createRuntimeManager } from './lib/runtime.js'
 import { createFsOps } from './lib/fs-ops.js'
+import { PREFER_ADDRESS_VALUES } from './lib/addresses.js'
+import { createTunnel } from './lib/tunnel.js'
 import { createSelectionStore } from './lib/selection.js'
 import { majorMinor } from './lib/version.js'
 import { resolveStateDir, createStore } from './lib/state.js'
@@ -28,7 +30,7 @@ export const name = 'dsh-computers'
 export const inject = ['tools', 'webServer']
 
 /** Version reported by `/api/dsh-computers/health` (and asserted by the smoke harness). */
-export const PLUGIN_VERSION = '1.3.1'
+export const PLUGIN_VERSION = '1.4.0'
 
 /** The machine agent bundle, served at request time (never imported). */
 const AGENT_URL = new URL('./agent/dsh-computers-agent.mjs', import.meta.url)
@@ -46,6 +48,8 @@ const DEFAULTS = Object.freeze({
   heartbeatMs: 20_000,
   execTimeoutMs: 120_000,
   execEnabled: true,
+  preferAddress: 'auto',
+  tailscaleServe: Object.freeze({ enabled: false, httpsPort: 8443 }),
   maxOutputBytes: 1_048_576,
 })
 
@@ -132,6 +136,38 @@ export function resolveConfig(raw) {
   // advertises (capability gating covers fs/pty). Operators opt in with an
   // explicit minAgentVersion when they want to force upgrades.
 
+  let preferAddress = DEFAULTS.preferAddress
+  if (raw.preferAddress !== undefined && raw.preferAddress !== null && raw.preferAddress !== '') {
+    if (typeof raw.preferAddress !== 'string' || !PREFER_ADDRESS_VALUES.includes(raw.preferAddress.trim())) {
+      throw configError(`preferAddress must be one of ${PREFER_ADDRESS_VALUES.join(', ')} (received ${JSON.stringify(raw.preferAddress)})`)
+    }
+    preferAddress = raw.preferAddress.trim()
+  }
+
+  let tailscaleServe = {
+    enabled: DEFAULTS.tailscaleServe.enabled,
+    httpsPort: DEFAULTS.tailscaleServe.httpsPort,
+  }
+  if (raw.tailscaleServe !== undefined && raw.tailscaleServe !== null) {
+    const value = raw.tailscaleServe
+    if (typeof value === 'boolean') {
+      tailscaleServe = { enabled: value, httpsPort: DEFAULTS.tailscaleServe.httpsPort }
+    } else if (typeof value === 'object' && !Array.isArray(value)) {
+      if (value.enabled !== undefined && value.enabled !== null) {
+        if (typeof value.enabled !== 'boolean') throw configError('tailscaleServe.enabled must be a boolean')
+        tailscaleServe.enabled = value.enabled
+      }
+      if (value.httpsPort !== undefined && value.httpsPort !== null) {
+        if (!Number.isSafeInteger(value.httpsPort) || value.httpsPort < 1 || value.httpsPort > 65535) {
+          throw configError('tailscaleServe.httpsPort must be an integer between 1 and 65535')
+        }
+        tailscaleServe.httpsPort = value.httpsPort
+      }
+    } else {
+      throw configError('tailscaleServe must be an object ({ enabled, httpsPort }) or a boolean')
+    }
+  }
+
   let execEnabled = DEFAULTS.execEnabled
   if (raw.execEnabled !== undefined && raw.execEnabled !== null) {
     if (typeof raw.execEnabled !== 'boolean') throw configError('execEnabled must be a boolean')
@@ -143,6 +179,8 @@ export function resolveConfig(raw) {
     publicUrl,
     promoteOnTimeout,
     minAgentVersion,
+    preferAddress,
+    tailscaleServe: Object.freeze({ ...tailscaleServe }),
     stateDir,
     keyTtlMinutes: boundedInteger(raw.keyTtlMinutes, 'keyTtlMinutes', DEFAULTS.keyTtlMinutes),
     heartbeatMs: boundedInteger(raw.heartbeatMs, 'heartbeatMs', DEFAULTS.heartbeatMs),
@@ -170,6 +208,15 @@ export function apply(ctx, config) {
   }
 
   const stateDir = resolveStateDir(resolved.stateDir)
+
+  // ---- Tailscale Serve tunnel (v1.4.0) ----------------------------------
+  // Owns the Serve mapping so the random desktop port re-points on every load.
+  // Created for every role: it is about this plugin's own web server.
+  const tunnel = createTunnel({ ctx, config: resolved.tailscaleServe, onWarn })
+  ctx.effect(() => {
+    void tunnel.start()
+    return () => tunnel.dispose()
+  }, 'dsh-computers: tailscale serve tunnel')
 
   // ---- hub half (PROTOCOL §1-§5, §8) ------------------------------------
   // role 'runtime' is the controlled machine only: it must not serve the hub
@@ -199,6 +246,7 @@ export function apply(ctx, config) {
       role: resolved.role,
       version: PLUGIN_VERSION,
       agentUrl: AGENT_URL,
+      tunnel,
       onWarn,
     })
     createTools({ ctx, config: resolved, store, hub, selections, access, fsOps, version: PLUGIN_VERSION, onWarn })
@@ -217,6 +265,7 @@ export function apply(ctx, config) {
       config: resolved,
       role: resolved.role,
       version: PLUGIN_VERSION,
+      tunnel,
       onWarn,
     })
   }

@@ -46,14 +46,14 @@ dsh plugin install github:9Ashwin/dsh-computers
 **npm 安装**：插件市场 → 已安装 → 「检查更新」即可，或者在 CLI 里装具体版本：
 
 ```bash
-dsh plugin install dsh-computers@1.3.1
+dsh plugin install dsh-computers@1.4.0
 ```
 
 **GitHub 安装**：profile 里是按 spec + commit 固定的（`github:user/repo` 或 `#v1.0.2`），所以
 
 - 用**同一个 spec** 再装一次只会得到 `already-installed`（这就是「再安装没法更新」的原因）；
 - 装 **tag** 会被冻住，市场永远检测不到更新；装**分支**（不带 `#`）才能被市场「检查更新」发现新提交；
-- 手动升级到某个版本要**换 spec**：`dsh plugin install github:9Ashwin/dsh-computers#v1.3.1`。
+- 手动升级到某个版本要**换 spec**：`dsh plugin install github:9Ashwin/dsh-computers#v1.4.0`。
 
 > 更新完记得重启 Host 并刷新页面，具体见 [docs/deploy.md](./docs/deploy.md)。
 
@@ -130,6 +130,27 @@ tail -f ~/.dsh-computers/agent.log
 - **流式**：长命令的分块输出会随帧回传（含心跳），后台任务的输出可在 DSH 的任务里查看。
 - **超时转后台**：前台命令超时默认不杀（`promoteOnTimeout: true`），而是转入后台任务并返回 jobId，之后用内置的 `job_output` / `job_kill` 接管。
 - **激活时机**：新电脑要等 agent 首次建流后才出现在列表（从生成密钥到真正连上之间，弹窗会一直显示"等待电脑连接…"）。
+
+## 3.2 地址、可达性与 Tailscale
+
+- **地址候选**：设置 → 电脑 顶部「本机地址」会列出本机所有候选地址并标注是否可达——
+  `公网`（publicUrl）→ `转发地址` → `Tailscale` → `局域网` → `本机名` → `本机`。
+  只有**真正在监听**的地址才会被推荐（例如桌面端只监听 127.0.0.1 时，Tailscale 那行会标「未监听」，推荐回落到 loopback），避免把连不上的地址复制给别人。
+- **`+ 连接电脑` 里的服务器地址是可下拉选择的**，默认选中推荐地址，切换后命令/地址随之变化。
+- **自动 Tailscale Serve**（可选）：
+
+  ```yaml
+  - id: dsh-computers
+    config:
+      tailscaleServe:
+        enabled: true
+        httpsPort: 8443
+  ```
+  插件加载后自动执行 `tailscale serve --bg --https=8443 http://127.0.0.1:<当前端口>`，把本机 DSH 暴露到 tailnet，并读取 `tailscale status` 的真实 DNSName 作为推荐地址。**幂等**（已指向本端口就跳过），端口每次随机变也会重新对接，失败只记录 `tunnel.error` 不推荐假地址。
+- **强制偏好**：`preferAddress: auto | public | tailscale | lan | loopback`（只在可达的候选里选，选不到就回落 auto）。
+- **管理电脑**：访问权限弹窗里的 `⚙ 管理电脑` 会直接跳到独立的「电脑管理」主面板（侧栏也有入口），不再只是文字提示。
+
+> 桌面端注意：**不要**把 `webserver.host` 改成非 loopback 地址（窗口写死连 `127.0.0.1:<port>`，会连不上）。桌面端请用上面的 `tailscaleServe`，独立 `dsh web` 才用 `--host`。详见 [docs/deploy.md](./docs/deploy.md)。
 
 ## 4. 端点一览
 
