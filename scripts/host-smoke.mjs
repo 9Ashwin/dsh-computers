@@ -31,6 +31,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { apply, PLUGIN_VERSION, resolveConfig } from '../index.js'
 import { resolveBaseUrl } from '../lib/http.js'
 import { createSelectionStore, MAX_SELECTIONS } from '../lib/selection.js'
+import { MAX_ACCESS_SESSIONS, createAccessStore } from '../lib/access.js'
 import { mintSecret, newComputerId, normalizeDisplayName, sha256Hex, tokenMatches } from '../lib/keys.js'
 import { prunePendingKeys } from '../lib/state.js'
 
@@ -76,6 +77,7 @@ function createFakeContext() {
   const disposers = []
   let origin = null
   let connection
+  const services = new Map()
 
   const systemPrompt = {
     section(section) {
@@ -102,7 +104,7 @@ function createFakeContext() {
     get(name) {
       if (name === 'connection') return connection
       if (name === 'systemPrompt') return systemPrompt
-      return undefined
+      return services.get(name)
     },
     webServer: {
       register(route) {
@@ -140,6 +142,10 @@ function createFakeContext() {
     },
     setGate(value) {
       connection = value
+    },
+    setService(name, value) {
+      if (value === undefined) services.delete(name)
+      else services.set(name, value)
     },
     dispose() {
       while (disposers.length > 0) {

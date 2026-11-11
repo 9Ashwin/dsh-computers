@@ -11,6 +11,7 @@
  * loads in any profile.
  */
 
+import { createAccessControl, createAccessStore } from './lib/access.js'
 import { createHub } from './lib/hub.js'
 import { createRoutes, createRuntimeRoutes, createRuntimeStatusRoutes } from './lib/routes.js'
 import { createRuntimeManager } from './lib/runtime.js'
@@ -151,6 +152,7 @@ export function apply(ctx, config) {
   if (resolved.role !== 'runtime') {
     const store = createStore({ stateDir, onWarn })
     const selections = createSelectionStore({ stateDir, onWarn })
+    const access = createAccessControl({ ctx, store: createAccessStore({ stateDir, onWarn }) })
     const hub = createHub({
       store,
       heartbeatMs: resolved.heartbeatMs,
@@ -166,12 +168,13 @@ export function apply(ctx, config) {
       store,
       hub,
       selections,
+      access,
       role: resolved.role,
       version: PLUGIN_VERSION,
       agentUrl: AGENT_URL,
       onWarn,
     })
-    createTools({ ctx, config: resolved, store, hub, selections, onWarn })
+    createTools({ ctx, config: resolved, store, hub, selections, access, onWarn })
 
     // Every registered route is its own effect; this one owns the timers and
     // the in-flight exec promises so a plugin reload cannot leak either.

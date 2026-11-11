@@ -557,3 +557,138 @@ the raw materials for the desktop path: below the command box, a muted line
 「也可以在这台电脑的 DSH 桌面端打开 设置 → 电脑 → 本机运行时，填入下面的地址和密钥」 plus
 two compact copyable rows — the server URL and the enrollment key (`/keys` already returns
 `serverUrl` and `key`). That is how a user connects a machine without a terminal.
+
+---
+
+## 11. Stage 1 (v1.3.0): capabilities, streaming, remote files
+
+Everything here is additive: an agent that reports no capabilities keeps the v1 behaviour
+exactly. The wire stays SSE (host → agent) + HTTP POST (agent → host); no inbound ports.
+
+### 11.1 Capabilities and version gate
+
+`POST /agent/enroll` and `POST /agent/heartbeat` carry
+`"capabilities": ["exec" | "fs" | "pty"]` and `agentVersion` (already present). The registry
+stores the last reported set and `capabilitiesUpdatedAt`. Rules:
+
+- A computer with no reported capabilities is treated as `["exec"]` (v1 agents).
+- Host tool availability is gated per session: the `computer_*_file` tools are only
+  registered/offered when at least one allowed computer reports `fs`; the terminal backend
+  only serves computers reporting `pty`. Gating uses `ctx.tools.restrict`-style filtering
+  (drop the schema) rather than failing at call time, so the model never sees a tool it
+  cannot use; a call that still arrives for an incapable computer answers with an
+  actionable "this machine's agent does not support file access (upgrade the agent)".
+- `hello` echoes the host's view: `{ computerId, name, heartbeatMs, capabilities }`.
+- `/state` and `/health` expose each computer's `agentVersion` and `capabilities`; the
+  settings page shows a drift badge when `agentVersion` differs from the host plugin's.
+
+### 11.2 Streaming results
+
+`exec` gains `"stream": true`. The agent then POSTs incremental output to
+`POST /api/dsh-computers/agent/results/chunk`:
+
+```json
+{ "requestId": "req_…", "seq": 0, "stdout": "<base64>", "stderr": "<base64>" }
+```
+
+- `seq` starts at 0 and increases by 1; the host drops out-of-order duplicates and
+  reassembles. Batches are sent at most every 100 ms (or 32 KiB, whichever first).
+- The final `POST /agent/results` stays authoritative for `exitCode`/`durationMs`/
+  `timedOut`/`truncated` and carries the same capped buffers as v1 (so a host that missed
+  chunks still ends with the tail).
+- Host side, a streaming execution feeds the **DSH jobs** registry: `computer_exec` with
+  `run_in_background: true` registers one job (`kind: 'computer-exec'`, label
+  `<name>: <command>`, owner = calling session), returns its id immediately, and appends
+  every chunk to the job's output ring so the built-in `job_output` / `job_kill` tools work
+  unchanged. Killing the job sends `cancel` to the agent and settles the job.
+- A foreground call still returns the complete result (v1 shape) but the host keeps the
+  tail in the job ring for the conversation's progress view.
+
+### 11.3 Remote file access
+
+Host → agent, over the same SSE stream:
+
+```json
+{ "event": "fs", "data": { "requestId": "fsr_…", "op": "read", "path": "/abs", "encoding": "utf8", "offset": 0, "limit": 2000 } }
+```
+
+`op` ∈ `read | write | list | stat | mkdir | rename | delete | glob | grep`.
+Agent → host: `POST /api/dsh-computers/agent/fs/result`
+
+```json
+{ "requestId": "fsr_…", "ok": true, "op": "read", "path": "/abs",
+  "content": "<base64 for write/read binary>", "text": "<utf8 for text reads>",
+  "encoding": "utf8|base64", "bytes": 123, "lines": 20, "truncated": false,
+  "entries": [{ "name": "a", "path": "/abs/a", "type": "file|dir|symlink", "size": 1, "mtimeMs": 0 }],
+  "stat": { "type": "file", "size": 1, "mtimeMs": 0, "mode": 420 },
+  "matches": [{ "path": "/abs/a", "line": 3, "text": "…" }],
+  "error": null }
+```
+
+Limits: read 1 MiB / 20 000 lines, write 4 MiB, list 5 000 entries, glob 2 000 paths,
+grep 500 matches, per-request timeout 15 s. Paths must be absolute; the agent rejects a
+relative path with `ok:false, error:"path must be absolute"`.
+
+Host tools (registered only when a `fs`-capable computer is available, §11.1):
+
+| tool | arguments (JSON Schema) | value |
+|---|---|---|
+| `computer_read` | `computer?`, `path`, `offset?`, `limit?` | `{ computer, path, text, lines, bytes, truncated }` |
+| `computer_write` | `computer?`, `path`, `content`, `createDirs?` | `{ computer, path, bytes, created }` |
+| `computer_edit` | `computer?`, `path`, `old`, `new`, `replaceAll?` | `{ computer, path, replacements, bytes }` |
+| `computer_glob` | `computer?`, `pattern`, `cwd?` | `{ computer, paths }` |
+| `computer_grep` | `computer?`, `pattern`, `path?`, `include?`, `maxMatches?` | `{ computer, matches }` |
+
+`computer` is optional in all of them and falls back to the session pin (§10/§9 selection),
+same as `computer_exec`. Renders mirror the built-in `read`/`write`/`edit`/`glob`/`grep`
+tool output style so the model reads them the same way. A write/edit to a path the agent
+cannot touch answers `ok:false` with the OS error text, surfaced as a tool error.
+
+### 11.4 PTY (terminal backend) — follows in v1.4.0
+
+Reserved events, not implemented in v1.3.0:
+`{"event":"pty.open"|"pty.input"|"pty.resize"|"pty.close", data:{ ptyId, … }}` and
+`POST /agent/pty/out` `{ ptyId, seq, data(base64) }` + `POST /agent/pty/exit` `{ ptyId, exitCode }`.
+The host will register a DSH `terminals` backend (`ctx.terminals.registerBackend`) so the
+built-in terminal tools and UI work against a connected computer; agents advertise `pty`
+only once they implement it.
+
+### 11.5 Compatibility
+
+- v1 agents: no capabilities, no streaming, no fs — everything above degrades to §3/§4.
+- New host + old agent: `computer_exec` unchanged; file tools hidden; a manual call errors
+  with the upgrade hint.
+- New agent + old host: the agent never sends `stream:true` payloads unless the host's
+  `hello` advertises `"features":["stream","fs","pty"]`, so an old host is unaffected.
+
+### 11.6 Interaction details aligned with the reference product
+
+These mirror the reference implementation's runtime protocol *behaviour* (handshake metadata,
+stream frames, background adoption, update-required) without copying any of its code.
+
+1. **Handshake metadata.** The agent's enroll body and every reconnect carry a metadata block:
+   `{ version: 1, agentVersion, hostname, os, arch, capabilities, workspaceBase }`, where
+   `workspaceBase` is the agent's default working directory (config `workspaceBase`, default
+   `os.homedir()`), reported back to the host at connect and used as the default `cwd` for
+   `exec` and the base for relative `glob`/`grep`. The host stores it and shows it in the
+   computer detail view. Same shape as the reference product's `RuntimeHandshakeMetadataV1`.
+2. **Stream frames.** Chunk payloads carry a `type`:
+   `{ type: 'stdout' | 'stderr' | 'heartbeat', data(base64, empty for heartbeat) }`.
+   The agent emits a `heartbeat` frame for every 10 s of a silent command so the host can keep
+   the execution alive and the conversation's progress view ticking instead of timing out.
+   Exit code still arrives exactly once in the final `/agent/results`.
+3. **Timeout adopts instead of killing.** When a foreground `computer_exec` reaches
+   `timeoutMs`, the host does NOT kill it by default: it moves the still-running execution
+   into the background-job path (config `promoteOnTimeout`, default true), returns `{ jobId,
+   promoted: true }`, and the model continues with `job_output`/`job_kill`. With
+   `promoteOnTimeout: false` the v1 cancel-and-error behaviour applies.
+4. **Pending → activated lifecycle.** An enrollment key is `pending` until the agent's first
+   successful stream; that moment sets `activatedAt` and marks the key used. A never-activated
+   computer is hidden from the list (only `pendingKey` shows in the connect dialog), matching
+   the reference product's activation lifecycle.
+5. **Update-required.** Config `minAgentVersion` (default: the plugin's major.minor) gates
+   tool calls: an older agent gets an actionable "upgrade this computer's agent" error, and
+   `/state` marks the computer `drift: true` with `updateRequired: true`.
+6. **Revoke kicks the stream.** Deleting a computer ends its live SSE stream in the same
+   request and invalidates the token, so a stale agent gets `401 invalid-token` and stops
+   retrying until re-enrolled.

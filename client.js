@@ -55,6 +55,10 @@ window.__ModuleLoader__.load({
       runtimeDisconnect: 'api/dsh-computers/runtime/disconnect',
       /* Per-session target computer for the composer chip (task-9 host side). */
       selection: 'api/dsh-computers/selection',
+      /* Access rules (task-11 host side): which computers a session may use,
+       * and which agent presets may use a computer. */
+      access: 'api/dsh-computers/access',
+      accessComputer: 'api/dsh-computers/access/computer',
     };
 
     // #region locales
@@ -65,7 +69,7 @@ window.__ModuleLoader__.load({
       title: '电脑',
       description: '把你自己电脑接进来，agent 就能在它上面直接执行命令。',
       'connect.action': '连接电脑',
-      'badge.bots': '{used}/{total} Bot',
+      'badge.bots': '{used}/{total} 个 Bot',
       online: '在线',
       offline: '离线',
       'rename.action': '重命名',
@@ -168,6 +172,22 @@ window.__ModuleLoader__.load({
       'target.menuLabel': '选择这台会话使用的电脑',
       'target.chipLabel': '这台对话使用的电脑：{name}',
       'target.manage': '在 设置 → 电脑 中管理',
+      'access.manage': '管理访问权',
+      'access.session.title': '这台对话',
+      'access.session.subtitle': '它可以使用哪些电脑?',
+      'access.manageComputers': '管理电脑',
+      'access.done': '完成',
+      'access.cloudHint': '服务器本机',
+      'access.noneHint': '关闭全部后，这台对话不能使用任何远程电脑',
+      'access.computer.subtitle': '哪些 Bot 可以使用它?',
+      'access.defaultPreset': '默认',
+      'access.loading': '正在读取权限…',
+      'access.loadFailed': '无法读取权限设置',
+      'access.saveFailed': '保存失败：{message}',
+      'access.badgeAria': '管理「{name}」的使用权限',
+      'access.presetsEmpty': '还没有可用的 Bot 预设',
+      'access.computersEmpty': '还没有连接的电脑',
+      'access.computer.titleFallback': '这台电脑',
       'target.offline': '离线',
       'target.failed': '切换失败：{message}',
     };
@@ -280,6 +300,22 @@ window.__ModuleLoader__.load({
       'target.menuLabel': 'Choose the computer this session uses',
       'target.chipLabel': 'Computer for this chat: {name}',
       'target.manage': 'Manage in Settings → Computers',
+      'access.manage': 'Manage access',
+      'access.session.title': 'This chat',
+      'access.session.subtitle': 'Which computers may it use?',
+      'access.manageComputers': 'Manage computers',
+      'access.done': 'Done',
+      'access.cloudHint': 'Server itself',
+      'access.noneHint': 'With everything off, this chat cannot use any remote computer',
+      'access.computer.subtitle': 'Which Bots may use it?',
+      'access.defaultPreset': 'Default',
+      'access.loading': 'Reading access rules…',
+      'access.loadFailed': 'Could not read the access rules',
+      'access.saveFailed': 'Could not save: {message}',
+      'access.badgeAria': 'Manage who may use “{name}”',
+      'access.presetsEmpty': 'No Bot presets available yet',
+      'access.computersEmpty': 'No computers connected yet',
+      'access.computer.titleFallback': 'This computer',
       'target.offline': 'Offline',
       'target.failed': 'Could not switch: {message}',
     };
@@ -579,6 +615,21 @@ window.__ModuleLoader__.load({
   font-weight: 500;
   white-space: nowrap;
 }
+.dshc-badgeBtn {
+  border: none;
+  font-family: inherit;
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .dshc-badgeBtn:hover {
+    background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
+    color: var(--dsw-alias-label-primary);
+  }
+}
+.dshc-badgeBtn:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 1px;
+}
 .dshc-status {
   flex: none;
   display: inline-flex;
@@ -760,6 +811,9 @@ window.__ModuleLoader__.load({
   color: var(--dsw-alias-label-secondary);
 }
 .dshc-textBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   flex: none;
   padding: 4px 9px;
   border: none;
@@ -1036,6 +1090,77 @@ window.__ModuleLoader__.load({
   gap: 8px;
   margin-top: 20px;
 }
+.dshc-footerSplit { justify-content: space-between; }
+
+/* Access dialogs (task-12): one row per computer / per Bot preset. */
+.dshc-accessList {
+  max-height: min(320px, calc(100vh - 280px));
+  overflow-y: auto;
+  margin: 2px -4px 0;
+  padding: 0 4px;
+}
+.dshc-accessRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 44px;
+  padding: 6px 0;
+}
+.dshc-accessRow + .dshc-accessRow { border-top: 1px solid var(--dsw-alias-border-l1); }
+.dshc-accessIcon {
+  flex: none;
+  display: flex;
+  color: var(--dsw-alias-label-secondary);
+}
+.dshc-accessText {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.dshc-accessName {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-primary);
+}
+.dshc-accessHint {
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  line-height: 16px;
+}
+.dshc-accessStatus {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.dshc-accessEmpty {
+  margin: 6px 0 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12.5px;
+  line-height: 18px;
+}
+.dshc-switch:disabled { opacity: 0.6; cursor: not-allowed; }
+
+/* Composer menu: the manage-access row replaces the old muted footer. */
+.dshc-menuSep {
+  height: 1px;
+  margin: 4px 4px;
+  background: var(--dsw-alias-border-l1);
+}
+.dshc-menuManage { color: var(--dsw-alias-label-primary); }
+.dshc-targetError[data-kind="info"] { color: var(--dsw-alias-label-secondary); }
 
 .dshc-seg {
   display: flex;
@@ -1539,6 +1664,24 @@ window.__ModuleLoader__.load({
         body: { sessionId, computerId },
         signal,
       }),
+      readAccess: (sessionId, signal) => requestJson(
+        `${API.access}?sessionId=${encodeURIComponent(sessionId)}`,
+        { signal },
+      ),
+      setAccess: (sessionId, allowedComputers, signal) => requestJson(API.access, {
+        method: 'POST',
+        body: { sessionId, allowedComputers },
+        signal,
+      }),
+      readComputerAccess: (computerId, signal) => requestJson(
+        `${API.accessComputer}?computerId=${encodeURIComponent(computerId)}`,
+        { signal },
+      ),
+      setComputerAccess: (computerId, allowedPresets, signal) => requestJson(API.accessComputer, {
+        method: 'POST',
+        body: { computerId, allowedPresets },
+        signal,
+      }),
     };
 
     /** @param {object|null} data - a /state payload. @returns {string} 'hub' | 'runtime' | 'both'. */
@@ -1835,7 +1978,8 @@ window.__ModuleLoader__.load({
     function ComputerRow(props) {
       const computer = props.computer;
       const online = computer.online === true;
-      const bots = computer.bots && typeof computer.bots === 'object' ? computer.bots : null;
+      const bots = props.counts
+        || (computer.bots && typeof computer.bots === 'object' ? computer.bots : null);
       const used = bots && typeof bots.used === 'number' ? bots.used : 1;
       const total = bots && typeof bots.total === 'number' ? bots.total : 1;
       const name = typeof computer.name === 'string' && computer.name !== ''
@@ -1844,7 +1988,13 @@ window.__ModuleLoader__.load({
       return h('div', { className: 'dshc-row', 'data-online': online ? 'true' : 'false' },
         h('div', { className: 'dshc-rowMain' },
           h('span', { className: 'dshc-name', title: name }, name),
-          h('span', { className: 'dshc-badge' }, t('badge.bots', { used, total }))),
+          h('button', {
+            type: 'button',
+            className: 'dshc-badge dshc-badgeBtn',
+            'aria-label': t('access.badgeAria', { name }),
+            title: t('access.badgeAria', { name }),
+            onClick: () => props.onAccess(computer),
+          }, t('badge.bots', { used, total }))),
         h('span', { className: 'dshc-status' },
           h('span', { className: 'dshc-dot', 'aria-hidden': 'true' }),
           online ? t('online') : t('offline')),
@@ -1913,7 +2063,9 @@ window.__ModuleLoader__.load({
           }, h(IconClose, { size: 16 }))),
         props.subtitle ? h('p', { className: 'dshc-cardSub' }, props.subtitle) : null,
         h('div', null, children),
-        footer.length > 0 ? h('div', { className: 'dshc-footer' }, footer) : null)));
+        footer.length > 0
+          ? h('div', { className: props.footerClassName ? `dshc-footer ${props.footerClassName}` : 'dshc-footer' }, footer)
+          : null)));
     }
 
     function RenameDialog(props) {
@@ -2532,6 +2684,9 @@ window.__ModuleLoader__.load({
       const scope = React.useRef(null);
       const noticeTimer = React.useRef(null);
       const runtimeRequested = React.useRef(false);
+      const accessCounts = React.useRef(new Map());
+      const accessRequested = React.useRef(new Set());
+      const [, setCountsVersion] = React.useState(0);
       if (scope.current === null) scope.current = createScope();
 
       const loadRuntime = React.useCallback(async () => {
@@ -2622,6 +2777,11 @@ window.__ModuleLoader__.load({
       const data = view.data;
       const role = data === null ? null : roleOf(data);
       const computers = data && Array.isArray(data.computers) ? data.computers : null;
+
+      const countsFor = (computer) => {
+        const id = computer && computer.id ? String(computer.id) : '';
+        return id === '' ? null : (accessCounts.current.get(id) || null);
+      };
       const showRuntime = role !== null && role !== 'hub';
       const showComputers = role !== 'runtime';
       const canConnect = role !== 'runtime';
@@ -2642,8 +2802,10 @@ window.__ModuleLoader__.load({
         body = h('div', { className: 'dshc-list' }, computers.map((computer) => h(ComputerRow, {
           key: computer.id || computer.name,
           computer,
+          counts: countsFor(computer),
           onRename: (target) => setDialog({ kind: 'rename', computer: target }),
           onDelete: (target) => setDialog({ kind: 'delete', computer: target }),
+          onAccess: (target) => setDialog({ kind: 'access', computer: target }),
         })));
       }
 
@@ -2660,6 +2822,17 @@ window.__ModuleLoader__.load({
           onClose: () => setDialog(null),
           onRenamed: handleRenamed,
         });
+      } else if (dialog !== null && dialog.kind === 'access' && dialog.computer) {
+        layer = h(ComputerAccessDialog, {
+          computer: dialog.computer,
+          onClose: () => setDialog(null),
+          onChanged: (counts) => {
+            const id = dialog.computer && dialog.computer.id ? String(dialog.computer.id) : '';
+            if (id === '' || !counts) return;
+            accessCounts.current.set(id, counts);
+            setCountsVersion((value) => value + 1);
+          },
+        });
       } else if (dialog !== null && dialog.kind === 'delete' && dialog.computer) {
         layer = h(DeleteDialog, {
           computer: dialog.computer,
@@ -2667,6 +2840,33 @@ window.__ModuleLoader__.load({
           onDeleted: handleDeleted,
         });
       }
+
+      /* Real badge counts: one light GET per computer, cached for the life of
+       * the page and refreshed by the access dialog. /state's sugar stays as
+       * the fallback until the first read lands. Keyed by the id list so the
+       * 5 s /state poll does not re-request. */
+      React.useEffect(() => {
+        if (computers === null) return;
+        for (const computer of computers) {
+          const id = computer && computer.id ? String(computer.id) : '';
+          if (id === '' || accessCounts.current.has(id) || accessRequested.current.has(id)) continue;
+          accessRequested.current.add(id);
+          void (async () => {
+            try {
+              const payload = await scope.current.run((signal) => api.readComputerAccess(id, signal));
+              const presets = payload && Array.isArray(payload.presets) ? payload.presets : null;
+              if (presets === null || !alive.current) return;
+              accessCounts.current.set(id, {
+                used: presets.filter((preset) => preset.allowed === true).length,
+                total: presets.length,
+              });
+              setCountsVersion((value) => value + 1);
+            } catch (error) {
+              /* Keep the /state fallback count for this computer. */
+            }
+          })();
+        }
+      }, [computers === null ? '' : computers.map((computer) => (computer && computer.id ? computer.id : '')).join(',')]);
 
       return h('section', { className: 'dshc-root', 'aria-label': t('nav') },
         h('div', { className: 'dshc-head' },
@@ -2698,6 +2898,303 @@ window.__ModuleLoader__.load({
 
     // #endregion
 
+    // #region access dialogs
+
+    /**
+     * The on/off switch used by the access dialogs.
+     * @param {object} props - `checked`, `label`, `onChange`, optional `disabled`.
+     * @returns {object} switch button.
+     */
+    function SwitchControl(props) {
+      return h('button', {
+        type: 'button',
+        className: 'dshc-switch',
+        role: 'switch',
+        'aria-checked': props.checked === true ? 'true' : 'false',
+        'aria-label': props.label,
+        disabled: props.disabled === true,
+        onClick: props.disabled === true ? undefined : props.onChange,
+      }, h('span', { className: 'dshc-switchThumb' }));
+    }
+
+    /**
+     * One dialog row: icon, name (+ hint / online state), trailing switch.
+     * @param {object} props - `icon`, `name`, `hint`, `online`, `switch`.
+     * @returns {object} row element.
+     */
+    function AccessRow(props) {
+      return h('div', { className: 'dshc-accessRow' },
+        props.icon ? h('span', { className: 'dshc-accessIcon', 'aria-hidden': 'true' }, props.icon) : null,
+        h('div', { className: 'dshc-accessText' },
+          h('span', { className: 'dshc-accessName', title: props.name }, props.name),
+          props.hint ? h('span', { className: 'dshc-accessHint' }, props.hint) : null,
+          props.online === undefined
+            ? null
+            : h('span', { className: 'dshc-accessStatus' },
+              h('span', {
+                className: 'dshc-dot',
+                'data-state': props.online === true ? 'running' : 'stopped',
+                'aria-hidden': 'true',
+              }),
+              props.online === true ? t('online') : t('offline'))),
+        props.switch);
+    }
+
+    /**
+     * Session access dialog — which computers this conversation may use
+     * (PROTOCOL access API, task-11). Toggles POST the whole allow-list.
+     * @param {object} props - `sessionId`, `onClose`, `onSaved(payload)`, `onManageComputers()`.
+     * @returns {object} dialog layer.
+     */
+    function SessionAccessDialog(props) {
+      const [view, setView] = React.useState({ phase: 'loading', data: null });
+      const [busy, setBusy] = React.useState(false);
+      const [failure, setFailure] = React.useState(null);
+      const alive = React.useRef(true);
+      const scope = React.useRef(null);
+      if (scope.current === null) scope.current = createScope();
+
+      React.useEffect(() => {
+        alive.current = true;
+        scope.current.run((signal) => api.readAccess(props.sessionId, signal))
+          .then((payload) => {
+            if (!alive.current) return;
+            if (payload && typeof payload === 'object') setView({ phase: 'ready', data: payload });
+            else setView({ phase: 'error', data: null });
+          })
+          .catch((error) => {
+            if (!alive.current || (error && error.name === 'AbortError')) return;
+            setView({ phase: 'error', data: null, error });
+          });
+        return () => {
+          alive.current = false;
+          scope.current.abortAll();
+        };
+      }, [props.sessionId]);
+
+      const computers = view.data && Array.isArray(view.data.computers) ? view.data.computers : null;
+      const allowedCount = computers === null ? 0 : computers.filter((entry) => entry.allowed === true).length;
+
+      const toggle = async (computer) => {
+        if (computers === null || busy) return;
+        const previous = view.data;
+        const optimistic = {
+          ...previous,
+          computers: computers.map((entry) => (entry.id === computer.id
+            ? { ...entry, allowed: entry.allowed !== true }
+            : entry)),
+        };
+        const nextAllowed = optimistic.computers
+          .filter((entry) => entry.allowed === true)
+          .map((entry) => entry.id);
+        setFailure(null);
+        setView({ phase: 'ready', data: optimistic });
+        setBusy(true);
+        try {
+          const result = await scope.current.run((signal) => api.setAccess(props.sessionId, nextAllowed, signal));
+          if (!alive.current) return;
+          const next = result && typeof result === 'object' ? result : optimistic;
+          setView({ phase: 'ready', data: next });
+          if (typeof props.onSaved === 'function') props.onSaved(next);
+        } catch (error) {
+          if (!alive.current) return;
+          if (error && error.name === 'AbortError') return;
+          setView({ phase: 'ready', data: previous });
+          setFailure(t('access.saveFailed', { message: messageOf(error) }));
+        } finally {
+          if (alive.current) setBusy(false);
+        }
+      };
+
+      let body;
+      if (computers === null && view.phase === 'loading') {
+        body = h('div', { className: 'dshc-accessRow' }, h(Spinner), h('span', { className: 'dshc-accessHint' }, t('access.loading')));
+      } else if (computers === null) {
+        body = h('div', { className: 'dshc-errorCard', role: 'alert' },
+          h('span', { className: 'dshc-errorText' },
+            t('error.loadDetail', { title: t('access.loadFailed'), message: view.error ? messageOf(view.error) : '' })));
+      } else {
+        const rows = [h(AccessRow, {
+          key: 'cloud',
+          icon: h(IconMonitor, { size: 15 }),
+          name: t('target.cloud'),
+          hint: t('access.cloudHint'),
+          switch: h(SwitchControl, { checked: true, disabled: true, label: t('target.cloud') }),
+        })].concat(computers.map((computer) => h(AccessRow, {
+          key: computer.id || computer.name,
+          icon: h(IconMonitor, { size: 15 }),
+          name: typeof computer.name === 'string' && computer.name !== '' ? computer.name : String(computer.id || ''),
+          online: computer.online === true,
+          switch: h(SwitchControl, {
+            checked: computer.allowed === true,
+            disabled: busy,
+            label: t('access.badgeAria', { name: computer.name || '' }),
+            onChange: () => { void toggle(computer); },
+          }),
+        })));
+        body = h('div', null,
+          h('div', { className: 'dshc-accessList' }, rows),
+          computers.length === 0 ? h('p', { className: 'dshc-accessEmpty' }, t('access.computersEmpty')) : null,
+          computers.length > 0 && allowedCount === 0
+            ? h('p', { className: 'dshc-hint' }, t('access.noneHint'))
+            : null);
+      }
+
+      return h(Dialog, {
+        title: t('access.session.title'),
+        subtitle: t('access.session.subtitle'),
+        size: 'sm',
+        footerClassName: 'dshc-footerSplit',
+        onClose: props.onClose,
+        footer: [
+          h('button', {
+            key: 'manage',
+            type: 'button',
+            className: 'dshc-textBtn',
+            onClick: () => {
+              props.onClose();
+              if (typeof props.onManageComputers === 'function') props.onManageComputers();
+            },
+          }, h(IconGear, { size: 13 }), t('access.manageComputers')),
+          h('button', {
+            key: 'done',
+            type: 'button',
+            className: 'dshc-primary',
+            onClick: props.onClose,
+          }, t('access.done')),
+        ],
+      },
+      body,
+      failure !== null ? h('p', { className: 'dshc-formError', role: 'alert' }, failure) : null);
+    }
+
+    /**
+     * Computer access dialog — which agent presets ("Bots") may use this
+     * computer (PROTOCOL access/computer, task-11).
+     * @param {object} props - `computer`, `onClose`, `onChanged(counts)`.
+     * @returns {object} dialog layer.
+     */
+    function ComputerAccessDialog(props) {
+      const computerId = props.computer && props.computer.id ? String(props.computer.id) : '';
+      const [view, setView] = React.useState({ phase: 'loading', data: null });
+      const [busy, setBusy] = React.useState(false);
+      const [failure, setFailure] = React.useState(null);
+      const alive = React.useRef(true);
+      const scope = React.useRef(null);
+      if (scope.current === null) scope.current = createScope();
+
+      const report = (payload) => {
+        if (typeof props.onChanged !== 'function') return;
+        const list = payload && Array.isArray(payload.presets) ? payload.presets : null;
+        if (list === null) return;
+        props.onChanged({
+          used: list.filter((entry) => entry.allowed === true).length,
+          total: list.length,
+        });
+      };
+
+      React.useEffect(() => {
+        alive.current = true;
+        scope.current.run((signal) => api.readComputerAccess(computerId, signal))
+          .then((payload) => {
+            if (!alive.current) return;
+            if (payload && typeof payload === 'object') {
+              setView({ phase: 'ready', data: payload });
+              report(payload);
+            } else {
+              setView({ phase: 'error', data: null });
+            }
+          })
+          .catch((error) => {
+            if (!alive.current || (error && error.name === 'AbortError')) return;
+            setView({ phase: 'error', data: null, error });
+          });
+        return () => {
+          alive.current = false;
+          scope.current.abortAll();
+        };
+      }, [computerId]);
+
+      const presets = view.data && Array.isArray(view.data.presets) ? view.data.presets : null;
+
+      const toggle = async (preset) => {
+        if (presets === null || busy) return;
+        const previous = view.data;
+        const optimistic = {
+          ...previous,
+          presets: presets.map((entry) => (entry.id === preset.id
+            ? { ...entry, allowed: entry.allowed !== true }
+            : entry)),
+        };
+        const nextAllowed = optimistic.presets
+          .filter((entry) => entry.allowed === true)
+          .map((entry) => entry.id);
+        setFailure(null);
+        setView({ phase: 'ready', data: optimistic });
+        setBusy(true);
+        try {
+          const result = await scope.current.run((signal) => api.setComputerAccess(computerId, nextAllowed, signal));
+          if (!alive.current) return;
+          const next = result && typeof result === 'object' ? result : optimistic;
+          setView({ phase: 'ready', data: next });
+          report(next);
+        } catch (error) {
+          if (!alive.current) return;
+          if (error && error.name === 'AbortError') return;
+          setView({ phase: 'ready', data: previous });
+          setFailure(t('access.saveFailed', { message: messageOf(error) }));
+        } finally {
+          if (alive.current) setBusy(false);
+        }
+      };
+
+      let body;
+      if (presets === null && view.phase === 'loading') {
+        body = h('div', { className: 'dshc-accessRow' }, h(Spinner), h('span', { className: 'dshc-accessHint' }, t('access.loading')));
+      } else if (presets === null) {
+        body = h('div', { className: 'dshc-errorCard', role: 'alert' },
+          h('span', { className: 'dshc-errorText' },
+            t('error.loadDetail', { title: t('access.loadFailed'), message: view.error ? messageOf(view.error) : '' })));
+      } else if (presets.length === 0) {
+        body = h('p', { className: 'dshc-accessEmpty' }, t('access.presetsEmpty'));
+      } else {
+        body = h('div', { className: 'dshc-accessList' }, presets.map((preset) => {
+          const name = preset.id === 'default'
+            ? t('access.defaultPreset')
+            : (typeof preset.name === 'string' && preset.name !== '' ? preset.name : String(preset.id || ''));
+          return h(AccessRow, {
+            key: preset.id || preset.name,
+            name,
+            switch: h(SwitchControl, {
+              checked: preset.allowed === true,
+              disabled: busy,
+              label: t('access.badgeAria', { name }),
+              onChange: () => { void toggle(preset); },
+            }),
+          });
+        }));
+      }
+
+      return h(Dialog, {
+        title: (props.computer && (props.computer.name || props.computer.hostname)) || t('access.computer.titleFallback', { id: computerId }),
+        subtitle: t('access.computer.subtitle'),
+        size: 'sm',
+        onClose: props.onClose,
+        footer: [
+          h('button', {
+            key: 'done',
+            type: 'button',
+            className: 'dshc-primary',
+            onClick: props.onClose,
+          }, t('access.done')),
+        ],
+      },
+      body,
+      failure !== null ? h('p', { className: 'dshc-formError', role: 'alert' }, failure) : null);
+    }
+
+    // #endregion
+
     // #region composer target chip
 
     /**
@@ -2718,6 +3215,9 @@ window.__ModuleLoader__.load({
       const [open, setOpen] = React.useState(false);
       const [anchor, setAnchor] = React.useState(null);
       const [failure, setFailure] = React.useState(null);
+      const [allowedIds, setAllowedIds] = React.useState(null);
+      const [accessOpen, setAccessOpen] = React.useState(false);
+      const [notice, setNotice] = React.useState(null);
       const alive = React.useRef(true);
       const scope = React.useRef(null);
       const chipRef = React.useRef(null);
@@ -2725,6 +3225,7 @@ window.__ModuleLoader__.load({
       const pending = React.useRef(false);
       const initialFocus = React.useRef(0);
       const failureTimer = React.useRef(null);
+      const noticeTimer = React.useRef(null);
       if (scope.current === null) scope.current = createScope();
 
       const applySelection = React.useCallback((result) => {
@@ -2733,6 +3234,23 @@ window.__ModuleLoader__.load({
           computer: result && result.computer && typeof result.computer === 'object' ? result.computer : null,
         });
       }, []);
+
+      /* Which computers this session may use. Unknown → show everything; the
+       * host still enforces, and a denied computer is never offered. */
+      const loadAccess = React.useCallback(async () => {
+        if (sessionId === '') return;
+        try {
+          const payload = await scope.current.run((signal) => api.readAccess(sessionId, signal));
+          if (!alive.current) return;
+          const list = payload && Array.isArray(payload.computers) ? payload.computers : null;
+          setAllowedIds(list === null ? null : list
+            .filter((entry) => entry.allowed === true)
+            .map((entry) => entry.id));
+        } catch (error) {
+          if (!alive.current) return;
+          setAllowedIds(null);
+        }
+      }, [sessionId]);
 
       /* One /state + /selection round per tick; a state failure hides the chip
        * (there is no honest target to display). */
@@ -2772,7 +3290,9 @@ window.__ModuleLoader__.load({
           setView({ phase: 'hidden', role: null, computers: [] });
           return () => { alive.current = false; };
         }
+        setAllowedIds(null);
         void load();
+        void loadAccess();
         const poll = setInterval(() => {
           if (alive.current) void load();
         }, STATE_POLL_MS);
@@ -2783,9 +3303,13 @@ window.__ModuleLoader__.load({
             clearTimeout(failureTimer.current);
             failureTimer.current = null;
           }
+          if (noticeTimer.current !== null) {
+            clearTimeout(noticeTimer.current);
+            noticeTimer.current = null;
+          }
           if (scope.current) scope.current.abortAll();
         };
-      }, [load, sessionId]);
+      }, [load, loadAccess, sessionId]);
 
       const computers = view.computers;
       const selectedId = selection.computerId;
@@ -2805,7 +3329,9 @@ window.__ModuleLoader__.load({
           computer: null,
           offline: false,
         },
-      ].concat(computers.map((computer) => ({
+      ].concat(computers
+        .filter((computer) => allowedIds === null || allowedIds.indexOf(computer.id) >= 0)
+        .map((computer) => ({
         key: String(computer.id || computer.name || ''),
         id: computer.id,
         label: typeof computer.name === 'string' && computer.name !== ''
@@ -2819,7 +3345,7 @@ window.__ModuleLoader__.load({
       const menuItems = () => {
         if (menuRef.current === null || typeof menuRef.current.querySelectorAll !== 'function') return [];
         try {
-          return Array.prototype.slice.call(menuRef.current.querySelectorAll('[role="menuitemradio"]'));
+          return Array.prototype.slice.call(menuRef.current.querySelectorAll('[role="menuitemradio"], [role="menuitem"]'));
         } catch (error) {
           return [];
         }
@@ -2837,10 +3363,20 @@ window.__ModuleLoader__.load({
       };
 
       const openMenu = (preferLast) => {
+        void loadAccess();
         const checked = menuRows.findIndex((row) => (row.id === null ? selectedId === null : row.id === selectedId));
         initialFocus.current = preferLast ? menuRows.length - 1 : (checked >= 0 ? checked : 0);
         setFailure(null);
         setOpen(true);
+      };
+
+      const showNotice = (text) => {
+        setNotice(text);
+        if (noticeTimer.current !== null) clearTimeout(noticeTimer.current);
+        noticeTimer.current = setTimeout(() => {
+          noticeTimer.current = null;
+          if (alive.current) setNotice(null);
+        }, 5000);
       };
 
       const closeMenu = (restoreFocus) => {
@@ -3031,7 +3567,17 @@ window.__ModuleLoader__.load({
               row.offline ? h('span', { className: 'dshc-menuHint' }, t('target.offline')) : null,
               checked ? h(IconCheck, { size: 13, className: 'dshc-menuCheck' }) : null);
           }),
-          h('div', { className: 'dshc-menuFooter' }, t('target.manage'))))
+          h('div', { className: 'dshc-menuSep', role: 'separator' }),
+          h('button', {
+            key: 'manage-access',
+            type: 'button',
+            role: 'menuitem',
+            className: 'dshc-menuItem dshc-menuManage',
+            onClick: () => {
+              setOpen(false);
+              setAccessOpen(true);
+            },
+          }, h(IconGear, { size: 14 }), h('span', { className: 'dshc-menuName' }, t('access.manage')))))
         : null;
 
       return h('span', { className: 'dshc-targetWrap' },
@@ -3039,7 +3585,29 @@ window.__ModuleLoader__.load({
         failure !== null
           ? h('span', { className: 'dshc-targetError', role: 'status', title: failure }, failure)
           : null,
-        menu);
+        notice !== null
+          ? h('span', { className: 'dshc-targetError', 'data-kind': 'info', role: 'status', title: notice }, notice)
+          : null,
+        menu,
+        accessOpen
+          ? h(SessionAccessDialog, {
+            sessionId,
+            onClose: () => {
+              setAccessOpen(false);
+              try {
+                if (chipRef.current && typeof chipRef.current.focus === 'function') chipRef.current.focus();
+              } catch (error) {
+                /* ignore */
+              }
+            },
+            onSaved: (payload) => {
+              const list = payload && Array.isArray(payload.computers) ? payload.computers : null;
+              if (list === null) return;
+              setAllowedIds(list.filter((entry) => entry.allowed === true).map((entry) => entry.id));
+            },
+            onManageComputers: () => showNotice(t('target.manage')),
+          })
+          : null);
     }
 
     // #endregion
