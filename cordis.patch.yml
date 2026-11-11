@@ -1,9 +1,19 @@
 # dsh-computers: one Host row that registers the computer registry, the
 # agent-facing endpoints, the model-facing tools and the settings page.
+#
+# role:
+#   hub      - this instance only controls machines (the server); no local runtime card
+#   runtime  - this instance only exposes itself to a hub (a desktop Mac); no computer list
+#   both     - default: both cards; the machine can be controlled AND control others
+#
+# The default work layout is one server with role: hub and every other machine
+# left on the default, connecting out to the server. Topology is hub-and-spoke
+# only - a runtime never accepts inbound connections.
 - insert:
     - id: dsh-computers
       name: dsh-computers
       config:
+        role: both
         publicUrl: ''
         stateDir: ''
         keyTtlMinutes: 15

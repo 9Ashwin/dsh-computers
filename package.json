@@ -5,6 +5,19 @@
   "description": "Connect your own machines to a DSH Web deployment and run commands on them from the agent.",
   "type": "module",
   "license": "MIT",
+  "author": "9Ashwin",
+  "homepage": "https://github.com/9Ashwin/dsh-computers#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/9Ashwin/dsh-computers.git"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "remote",
+    "computers",
+    "agents"
+  ],
   "exports": {
     ".": "./index.js",
     "./client": "./client.js",

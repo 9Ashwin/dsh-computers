@@ -51,8 +51,8 @@ Written atomically (tmp file + rename), mode 0600 where the platform allows it.
   "computers": [
     {
       "id": "cmp_9f3a...",            // cmp_ + 12 lowercase hex, generated on enroll
-      "name": "AshwindeMac-mini.local", // display name; defaults to hostname
-      "hostname": "AshwindeMac-mini.local",
+      "name": "my-mac-mini.local", // display name; defaults to hostname
+      "hostname": "my-mac-mini.local",
       "os": "darwin",                  // node os.platform()
       "arch": "arm64",
       "platformLabel": "macOS",        // macOS | Linux | Windows | Unknown
@@ -83,9 +83,12 @@ Rules:
   TTL **15 min** (config `keyTtlMinutes`).
 - Agent token: `dshc_` + `crypto.randomBytes(32).toString('base64url')`, long lived,
   returned to the agent exactly once at enroll; the server keeps only `sha256(token)`.
-- Presence: a computer is **online** while it holds an open SSE stream; `lastSeenAt` is
-  refreshed on stream open, on heartbeat and on result POST. If a stream is absent, a
-  heartbeat newer than 2× `heartbeatMs` also counts as online (belt and braces).
+- Presence: a computer is **online exactly while it holds an open SSE stream**
+  (`online === streams.has(id)`). The heartbeat route still refreshes `lastSeenAt` and
+  echoes the display name, but a fresh heartbeat never makes a stream-less computer
+  online: closing the stream (including a killed agent) flips it offline on the next
+  state read. A half-dead peer without FIN is detected when the next `ping` write fails,
+  so stale presence is bounded by one `heartbeatMs`, not by a separate grace window.
 - Prune: a `pendingKeys` entry whose `usedAt` is set and is older than 1 h, or whose
   `expiresAt` passed 1 h ago, may be dropped on the next write.
 
@@ -108,8 +111,8 @@ Request body (max 16 KiB):
   "key": "dshc_…",
   "agentVersion": "1.0.0",
   "machine": {
-    "hostname": "AshwindeMac-mini.local",
-    "name": "AshwindeMac-mini.local",
+    "hostname": "my-mac-mini.local",
+    "name": "my-mac-mini.local",
     "os": "darwin", "arch": "arm64", "platform": "macOS",
     "cpuModel": "Apple M4 Pro", "memoryBytes": 17179869184, "nodeVersion": "v24.18.1"
   }
@@ -117,7 +120,7 @@ Request body (max 16 KiB):
 ```
 
 Responses:
-- `200 { "computerId": "cmp_…", "token": "dshc_…", "name": "AshwindeMac-mini.local", "serverUrl": "http://…" }`
+- `200 { "computerId": "cmp_…", "token": "dshc_…", "name": "my-mac-mini.local", "serverUrl": "http://…" }`
   Creating a new computer, or re-enrolling a machine whose name/hostname matches an
   existing computer **and** the key was created with `replace: true` (then the old
   token hash is replaced in place, same `id`). Otherwise a new record is created.
@@ -185,7 +188,7 @@ All responses JSON + `cache-control: no-store`. Errors: `{ "error": "<code>", "m
 ```json
 {
   "version": 2,
-  "serverUrl": "http://127.0.0.1:52083",
+  "serverUrl": "http://127.0.0.1:3000",
   "heartbeatMs": 20000,
   "computers": [
     { "id": "cmp_…", "name": "…", "hostname": "…", "os": "darwin",
@@ -302,7 +305,7 @@ paragraph: "You can run shell commands on the user's connected computers with
 Keep it under ~15 lines; return `''` when there are no computers. Verify the exact
 `section()` argument shape with `cordis_inspect_query` (host `Service` → `systemPrompt`)
 before wiring it; if it costs a request, read
-`/Users/ashwin/workspaces/github/deepseek-harness/packages/core/system-prompt/src/index.ts`.
+`<dsh-source-checkout>/packages/core/system-prompt/src/index.ts`.
 
 ## 6. Machine agent (`agent/dsh-computers-agent.mjs`)
 
@@ -418,3 +421,115 @@ Prefer the plain-object export form `export function apply(ctx, config)` +
 - Lead: install the bundle into the desktop profile, enroll this Mac with the real
   one-liner, confirm `computer_list` + `computer_exec` from a live session, screenshot the
   page, then write `README.md` (deployment + security notes) and report.
+
+---
+
+## 10. Runtime mode (v1.1): the plugin can also BE the controlled machine
+
+Motivation: a user who installs this plugin in their **desktop** DSH instance should not
+have to run a terminal command at all. Starting the desktop app (or enabling a switch in
+Settings → 电脑) makes that machine a runtime and it appears on the hub's computer list.
+
+**Topology is explicitly hub-and-spoke, and only hub-and-spoke**: exactly one server is the
+controller; a runtime only ever dials out to the single hub it was enrolled against. There
+is no machine-to-machine control, no mesh, no peer discovery, and a runtime never accepts
+inbound connections. Any machine may however run the plugin in `role: 'both'` and be a hub
+for its own machines *and* a runtime of another hub — that is two independent spokes, not a
+mesh.
+
+The standalone `agent/dsh-computers-agent.mjs` one-liner stays as the headless / always-on
+fallback (launchd/systemd machines that do not run DSH), and both paths share one
+implementation.
+
+### 10.1 Role
+
+New plugin config `role: 'hub' | 'runtime' | 'both'` (default `'both'`).
+
+| role | hub routes + tools + computer list | local runtime card |
+|---|---|---|
+| `hub` | yes | hidden |
+| `runtime` | no controller routes (no `/agent/*`, `/keys`, `/key-status`, `/delete`, `/rename`, `/join.*`, no `computer_*` tools, no prompt section) — but `/state` and `/health` stay registered, because the client learns its role from `/state` | yes |
+| `both` | yes | yes |
+
+Deployments that serve others set `role: 'hub'`; a desktop install leaves the default and
+gets both cards. `/api/dsh-computers/state` gains `"role": "<role>"` so the client can
+decide what to render.
+
+### 10.2 Runtime state (local, per plugin instance)
+
+`${stateDir}/runtime.json`, mode 0600, atomic:
+
+```jsonc
+{
+  "version": 1,
+  "serverUrl": "https://dsh.example.com",
+  "computerId": "cmp_…",
+  "token": "dshc_…",
+  "name": "my-mac-mini.local",
+  "enabled": true,
+  "enrolledAt": "…",
+  "lastConnectedAt": "…",   // optional diagnostics
+  "lastError": null
+}
+```
+
+`enabled` is the user's switch and survives restarts: on plugin load, if `enabled` is true
+the runtime starts automatically (that is the whole point — starting DSH = starting the
+runtime).
+
+### 10.3 Runtime manager
+
+`lib/runtime.js` owns one instance per plugin load:
+
+- `configure({ serverUrl, enrollmentKey })` — POST `<serverUrl>/api/dsh-computers/agent/enroll`
+  (the §3.1 contract, same body the CLI sends), persist §10.2 with `enabled: true`, start.
+- `start()` / `stop()` / `enable(bool)` / `disconnect()` (stop + delete runtime.json).
+- `status()` → `{ configured, enabled, connected, serverUrl, computerId, name, since, lastError }`.
+- Reconnection, backoff, exec and result POSTs are **the agent's** code: import
+  `startRuntime` from `../agent/dsh-computers-agent.mjs` (see §10.4). The manager is a thin
+  lifecycle + persistence wrapper; it must not reimplement the wire protocol.
+- Plugin unload stops the runtime (effect cleanup). Exceptions never escape into the host.
+
+### 10.4 Agent export contract (agent file must stay self-contained)
+
+`agent/dsh-computers-agent.mjs` keeps working when downloaded and executed standalone, and
+additionally exports:
+
+```js
+export function startRuntime(options) // → { stop(): Promise<void>, status(): object }
+```
+
+`options = { serverUrl, token, computerId, name?, heartbeatMs?, log?, onState?(state) }`.
+It owns the SSE loop, exec, results, heartbeat. `log` is `(level, message) => void` and
+defaults to console in CLI mode / the host warning sink in embedded mode. The CLI `run`
+subcommand becomes a thin wrapper around it, and the module must be import-safe (CLI main
+runs only when the file is the process entry point). No relative imports, no deps.
+
+### 10.5 Runtime routes (browser-gated, same fence as §4)
+
+| method | path | body → response |
+|---|---|---|
+| GET | `/api/dsh-computers/runtime` | → §10.3 `status()` + `{ serverUrl }` |
+| POST | `/api/dsh-computers/runtime/connect` | `{ serverUrl, key }` → validate URL (`http`/`https` only), call `configure`, → status. Errors: `400 bad-request` (bad URL/key shape), `401 invalid-key`, `410 key-expired`, `409 key-used` mapped from the hub, `502 hub-unreachable` with the underlying message |
+| POST | `/api/dsh-computers/runtime/enable` | `{ enabled: boolean }` → status |
+| POST | `/api/dsh-computers/runtime/disconnect` | → status (now unconfigured) |
+
+All responses include the full status object so the client needs no second round trip.
+
+### 10.6 Client
+
+Settings → 电脑, when `role !== 'hub'`, renders a **本机运行时** card above the computer list:
+
+- unconfigured: 说明一行 + 服务器地址输入框 + 加入密钥输入框 + `连接` 按钮 (both fields
+  required; paste the key from the hub's 连接电脑 modal). Inline error on failure.
+- configured: machine name + 目标服务器 + 状态点（`运行中` / `已停止` / `连接中…` / `连接失败`）
+  + a `启用` switch (§10.3 enable) + `断开` text button (confirm) + last error line.
+- The computer list card title becomes 「已连接的电脑」 and is shown only when
+  `role !== 'runtime'`; both cards can be visible at once.
+- Poll `/api/dsh-computers/runtime` every 5 s with the same interval as `/state`.
+
+On the **hub** side the 连接电脑 modal keeps the one-line command and additionally exposes
+the raw materials for the desktop path: below the command box, a muted line
+「也可以在这台电脑的 DSH 桌面端打开 设置 → 电脑 → 本机运行时，填入下面的地址和密钥」 plus
+two compact copyable rows — the server URL and the enrollment key (`/keys` already returns
+`serverUrl` and `key`). That is how a user connects a machine without a terminal.
