@@ -2,7 +2,7 @@
 
 A DSH Web plugin that turns DSH-Web on a server into a controller for the user's own
 machines. Each machine runs a small outbound-only agent; the server can then run shell
-commands there through a model-facing tool. Modeled on Memoh's "cloud computer" feature
+commands there through a model-facing tool. One server owns the registry and dispatches;
 (enroll key + one-line install + online presence + exec from the agent).
 
 Read this file completely before writing code. Every name here is a contract between
@@ -188,7 +188,7 @@ All responses JSON + `cache-control: no-store`. Errors: `{ "error": "<code>", "m
 ```json
 {
   "version": 2,
-  "serverUrl": "http://127.0.0.1:3000",
+  "serverUrl": "https://dsh.example.com",   // resolved, see §4.2
   "heartbeatMs": 20000,
   "computers": [
     { "id": "cmp_…", "name": "…", "hostname": "…", "os": "darwin",
@@ -201,7 +201,7 @@ All responses JSON + `cache-control: no-store`. Errors: `{ "error": "<code>", "m
 }
 ```
 
-`bots` is display sugar mirroring Memoh's "1/1 Bot" badge: `used = 1` when a computer
+`bots` is display sugar for the "1/1 Bot" badge: `used = 1` when a computer
 switches from offline → online, `total = 1`. (No per-computer bot ownership in v1; keep
 the field so the UI can show the badge.)
 
@@ -215,14 +215,38 @@ Body `{ "os": "macos" | "windows" | "linux", "replace": false, "label": null }` 
   "os": "macos",
   "expiresAt": "…",
   "serverUrl": "http://host:port",
-  "command": "curl -fsSL 'http://host:port/api/dsh-computers/join.sh?key=dshc_…' | sh",
-  "windowsCommand": "irm 'http://host:port/api/dsh-computers/join.ps1?key=dshc_…' | iex",
-  "installUrl": "http://host:port/api/dsh-computers/join.sh?key=dshc_…"
+  "command": "curl -fsSL 'https://dsh.example.com/api/dsh-computers/join.sh?key=dshc_…' | sh",
+  "windowsCommand": "irm 'https://dsh.example.com/api/dsh-computers/join.ps1?key=dshc_…' | iex",
+  "installUrl": "https://dsh.example.com/api/dsh-computers/join.sh?key=dshc_…"
 }
 ```
 
 Only one pending key at a time: creating a new one invalidates earlier pending keys
-(mark them used). `serverUrl` = config `publicUrl` if set, else `ctx.webServer.getOrigin()`.
+(mark them used).
+
+`serverUrl` (here and in §4.1) is the **externally reachable base**, resolved per request by
+`resolveBaseUrl({ ctx, config, req })`, first match wins:
+
+1. config `publicUrl` — an explicit operator override always wins. It MAY carry a path prefix for
+   a sub-path deployment (e.g. `https://host/dsh`); it is used verbatim, minus a trailing slash.
+2. `x-forwarded-proto` + `x-forwarded-host` (first comma entry of each; both required), or the
+   first element of an RFC 7239 `forwarded:` header (`proto=`/`host=`), or `x-forwarded-ssl: on`
+   as a protocol-only hint.
+3. the request's own `host` header plus a protocol hint: `x-forwarded-proto` / `x-forwarded-ssl`,
+   else the `origin` header's protocol when its host equals the resolved authority, else
+   `ctx.webServer.protocol`. This is what makes an HTTPS reverse proxy that forgets
+   `X-Forwarded-Proto` still produce `https://` — the browser's own `Origin` agrees.
+4. `ctx.webServer.getOrigin()` (wrapped — it throws before the socket binds).
+5. `http://127.0.0.1:<port>` from `ctx.webServer.port`, else `''`.
+
+Auto-detected values are bare origins with no trailing slash. Any candidate that is not a clean
+authority (a path, userinfo, whitespace, CR/LF, or over-long text) is rejected and the next
+source is tried; an incomplete forwarded pair never mixes with the local protocol.
+
+Why forwarded headers are trusted: a deployment behind a reverse proxy or tunnel is exactly the
+case where the browser's own origin is the address another machine can actually reach, so the
+generated one-liner is right with zero configuration (auto-detected public address).
+An operator who does not trust their proxy keeps authority by setting `publicUrl`.
 
 ### 4.3 `GET /api/dsh-computers/key-status?key=…`
 
@@ -367,7 +391,7 @@ window.__ModuleLoader__.load({
 - `ctx.locale.register('dsh-computers', { zh, en })` + `const t = ctx.locale.bind('dsh-computers')`.
   All visible text goes through `t`; `locale/en.json` and `locale/zh.json` in the bundle
   are for the *plugin listing* metadata (`meta.title` / `meta.description`) only.
-- Page layout mirrors Memoh's screenshot: title `电脑`, right-aligned primary button
+- Page layout: title `电脑`, right-aligned primary button
   `+ 连接电脑`, then a bordered list; each row: name, a `1/1 Bot` badge, right side
   online/offline dot + label (`在线` / `离线`), a gear button (rename dialog) and a trash
   button (delete with confirm). Empty state when no computers.

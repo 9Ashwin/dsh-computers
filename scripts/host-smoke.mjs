@@ -14,8 +14,9 @@
  * refusals from a pre-seeded registry, enroll → SSE hello → exec → results,
  * timeout, abort, output truncation, presence (stream-only), the browser gate
  * and its fallback, 405s, join.sh/join.ps1/agent.mjs/health, both tools through
- * the recorded definitions, AND runtime mode (§10): role gating, runtime.json
- * persistence, and connect/enable/disconnect/auto-restart against a fake hub.
+ * the recorded definitions, runtime mode (§10): role gating, runtime.json
+ * persistence, connect/enable/disconnect/auto-restart against a fake hub, and
+ * base-URL auto-detection (§4.2 proxy headers, Origin rescue, IPv6, sub-path).
  */
 
 import assert from 'node:assert/strict'
@@ -26,7 +27,8 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
-import { apply, resolveConfig } from '../index.js'
+import { apply, PLUGIN_VERSION, resolveConfig } from '../index.js'
+import { resolveBaseUrl } from '../lib/http.js'
 import { mintSecret, newComputerId, normalizeDisplayName, sha256Hex, tokenMatches } from '../lib/keys.js'
 import { prunePendingKeys } from '../lib/state.js'
 
@@ -105,6 +107,12 @@ function createFakeContext() {
         if (routes.has(route.path)) throw new Error(`duplicate route ${route.path}`)
         routes.set(route.path, route)
         return () => routes.delete(route.path)
+      },
+      get protocol() {
+        return origin === null ? undefined : new URL(origin).protocol
+      },
+      get port() {
+        return origin === null ? undefined : (Number(new URL(origin).port) || undefined)
       },
       getOrigin() {
         if (origin === null) throw new Error('webserver: origin read before the listener bound a port')
@@ -424,7 +432,7 @@ async function phaseA(root) {
     await check('health: empty deployment', async () => {
       const response = await call(origin, `${API}/health`)
       assert.equal(response.status, 200)
-      assert.deepEqual(response.data, { ok: true, version: '1.0.0', computers: 0, online: 0 })
+      assert.deepEqual(response.data, { ok: true, version: PLUGIN_VERSION, computers: 0, online: 0 })
       assert.equal(response.headers.get('cache-control'), 'no-store')
     })
 
@@ -1321,7 +1329,7 @@ async function phaseE(root) {
       assert.equal(response.data.serverUrl, runtimeRole.origin)
       const health = await call(runtimeRole.origin, `${API}/health`)
       assert.equal(health.status, 200)
-      assert.deepEqual(health.data, { ok: true, version: '1.0.0', computers: 0, online: 0 })
+      assert.deepEqual(health.data, { ok: true, version: PLUGIN_VERSION, computers: 0, online: 0 })
     })
 
     await check('role=runtime: GET /runtime is unconfigured, full status shape, role echoed', async () => {
@@ -1637,6 +1645,253 @@ async function phaseF(root) {
 }
 
 // ---------------------------------------------------------------------------
+// Phase G — base URL auto-detection (PROTOCOL §4.2 `resolveBaseUrl`)
+// ---------------------------------------------------------------------------
+
+async function phaseG(root) {
+  /** Minimal ctx stub: resolveBaseUrl only reads webServer.protocol/port/getOrigin. */
+  const mkCtx = ({ protocol, origin, port, originThrows = false } = {}) => ({
+    webServer: {
+      get protocol() {
+        return protocol
+      },
+      getOrigin() {
+        if (originThrows) throw new Error('webserver: origin read before the listener bound a port')
+        return origin
+      },
+      get port() {
+        return port
+      },
+    },
+  })
+  const req = (headers = {}) => ({ headers })
+  const noConfig = { publicUrl: '' }
+  const boundCtx = () => mkCtx({ protocol: 'http:', origin: 'http://127.0.0.1:3000', port: 3000 })
+
+  await check('base URL: publicUrl wins over every header, sub-path kept verbatim', async () => {
+    const headers = { host: '127.0.0.1:3000', 'x-forwarded-proto': 'http', 'x-forwarded-host': 'evil.example' }
+    assert.equal(resolveBaseUrl({ ctx: boundCtx(), config: { publicUrl: 'https://public.example' }, req: req(headers) }), 'https://public.example')
+    assert.equal(resolveBaseUrl({ ctx: boundCtx(), config: { publicUrl: 'https://public.example/' }, req: req(headers) }), 'https://public.example')
+    assert.equal(resolveBaseUrl({ ctx: boundCtx(), config: { publicUrl: ' https://public.example/dsh/ ' }, req: req(headers) }), 'https://public.example/dsh')
+    // Credentials/query/fragment cannot be part of a base URL: dropped so the
+    // generated command stays a clean URL.
+    assert.equal(
+      resolveBaseUrl({ ctx: boundCtx(), config: { publicUrl: 'https://user:pass@public.example/dsh?x=1#frag' }, req: req(headers) }),
+      'https://public.example/dsh',
+    )
+    // A malformed publicUrl is the operator's bug: detection still runs.
+    assert.equal(
+      resolveBaseUrl({ ctx: boundCtx(), config: { publicUrl: 'not a url' }, req: req({ host: '127.0.0.1:3000' }) }),
+      'http://127.0.0.1:3000',
+    )
+  })
+
+  await check('base URL: x-forwarded-proto + x-forwarded-host become the origin', async () => {
+    const ctx = boundCtx()
+    assert.equal(
+      resolveBaseUrl({ ctx, config: noConfig, req: req({ host: '127.0.0.1:3000', 'x-forwarded-proto': 'https', 'x-forwarded-host': 'dsh.example.com' }) }),
+      'https://dsh.example.com',
+    )
+    // First comma entry of each; default ports are normalized away.
+    assert.equal(
+      resolveBaseUrl({ ctx, config: noConfig, req: req({ host: '127.0.0.1:3000', 'x-forwarded-proto': 'https, http', 'x-forwarded-host': 'dsh.example.com, internal.example' }) }),
+      'https://dsh.example.com',
+    )
+    assert.equal(
+      resolveBaseUrl({ ctx, config: noConfig, req: req({ host: '127.0.0.1:3000', 'x-forwarded-proto': 'HTTPS', 'x-forwarded-host': 'dsh.example.com:443' }) }),
+      'https://dsh.example.com',
+    )
+  })
+
+  await check('base URL: RFC 7239 Forwarded uses the FIRST element only', async () => {
+    const ctx = boundCtx()
+    assert.equal(
+      resolveBaseUrl({ ctx, config: noConfig, req: req({ host: '127.0.0.1:3000', forwarded: 'for=192.0.2.60;proto=https;host=dsh.example.com, for=198.51.100.1;proto=http;host=internal.example' }) }),
+      'https://dsh.example.com',
+    )
+    assert.equal(
+      resolveBaseUrl({ ctx, config: noConfig, req: req({ host: '127.0.0.1:3000', forwarded: 'proto="https";host="dsh.example.com";for=198.51.100.1' }) }),
+      'https://dsh.example.com',
+    )
+  })
+
+  await check('base URL: x-forwarded-ssl:on supplies the protocol (old nginx)', async () => {
+    const ctx = boundCtx()
+    assert.equal(
+      resolveBaseUrl({ ctx, config: noConfig, req: req({ host: '127.0.0.1:3000', 'x-forwarded-ssl': 'on', 'x-forwarded-host': 'dsh.example.com' }) }),
+      'https://dsh.example.com',
+    )
+    assert.equal(
+      resolveBaseUrl({ ctx, config: noConfig, req: req({ host: 'dsh.example.com', 'x-forwarded-ssl': 'on' }) }),
+      'https://dsh.example.com',
+    )
+    // x-forwarded-proto wins when both are present.
+    assert.equal(
+      resolveBaseUrl({ ctx, config: noConfig, req: req({ host: '127.0.0.1:3000', 'x-forwarded-ssl': 'on', 'x-forwarded-proto': 'http', 'x-forwarded-host': 'dsh.example.com' }) }),
+      'http://dsh.example.com',
+    )
+  })
+
+  await check('base URL: incomplete forwarded pair falls through to Host + listener protocol', async () => {
+    const ctx = boundCtx()
+    const hostOnly = resolveBaseUrl({ ctx, config: noConfig, req: req({ host: '127.0.0.1:3000', 'x-forwarded-host': 'dsh.example.com' }) })
+    assert.equal(hostOnly, 'http://127.0.0.1:3000')
+    assert.ok(!hostOnly.includes('undefined'), 'never mix a forwarded host with an unknown protocol')
+    // A protocol-only hint still rescues a Host the proxy passed through
+    // unchanged (HTTPS proxy that omits X-Forwarded-Host).
+    assert.equal(
+      resolveBaseUrl({ ctx, config: noConfig, req: req({ host: '127.0.0.1:3000', 'x-forwarded-proto': 'https' }) }),
+      'https://127.0.0.1:3000',
+    )
+  })
+
+  await check('base URL: Host header + listener protocol', async () => {
+    assert.equal(
+      resolveBaseUrl({ ctx: mkCtx({ protocol: 'http:' }), config: noConfig, req: req({ host: '192.168.1.9:8080' }) }),
+      'http://192.168.1.9:8080',
+    )
+    assert.equal(
+      resolveBaseUrl({ ctx: mkCtx({ protocol: 'https:' }), config: noConfig, req: req({ host: 'dsh.example.com' }) }),
+      'https://dsh.example.com',
+    )
+  })
+
+  await check('base URL: browser Origin rescues an HTTPS proxy without X-Forwarded-Proto', async () => {
+    const ctx = boundCtx()
+    assert.equal(
+      resolveBaseUrl({ ctx, config: noConfig, req: req({ host: 'dsh.example.com', origin: 'https://dsh.example.com' }) }),
+      'https://dsh.example.com',
+    )
+    assert.equal(
+      resolveBaseUrl({ ctx, config: noConfig, req: req({ host: 'dsh.example.com:8443', origin: 'https://dsh.example.com:8443' }) }),
+      'https://dsh.example.com:8443',
+    )
+    // A different Origin host is not a vouch: the listener protocol wins.
+    assert.equal(
+      resolveBaseUrl({ ctx, config: noConfig, req: req({ host: 'dsh.example.com', origin: 'https://evil.example' }) }),
+      'http://dsh.example.com',
+    )
+    // `Origin: null` is present-but-unparseable: refused as a hint.
+    assert.equal(
+      resolveBaseUrl({ ctx, config: noConfig, req: req({ host: 'dsh.example.com', origin: 'null' }) }),
+      'http://dsh.example.com',
+    )
+  })
+
+  await check('base URL: malicious forwarded values fall through to a valid origin', async () => {
+    const ctx = boundCtx()
+    const bad = ['evil.com/x', 'a@b', 'host\r\nx', 'javascript:alert(1)', '', 'x'.repeat(1000)]
+    for (const value of bad) {
+      const viaHost = resolveBaseUrl({
+        ctx,
+        config: noConfig,
+        req: req({ host: '127.0.0.1:3000', 'x-forwarded-proto': 'https', 'x-forwarded-host': value }),
+      })
+      // The bad host never survives; with an https hint the request's own Host
+      // is still rescued, which is a valid origin.
+      assert.equal(viaHost, 'https://127.0.0.1:3000', `x-forwarded-host ${JSON.stringify(value)} must fall through`)
+      assert.match(viaHost, /^https?:\/\/[^\s/]+$/)
+      assert.ok(!viaHost.includes(String(value)) || String(value) === '')
+      const viaRfc = resolveBaseUrl({
+        ctx,
+        config: noConfig,
+        req: req({ host: '127.0.0.1:3000', forwarded: `proto=https;host=${value}` }),
+      })
+      assert.equal(viaRfc, 'http://127.0.0.1:3000', `Forwarded host ${JSON.stringify(value)} must fall through`)
+    }
+    // A forwarded host with a non-http scheme is refused too.
+    assert.equal(
+      resolveBaseUrl({ ctx, config: noConfig, req: req({ host: '127.0.0.1:3000', 'x-forwarded-proto': 'ftp', 'x-forwarded-host': 'dsh.example.com' }) }),
+      'http://127.0.0.1:3000',
+    )
+  })
+
+  await check('base URL: IPv6 authorities work', async () => {
+    const ctx = boundCtx()
+    assert.equal(
+      resolveBaseUrl({ ctx, config: noConfig, req: req({ host: '127.0.0.1:3000', 'x-forwarded-proto': 'https', 'x-forwarded-host': '[::1]:3000' }) }),
+      'https://[::1]:3000',
+    )
+    assert.equal(
+      resolveBaseUrl({ ctx: mkCtx({ protocol: 'http:' }), config: noConfig, req: req({ host: '[::1]:3000' }) }),
+      'http://[::1]:3000',
+    )
+  })
+
+  await check('base URL: getOrigin and port last resorts', async () => {
+    assert.equal(resolveBaseUrl({ ctx: mkCtx({ origin: 'http://127.0.0.1:3000' }), config: noConfig, req: req({}) }), 'http://127.0.0.1:3000')
+    assert.equal(resolveBaseUrl({ ctx: mkCtx({ originThrows: true, port: 3000 }), config: noConfig, req: req({}) }), 'http://127.0.0.1:3000')
+    assert.equal(resolveBaseUrl({ ctx: { webServer: {} }, config: noConfig, req: req({}) }), '')
+    assert.equal(resolveBaseUrl({}), '')
+  })
+
+  // ---- through the real HTTP handlers --------------------------------------
+  const app = await mount({ ...FAST_CONFIG, stateDir: join(root, 'g') })
+  try {
+    // Host/forwarded headers are for URL generation only; a permissive gate
+    // keeps the browser fence out of the way for these assertions.
+    app.fake.setGate({ requestRejection: () => undefined, trustedHosts: [] })
+
+    await check('base URL: /state and /keys agree on forwarded headers; command embeds it', async () => {
+      const headers = { 'x-forwarded-proto': 'https', 'x-forwarded-host': 'dsh.example.com' }
+      const state = await raw(app.origin, `${API}/state`, { headers })
+      assert.equal(state.status, 200)
+      assert.equal(state.data.serverUrl, 'https://dsh.example.com')
+
+      const key = await raw(app.origin, `${API}/keys`, {
+        method: 'POST',
+        headers: { ...headers, 'content-type': 'application/json' },
+        body: JSON.stringify({ os: 'macos' }),
+      })
+      assert.equal(key.status, 200)
+      assert.equal(key.data.serverUrl, 'https://dsh.example.com')
+      assert.equal(key.data.installUrl, `https://dsh.example.com/api/dsh-computers/join.sh?key=${encodeURIComponent(key.data.key)}`)
+      assert.equal(key.data.command, `curl -fsSL 'https://dsh.example.com/api/dsh-computers/join.sh?key=${encodeURIComponent(key.data.key)}' | sh`)
+      assert.equal(key.data.windowsCommand, `irm 'https://dsh.example.com/api/dsh-computers/join.ps1?key=${encodeURIComponent(key.data.key)}' | iex`)
+      assert.ok(!key.data.command.includes('//api/'), 'no double slash in the generated command')
+
+      const join = await raw(app.origin, `${API}/join.sh?key=${encodeURIComponent(key.data.key)}`, { headers })
+      assert.equal(join.status, 200)
+      assert.ok(join.text.includes("SERVER='https://dsh.example.com'"), 'the installer embeds the same resolved base')
+    })
+
+    await check('base URL: Host header drives /state when nothing is forwarded', async () => {
+      const lan = await raw(app.origin, `${API}/state`, { headers: { host: '192.168.1.9:8080' } })
+      assert.equal(lan.data.serverUrl, 'http://192.168.1.9:8080')
+      const rescued = await raw(app.origin, `${API}/state`, { headers: { host: 'dsh.example.com', origin: 'https://dsh.example.com' } })
+      assert.equal(rescued.data.serverUrl, 'https://dsh.example.com')
+      const sslOnly = await raw(app.origin, `${API}/state`, { headers: { host: 'dsh.example.com', 'x-forwarded-ssl': 'on' } })
+      assert.equal(sslOnly.data.serverUrl, 'https://dsh.example.com')
+    })
+  } finally {
+    await app.close()
+  }
+
+  // ---- sub-path publicUrl through the handlers -----------------------------
+  const prefixApp = await mount({
+    ...FAST_CONFIG,
+    stateDir: join(root, 'g-prefix'),
+    publicUrl: 'https://dsh.example.com/dsh/',
+  })
+  try {
+    await check('base URL: sub-path publicUrl is verbatim and never double-slashes', async () => {
+      const state = await call(prefixApp.origin, `${API}/state`)
+      assert.equal(state.data.serverUrl, 'https://dsh.example.com/dsh')
+      const key = await call(prefixApp.origin, `${API}/keys`, { method: 'POST', body: { os: 'linux' } })
+      assert.equal(key.data.serverUrl, 'https://dsh.example.com/dsh')
+      assert.equal(key.data.installUrl, `https://dsh.example.com/dsh/api/dsh-computers/join.sh?key=${encodeURIComponent(key.data.key)}`)
+      assert.ok(!key.data.command.includes('//api/'), 'no double slash after the prefix')
+      assert.ok(!key.data.command.includes('dsh//'))
+      const join = await call(prefixApp.origin, `${API}/join.sh?key=${encodeURIComponent(key.data.key)}`)
+      assert.ok(join.text.includes("SERVER='https://dsh.example.com/dsh'"))
+      assert.ok(join.text.includes('"$SERVER/api/dsh-computers/agent.mjs"'), 'installer downloads through the prefixed base')
+    })
+  } finally {
+    await prefixApp.close()
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -1655,6 +1910,7 @@ try {
   await phaseD()
   await phaseE(root)
   await phaseF(root)
+  await phaseG(root)
 } finally {
   rmSync(root, { recursive: true, force: true })
   clearTimeout(watchdog)

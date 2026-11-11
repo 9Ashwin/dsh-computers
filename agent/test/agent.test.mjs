@@ -13,6 +13,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
+import { AGENT_VERSION } from '../dsh-computers-agent.mjs'
 import { MockComputerServer } from './mock-server.mjs'
 import {
   agentPath,
@@ -166,7 +167,7 @@ test('enroll happy path: saves 0600 config atomically, proves SSE, hides token',
 
   // The machine block matched PROTOCOL §3.1.
   const enrollment = await mock.waitForEnrollment()
-  assert.equal(enrollment.agentVersion, '1.0.0')
+  assert.equal(enrollment.agentVersion, AGENT_VERSION)
   assert.equal(enrollment.machine.os, process.platform)
   assert.equal(enrollment.machine.arch, process.arch)
   assert.equal(enrollment.machine.platform, process.platform === 'darwin' ? 'macOS' : process.platform === 'linux' ? 'Linux' : 'Windows')
@@ -377,7 +378,7 @@ test('run sends heartbeats and picks up the server display name', async (t) => {
   await mock.waitForStream()
 
   const heartbeat = await mock.waitForHeartbeat({ timeoutMs: 10_000 })
-  assert.equal(heartbeat.body.meta.agentVersion, '1.0.0')
+  assert.equal(heartbeat.body.meta.agentVersion, AGENT_VERSION)
   assert.ok(heartbeat.body.meta.memoryBytes > 0)
 
   mock.pushConfig({ name: 'Renamed Mac' })

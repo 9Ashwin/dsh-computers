@@ -2,7 +2,7 @@
 
 把你自己电脑（Mac / Windows / Linux）接到一个 **DSH Web** 部署上，让部署里的智能体在这些电脑上执行 shell 命令。
 
-形态参考 [Memoh](https://github.com/felinics/Memoh) 的 "cloud computer"：**一台服务器是唯一主控**，其余电脑作为被控端接进来。
+形态是「**一台服务器作为唯一主控，其余电脑作为被控端接进来**」：被控端只向外发起一条长连接，主控端负责注册表、在线状态和命令派发。
 
 - **每台电脑都装同一个插件**，所以不需要在终端里粘命令：桌面端 DSH 打开 设置 → 电脑 → **本机运行时**，填服务器地址 + 加入密钥，点「连接」即可。
 - 服务器那一侧是 **电脑** 列表：在线状态、重命名、删除，以及 `+ 连接电脑` 生成的兜底命令（给不装 DSH 的机器，比如跑 launchd/systemd 的 Mac mini、Linux 服务器）。
@@ -36,7 +36,7 @@ dsh plugin install github:9Ashwin/dsh-computers
 
 装好后重启 `dsh web`，设置里会出现 **电脑** 页。
 
-服务端建议把 `role` 固定成 `hub`（只当主控），并把对外可达地址写进 `publicUrl`——否则兜底命令里会指向内网地址：
+服务端建议把 `role` 固定成 `hub`（只当主控）。**对外地址会自动识别**：你从哪个域名打开设置页（含反向代理的 `X-Forwarded-Proto/Host`、`Forwarded` 头），生成的命令就用哪个地址，通常不用配。需要强制指定时才写 `publicUrl`：
 
 ```yaml
 # ~/.dsh/profiles/<profile>/cordis.patch.yml
@@ -44,7 +44,8 @@ dsh plugin install github:9Ashwin/dsh-computers
   name: dsh-computers
   config:
     role: hub
-    # 对外可达地址，例如 https://dsh.example.com ；留空则用 dsh web 监听的地址
+    # 留空 = 按浏览器请求自动推导（含反代的 X-Forwarded-* / Forwarded）；
+    # 只有不想信任代理时才显式写死，例如 https://dsh.example.com
     publicUrl: ''
     execEnabled: true          # false 时拒绝所有远程执行
     execTimeoutMs: 120000      # 单条命令默认超时
@@ -124,7 +125,7 @@ node --check client.js          # 浏览器半
 ## 6. 已知限制
 
 - 一次执行返回一次性结果（不流式），长命令靠 `timeoutMs`；输出单流上限 1 MiB。
-- 一台电脑同一时刻只保留一条连接（新的会顶掉旧的），与 Memoh 一致。
+- 一台电脑同一时刻只保留一条连接（新的会顶掉旧的）。
 - 在线判定只看 SSE 是否存活：杀掉进程立刻离线；网络静默（无 FIN）最多差一个心跳周期。
 - Windows 被控端目前可用 `node agent.mjs run` 手动运行，服务安装只覆盖 macOS/Linux。
 - 电脑与 Bot 的绑定还没有（列表里的 `1/1 Bot` 是占位徽标）；v1 里所有电脑对智能体都可选。
