@@ -2128,6 +2128,365 @@ async function phaseH(root) {
 }
 
 // ---------------------------------------------------------------------------
+// Phase I — access control: routes, AND-rule, tool/list/selection enforcement
+// ---------------------------------------------------------------------------
+
+async function phaseI(root) {
+  const dir = join(root, 'i')
+  const accessFile = join(dir, 'access.json')
+  const firstId = newComputerId()
+  const secondId = newComputerId()
+  const thirdId = newComputerId()
+  const firstToken = mintSecret()
+  const secondToken = mintSecret()
+  seedState(dir, {
+    version: 1,
+    computers: [
+      seedComputer(firstId, 'First Mac', { tokenHash: sha256Hex(firstToken), lastSeenAt: iso(Date.now() - 3_600_000) }),
+      seedComputer(secondId, 'Second Mac', { tokenHash: sha256Hex(secondToken), lastSeenAt: iso(Date.now() - 3_600_000) }),
+      seedComputer(thirdId, 'Third Mac'),
+    ],
+    pendingKeys: [],
+  })
+
+  const app = await mount({ ...FAST_CONFIG, stateDir: dir })
+  const sseClients = []
+  const presetRoster = [{ id: 'default', name: 'Default' }, { id: 'researcher', name: 'Researcher' }]
+  const liveAgents = new Map([
+    ['sess_default', { id: 'sess_default', session: { id: 'sess_default' } }],
+    ['sess_researcher', { id: 'sess_researcher', session: { id: 'sess_researcher' } }],
+  ])
+  try {
+    const origin = app.origin
+    // Host preset services: the researcher session uses a non-default preset.
+    app.fake.setService('agentPresets', {
+      list: async () => presetRoster.map((preset) => ({ ...preset })),
+      presetForSession: (session) => (session && session.id === 'sess_researcher' ? 'researcher' : null),
+    })
+    app.fake.setService('agents', { get: (sessionId) => liveAgents.get(sessionId) })
+
+    const firstSse = await openSse(origin, `${API}/agent/events`, { authorization: `Bearer ${firstToken}` })
+    sseClients.push(firstSse)
+    await firstSse.nextEvent('hello', 2000)
+    const secondSse = await openSse(origin, `${API}/agent/events`, { authorization: `Bearer ${secondToken}` })
+    sseClients.push(secondSse)
+    await secondSse.nextEvent('hello', 2000)
+
+    const execTool = app.fake.tools.get('computer_exec')
+    const listTool = app.fake.tools.get('computer_list')
+    const section = app.fake.sections.find((candidate) => candidate.name === 'computers')
+    const agentOf = (sessionId) => liveAgents.get(sessionId)
+
+    /** Run one allowed computer_exec call and answer its exec event. */
+    const runExec = async (args, sse, token, sessionId, expectedCommand) => {
+      const outcome = execTool.execute(args, { signal: new AbortController().signal, agent: agentOf(sessionId) })
+        .then((value) => ({ value }), (error) => ({ error }))
+      const event = await sse.nextEvent('exec', 3000)
+      assert.equal(event.data.command, expectedCommand)
+      const posted = await raw(origin, `${API}/agent/results`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ requestId: event.data.requestId, ok: true, exitCode: 0, stdout: 'ok\n', stderr: '', durationMs: 1, truncated: false, timedOut: false }),
+      })
+      assert.equal(posted.status, 200)
+      return await outcome
+    }
+
+    await check('access: GET before any rule shows every computer allowed', async () => {
+      const response = await call(origin, `${API}/access?sessionId=sess_default`)
+      assert.equal(response.status, 200)
+      assert.equal(response.data.sessionId, 'sess_default')
+      assert.equal(response.data.presetId, 'default')
+      assert.deepEqual(response.data.presets, presetRoster)
+      assert.equal(response.data.sessionAllowed, null)
+      assert.equal(response.data.computers.length, 3)
+      for (const computer of response.data.computers) {
+        assert.equal(computer.allowed, true)
+        assert.equal(computer.sessionAllowed, true)
+        assert.equal(computer.presetAllowed, true)
+        assert.equal(typeof computer.online, 'boolean')
+        assert.equal(typeof computer.platformLabel, 'string')
+      }
+      assert.equal(existsSync(accessFile), false, 'nothing persisted before the first rule')
+    })
+
+    await check('access: POST session allow-list persists 0600 and flips effective allowed', async () => {
+      const response = await call(origin, `${API}/access`, {
+        method: 'POST',
+        body: { sessionId: 'sess_default', allowedComputers: [secondId] },
+      })
+      assert.equal(response.status, 200)
+      assert.deepEqual(response.data.sessionAllowed, [secondId])
+      const byId = new Map(response.data.computers.map((computer) => [computer.id, computer]))
+      assert.equal(byId.get(secondId).allowed, true)
+      assert.equal(byId.get(firstId).allowed, false)
+      assert.equal(byId.get(firstId).sessionAllowed, false)
+      assert.equal(byId.get(firstId).presetAllowed, true)
+
+      assert.equal(existsSync(accessFile), true)
+      assert.equal(statSync(accessFile).mode & 0o777, 0o600, 'access.json must be 0600')
+      const doc = JSON.parse(readFileSync(accessFile, 'utf8'))
+      assert.equal(doc.version, 1)
+      assert.deepEqual(doc.sessions.sess_default.allow, [secondId])
+      assert.ok(Number.isFinite(Date.parse(doc.sessions.sess_default.updatedAt)))
+    })
+
+    await check('access: computer-level preset rule round trip + validation', async () => {
+      const read = await call(origin, `${API}/access/computer?computerId=${encodeURIComponent(firstId)}`)
+      assert.equal(read.status, 200)
+      assert.equal(read.data.computer.id, firstId)
+      assert.deepEqual(read.data.presets, [
+        { id: 'default', name: 'Default', allowed: true },
+        { id: 'researcher', name: 'Researcher', allowed: true },
+      ])
+      assert.equal(read.data.allowedPresets, null)
+
+      const posted = await call(origin, `${API}/access/computer`, {
+        method: 'POST',
+        body: { computerId: firstId, allowedPresets: ['researcher'] },
+      })
+      assert.equal(posted.status, 200)
+      assert.deepEqual(posted.data.allowedPresets, ['researcher'])
+      assert.deepEqual(posted.data.presets, [
+        { id: 'default', name: 'Default', allowed: false },
+        { id: 'researcher', name: 'Researcher', allowed: true },
+      ])
+      // Second computer only trusts the default preset (non-default preset denied there).
+      const second = await call(origin, `${API}/access/computer`, {
+        method: 'POST',
+        body: { computerId: secondId, allowedPresets: ['default'] },
+      })
+      assert.equal(second.status, 200)
+
+      const doc = JSON.parse(readFileSync(accessFile, 'utf8'))
+      assert.deepEqual(doc.computers[firstId].presets, ['researcher'])
+      assert.deepEqual(doc.computers[secondId].presets, ['default'])
+    })
+
+    await check('access: unknown ids and bad bodies are rejected', async () => {
+      const badSession = await call(origin, `${API}/access?sessionId=`)
+      assert.equal(badSession.status, 400)
+      const unknownComputerInSession = await call(origin, `${API}/access`, {
+        method: 'POST',
+        body: { sessionId: 'sess_default', allowedComputers: ['cmp_000000000000'] },
+      })
+      assert.equal(unknownComputerInSession.status, 400)
+      assert.equal(unknownComputerInSession.data.error, 'bad-request')
+      const badType = await call(origin, `${API}/access`, {
+        method: 'POST',
+        body: { sessionId: 'sess_default', allowedComputers: 'all' },
+      })
+      assert.equal(badType.status, 400)
+      const unknownPreset = await call(origin, `${API}/access/computer`, {
+        method: 'POST',
+        body: { computerId: firstId, allowedPresets: ['ghost'] },
+      })
+      assert.equal(unknownPreset.status, 400)
+      assert.match(unknownPreset.data.message, /unknown Agent preset/)
+      const unknownComputer = await call(origin, `${API}/access/computer`, {
+        method: 'POST',
+        body: { computerId: 'cmp_000000000000', allowedPresets: null },
+      })
+      assert.equal(unknownComputer.status, 404)
+      const unknownGet = await call(origin, `${API}/access/computer?computerId=cmp_000000000000`)
+      assert.equal(unknownGet.status, 404)
+    })
+
+    await check('access: effective answer ANDs session allow-list with preset rule', async () => {
+      const forDefault = await call(origin, `${API}/access?sessionId=sess_default`)
+      assert.equal(forDefault.data.presetId, 'default')
+      const defaultById = new Map(forDefault.data.computers.map((computer) => [computer.id, computer]))
+      // first: session allows? no (allow-list is [second]) AND preset rule (researcher) denies default.
+      assert.equal(defaultById.get(firstId).allowed, false)
+      assert.equal(defaultById.get(firstId).sessionAllowed, false)
+      assert.equal(defaultById.get(firstId).presetAllowed, false)
+      // second: session allows, preset rule allows default.
+      assert.equal(defaultById.get(secondId).allowed, true)
+      // third: excluded by the same session allow-list.
+      assert.equal(defaultById.get(thirdId).allowed, false)
+      assert.equal(defaultById.get(thirdId).sessionAllowed, false)
+
+      const forResearcher = await call(origin, `${API}/access?sessionId=sess_researcher`)
+      assert.equal(forResearcher.data.presetId, 'researcher')
+      const researcherById = new Map(forResearcher.data.computers.map((computer) => [computer.id, computer]))
+      // first allows researcher; researcher has no session rule (all); second only trusts default.
+      assert.equal(researcherById.get(firstId).allowed, true)
+      assert.equal(researcherById.get(secondId).allowed, false)
+      assert.equal(researcherById.get(secondId).presetAllowed, false)
+    })
+
+    await check('enforcement: computer_list hides denied machines and keeps the pin honest', async () => {
+      const value = await listTool.execute({}, { agent: agentOf('sess_default') })
+      // Only the session's allow-list entry is visible (first is also preset-denied).
+      assert.deepEqual(value.computers.map((computer) => computer.id), [secondId])
+      assert.equal(value.hiddenComputerCount, 2)
+      const content = listTool.output.render({}, value)
+      assert.ok(!content[0].text.includes('First Mac'))
+      assert.ok(content[0].text.includes('Second Mac'))
+    })
+
+    await check('enforcement: computer_exec denies a target by session allow-list', async () => {
+      const denied = execTool.execute(
+        { computer: 'First Mac', command: 'echo denied' },
+        { signal: new AbortController().signal, agent: agentOf('sess_default') },
+      )
+      await assert.rejects(denied, /not accessible to this conversation/)
+      await assert.rejects(
+        execTool.execute({ computer: 'First Mac', command: 'echo denied' }, { signal: new AbortController().signal, agent: agentOf('sess_default') }),
+        /管理访问权/,
+      )
+      assert.equal(firstSse.events.filter((event) => event.name === 'exec').length, 0, 'a denied call never reaches the machine')
+      // The allowed machine still works.
+      const allowed = await runExec({ computer: 'Second Mac', command: 'echo allowed' }, secondSse, secondToken, 'sess_default', 'echo allowed')
+      assert.equal(allowed.value.computer.id, secondId)
+    })
+
+    await check('enforcement: computer_exec denies a target by the computer preset rule', async () => {
+      // researcher may use first (rule) but not second (rule pins it to default).
+      const denied = execTool.execute(
+        { computer: 'Second Mac', command: 'echo denied' },
+        { signal: new AbortController().signal, agent: agentOf('sess_researcher') },
+      )
+      await assert.rejects(denied, /not accessible to this conversation/)
+      await assert.rejects(
+        execTool.execute({ computer: 'Second Mac', command: 'echo denied' }, { signal: new AbortController().signal, agent: agentOf('sess_researcher') }),
+        /管理访问权/,
+      )
+      assert.equal(secondSse.events.filter((event) => event.name === 'exec').length, 0)
+      const allowed = await runExec({ computer: 'First Mac', command: 'echo researcher' }, firstSse, firstToken, 'sess_researcher', 'echo researcher')
+      assert.equal(allowed.value.computer.id, firstId)
+    })
+
+    await check('enforcement: POST /selection refuses a denied pin (403 forbidden)', async () => {
+      const denied = await call(origin, `${API}/selection`, { method: 'POST', body: { sessionId: 'sess_default', computerId: firstId } })
+      assert.equal(denied.status, 403)
+      assert.equal(denied.data.error, 'forbidden')
+      assert.match(denied.data.message, /管理访问权/)
+      const allowed = await call(origin, `${API}/selection`, { method: 'POST', body: { sessionId: 'sess_default', computerId: secondId } })
+      assert.equal(allowed.status, 200)
+      assert.equal(allowed.data.computerId, secondId)
+    })
+
+    await check('enforcement: a pinned computer that later becomes denied is refused at exec', async () => {
+      // Pin second for sess_default, then deny the whole session.
+      await call(origin, `${API}/selection`, { method: 'POST', body: { sessionId: 'sess_default', computerId: secondId } })
+      await call(origin, `${API}/access`, { method: 'POST', body: { sessionId: 'sess_default', allowedComputers: [] } })
+      const value = await listTool.execute({}, { agent: agentOf('sess_default') })
+      assert.equal(value.computers.length, 0)
+      assert.equal(value.hiddenComputerCount, 3)
+      const content = listTool.output.render({}, value)
+      assert.match(content[0].text, /may not use any of them/)
+      assert.match(content[0].text, /管理访问权/)
+      const denied = execTool.execute({ command: 'echo pinned-denied' }, { signal: new AbortController().signal, agent: agentOf('sess_default') })
+      await assert.rejects(denied, /not accessible to this conversation/)
+      // Reset the session rule and prove the pin works again.
+      await call(origin, `${API}/access`, { method: 'POST', body: { sessionId: 'sess_default', allowedComputers: null } })
+      const reread = await call(origin, `${API}/access?sessionId=sess_default`)
+      assert.equal(reread.data.sessionAllowed, null)
+      const restored = await runExec({ command: 'echo pinned-restored' }, secondSse, secondToken, 'sess_default', 'echo pinned-restored')
+      assert.equal(restored.value.computer.id, secondId)
+    })
+
+    await check('enforcement: prompt section lists only computers allowed for the assembly Agent', async () => {
+      const defaultText = section.text({ agent: agentOf('sess_default') })
+      assert.ok(defaultText.includes('Second Mac'), 'default preset may use Second Mac')
+      assert.ok(!defaultText.includes('First Mac'), 'default preset may not see First Mac')
+      const researcherText = section.text({ agent: agentOf('sess_researcher') })
+      assert.ok(researcherText.includes('First Mac'))
+      assert.ok(!researcherText.includes('Second Mac'))
+      // No Agent (diagnostics) falls back to the default preset rule alone.
+      const diagnosticText = section.text({})
+      assert.ok(diagnosticText.includes('Second Mac'))
+      assert.ok(!diagnosticText.includes('First Mac'))
+    })
+
+    await check('access: null resets both rules to "all"', async () => {
+      const sessionReset = await call(origin, `${API}/access`, {
+        method: 'POST',
+        body: { sessionId: 'sess_default', allowedComputers: null },
+      })
+      assert.equal(sessionReset.data.sessionAllowed, null)
+      const computerReset = await call(origin, `${API}/access/computer`, {
+        method: 'POST',
+        body: { computerId: firstId, allowedPresets: null },
+      })
+      assert.equal(computerReset.data.allowedPresets, null)
+      const noRule = await call(origin, `${API}/access?sessionId=sess_default`)
+      for (const computer of noRule.data.computers) assert.equal(computer.allowed, true)
+      const value = await listTool.execute({}, { agent: agentOf('sess_default') })
+      assert.equal(value.computers.length, 3)
+      assert.equal(value.hiddenComputerCount, 0)
+      // Second computer still has its own rule: reset it too.
+      await call(origin, `${API}/access/computer`, { method: 'POST', body: { computerId: secondId, allowedPresets: null } })
+    })
+
+    await check('access: routes sit behind the browser gate', async () => {
+      app.fake.setGate({ requestRejection: () => 403, trustedHosts: [] })
+      const refused = await raw(origin, `${API}/access?sessionId=sess_default`)
+      assert.equal(refused.status, 403)
+      assert.equal(refused.data.error, 'unadmitted')
+      const refusedComputer = await raw(origin, `${API}/access/computer?computerId=${encodeURIComponent(firstId)}`)
+      assert.equal(refusedComputer.status, 403)
+      app.fake.setGate(undefined)
+    })
+
+    await check('access: deleting a computer drops its preset rule', async () => {
+      await call(origin, `${API}/access/computer`, { method: 'POST', body: { computerId: thirdId, allowedPresets: ['default'] } })
+      let doc = JSON.parse(readFileSync(accessFile, 'utf8'))
+      assert.ok(doc.computers[thirdId])
+      const deleted = await call(origin, `${API}/delete`, { method: 'POST', body: { id: thirdId } })
+      assert.deepEqual(deleted.data, { ok: true })
+      doc = JSON.parse(readFileSync(accessFile, 'utf8'))
+      assert.equal(doc.computers[thirdId], undefined)
+    })
+
+    await check('access: preset fallback when the host has no agentPresets service', async () => {
+      app.fake.setService('agentPresets', undefined)
+      const response = await call(origin, `${API}/access?sessionId=sess_default`)
+      assert.deepEqual(response.data.presets, [{ id: 'default', name: 'Default' }])
+      assert.equal(response.data.presetId, 'default')
+      const unknown = await call(origin, `${API}/access/computer`, {
+        method: 'POST',
+        body: { computerId: firstId, allowedPresets: ['researcher'] },
+      })
+      assert.equal(unknown.status, 400)
+      assert.match(unknown.data.message, /unknown Agent preset/)
+      // The computer-level rule only ever sees `default` now.
+      const read = await call(origin, `${API}/access/computer?computerId=${firstId}`)
+      assert.deepEqual(read.data.presets, [{ id: 'default', name: 'Default', allowed: true }])
+    })
+  } finally {
+    for (const client of sseClients) client.close()
+    await app.close()
+  }
+
+  await check('access: store prunes sessions to the 200 most recently updated', async () => {
+    const pruneDir = join(root, 'i-prune')
+    let clock = 1_000_000
+    const store = createAccessStore({ stateDir: pruneDir, now: () => (clock += 1_000) })
+    for (let index = 0; index < MAX_ACCESS_SESSIONS + 5; index += 1) store.setSessionAllow(`sess_${index}`, ['cmp_x'])
+    const all = store.all()
+    assert.equal(Object.keys(all.sessions).length, MAX_ACCESS_SESSIONS)
+    assert.equal(all.sessions.sess_0, undefined)
+    assert.equal(all.sessions.sess_4, undefined)
+    assert.ok(all.sessions.sess_5)
+    assert.deepEqual(store.sessionAllow(`sess_${MAX_ACCESS_SESSIONS + 4}`), ['cmp_x'])
+  })
+
+  await check('access: corrupt access.json is set aside', async () => {
+    const corruptDir = join(root, 'i-corrupt')
+    mkdirSync(corruptDir, { recursive: true })
+    writeFileSync(join(corruptDir, 'access.json'), '{nope', { mode: 0o600 })
+    const warnings = []
+    const store = createAccessStore({ stateDir: corruptDir, onWarn: (message) => warnings.push(message) })
+    assert.equal(store.sessionAllow('sess_any'), null)
+    assert.equal(store.computerPresets('cmp_any'), null)
+    assert.equal(existsSync(join(corruptDir, 'access.json')), false)
+    assert.ok(warnings.some((line) => line.includes('not valid JSON')), `expected a corrupt-file warning, saw ${JSON.stringify(warnings)}`)
+  })
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -2148,6 +2507,7 @@ try {
   await phaseF(root)
   await phaseG(root)
   await phaseH(root)
+  await phaseI(root)
 } finally {
   rmSync(root, { recursive: true, force: true })
   clearTimeout(watchdog)
