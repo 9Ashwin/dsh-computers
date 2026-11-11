@@ -27,12 +27,24 @@
 插件是纯 JavaScript，无构建、无第三方依赖，直接从 GitHub 装：
 
 ```bash
-# 方式 A：CLI
+# 方式 A：CLI（推荐用分支，不用 tag，见下面「更新」）
 dsh plugin install github:9Ashwin/dsh-computers
 
 # 方式 B：DSH 设置 → 插件市场 → 安装，粘贴
 #   https://github.com/9Ashwin/dsh-computers
 ```
+
+### 更新
+
+GitHub 安装的插件在 profile 里是**按 spec 固定**的（`github:user/repo` 或 `github:user/repo#v1.0.2`，lockfile 会钉到具体 commit），所以：
+
+- **装 tag（`#v1.0.2`）= 冻在那个版本**，插件市场的「检查更新」永远发现不了新版本。
+- **装分支（不带 `#`）= 可更新**：插件市场 → 已安装 → 「检查更新」会重新解析分支 HEAD 并自动重装，不需要手动卸载。
+- 手动更新时**必须换 spec 才会生效**：用同样的 spec 再装一次只会得到 `already-installed`（这就是"再安装没法更新"的原因）。要升级到某个新版本，直接装新 tag：
+  ```bash
+  dsh plugin install github:9Ashwin/dsh-computers#v1.0.2
+  ```
+  或者先移除再装；种 spec 变了才会真正重新拉取。
 
 装好后重启 `dsh web`，设置里会出现 **电脑** 页。
 

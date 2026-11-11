@@ -99,7 +99,7 @@ window.__ModuleLoader__.load({
       deleting: '删除中…',
 
       'connect.title': '连接电脑',
-      'connect.subtitle': '在要连接的电脑上安装 Node.js 22+，然后在终端运行下方命令',
+      'connect.subtitle': '在这台电脑的 DSH 里打开 设置 → 电脑 → 本机运行时，填入下面的服务器地址和加入密钥',
       'connect.osGroup': '选择电脑的系统',
       'connect.os.windows': 'Windows',
       'connect.os.macos': 'macOS',
@@ -121,10 +121,13 @@ window.__ModuleLoader__.load({
       'connect.connected.notice': '已连接「{name}」',
       'connect.connected.noticeAnonymous': '电脑已连接',
       'connect.pendingCommand': '命令准备中…',
-      'connect.desktopHint': '也可以在这台电脑的 DSH 桌面端打开 设置 → 电脑 → 本机运行时，填入下面的地址和密钥',
       'connect.serverUrl': '服务器地址',
+      'connect.serverUrlHint': '本机运行时卡片里填这个地址',
       'connect.enrollmentKey': '加入密钥',
+      'connect.enrollmentKeyHint': '15 分钟内有效，只能用一次',
       'connect.copyField': '复制{field}',
+      'connect.cliToggle': '没有 DSH 的机器？用命令行接入',
+      'connect.cliHint': '在要连接的电脑上安装 Node.js 22+，然后在终端运行下方命令',
 
       'computers.group': '已连接的电脑',
       'runtime.title': '本机运行时',
@@ -199,7 +202,7 @@ window.__ModuleLoader__.load({
       deleting: 'Deleting…',
 
       'connect.title': 'Connect computer',
-      'connect.subtitle': 'Install Node.js 22+ on the machine you want to connect, then run the command below in a terminal',
+      'connect.subtitle': 'Open Settings → Computers → This computer in the DSH on that machine and paste the server URL and join key below',
       'connect.osGroup': 'Choose the system of that computer',
       'connect.os.windows': 'Windows',
       'connect.os.macos': 'macOS',
@@ -221,10 +224,13 @@ window.__ModuleLoader__.load({
       'connect.connected.notice': 'Connected “{name}”',
       'connect.connected.noticeAnonymous': 'Computer connected',
       'connect.pendingCommand': 'Preparing the command…',
-      'connect.desktopHint': 'You can also open Settings → Computers → This computer in the DSH desktop app on that machine and paste the address and key below.',
       'connect.serverUrl': 'Server URL',
+      'connect.serverUrlHint': 'Paste this into the “This computer” card',
       'connect.enrollmentKey': 'Join key',
+      'connect.enrollmentKeyHint': 'Valid for 15 minutes, single use',
       'connect.copyField': 'Copy {field}',
+      'connect.cliToggle': 'No DSH on that machine? Use the command line',
+      'connect.cliHint': 'Install Node.js 22+ on that machine, then run the command below in a terminal',
 
       'computers.group': 'Connected computers',
       'runtime.title': 'This computer',
@@ -1088,15 +1094,26 @@ window.__ModuleLoader__.load({
   overflow-wrap: anywhere;
 }
 /* Hub modal: the desktop-path block (address + key for the local runtime card). */
-.dshc-details { margin-top: 10px; }
+.dshc-details { margin-top: 12px; }
 .dshc-detailsSummary {
-  display: block;
-  padding: 2px 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 0;
   color: var(--dsw-alias-label-secondary);
   font-size: 12.5px;
   line-height: 18px;
   cursor: pointer;
   list-style: none;
+}
+.dshc-detailsLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (hover: hover) {
+  .dshc-detailsSummary:hover { color: var(--dsw-alias-label-primary); }
 }
 .dshc-detailsSummary::-webkit-details-marker { display: none; }
 .dshc-detailsSummary::marker { content: ''; }
@@ -1118,14 +1135,34 @@ window.__ModuleLoader__.load({
   gap: 6px;
   margin-top: 8px;
 }
+.dshc-cliBody {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 10px;
+}
+.dshc-cliBody .dshc-switchRow { margin: 0; }
+.dshc-copyStack {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+}
 .dshc-copyRow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px 6px 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-1));
+}
+.dshc-copyRowTop {
   display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
-  padding: 6px 6px 6px 10px;
-  border-radius: 9px;
-  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-1));
 }
 .dshc-copyRowKey {
   flex: 0 0 auto;
@@ -1133,6 +1170,14 @@ window.__ModuleLoader__.load({
   color: var(--dsw-alias-label-secondary);
   font-size: 11.5px;
   line-height: 16px;
+}
+.dshc-copyRowHint {
+  margin: 0;
+  padding-left: 64px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  line-height: 16px;
+  overflow-wrap: anywhere;
 }
 .dshc-copyRowValue {
   flex: 1 1 auto;
@@ -1553,8 +1598,9 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * One small copyable value row used by the connect modal's desktop block.
-     * @param {object} props - `label`, `value`.
+     * One copyable value row — the primary content of the connect modal
+     * (server URL and enrollment key).
+     * @param {object} props - `label`, `value`, optional `hint`.
      * @returns {object} row element.
      */
     function CopyRow(props) {
@@ -1578,18 +1624,23 @@ window.__ModuleLoader__.load({
       };
       const action = t('connect.copyField', { field: props.label });
       return h('div', { className: 'dshc-copyRow' },
-        h('span', { className: 'dshc-copyRowKey' }, props.label),
-        h('span', { className: 'dshc-copyRowValue' }, typeof props.value === 'string' ? props.value : '—'),
-        h('button', {
-          type: 'button',
-          className: 'dshc-copyRowBtn',
-          'data-copied': copied ? 'true' : 'false',
-          'aria-label': action,
-          title: copied ? t('connect.copied') : action,
-          disabled: typeof props.value !== 'string' || props.value === '',
-          onClick: () => { void copy(); },
-        }, copied ? h(IconCheck, { size: 13 }) : h(IconCopy, { size: 13 })),
-        failed ? h('span', { className: 'dshc-sr', role: 'status' }, t('connect.copyFailed')) : null);
+        h('div', { className: 'dshc-copyRowTop' },
+          h('span', { className: 'dshc-copyRowKey' }, props.label),
+          h('span', { className: 'dshc-copyRowValue' }, typeof props.value === 'string' && props.value !== '' ? props.value : '—'),
+          h('button', {
+            type: 'button',
+            className: 'dshc-copyRowBtn',
+            'data-copied': copied ? 'true' : 'false',
+            'aria-label': action,
+            title: copied ? t('connect.copied') : action,
+            disabled: typeof props.value !== 'string' || props.value === '',
+            onClick: () => { void copy(); },
+          }, copied ? h(IconCheck, { size: 13 }) : h(IconCopy, { size: 13 }))),
+        props.hint ? h('p', { className: 'dshc-copyRowHint' }, props.hint) : null,
+        /* The accessible name stays stable ("copy <field>"); the outcome is
+         * announced here, so a screen reader hears the confirmation too. */
+        h('span', { className: 'dshc-sr', role: 'status', 'aria-live': 'polite' },
+          copied ? t('connect.copied') : (failed ? t('connect.copyFailed') : '')));
     }
 
     function Skeleton() {
@@ -1969,6 +2020,11 @@ window.__ModuleLoader__.load({
         { id: 'linux', label: t('connect.os.linux') },
       ];
 
+      const primaryServerUrl = keyInfo && typeof keyInfo.serverUrl === 'string' && keyInfo.serverUrl !== ''
+        ? keyInfo.serverUrl
+        : (typeof props.serverUrl === 'string' ? props.serverUrl : '');
+      const primaryKey = keyInfo && typeof keyInfo.key === 'string' ? keyInfo.key : '';
+
       return h(Dialog, {
         title: t('connect.title'),
         subtitle: t('connect.subtitle'),
@@ -1982,69 +2038,75 @@ window.__ModuleLoader__.load({
           }, t('cancel')),
         ],
       },
-      h('div', { className: 'dshc-seg', role: 'group', 'aria-label': t('connect.osGroup') },
-        osOptions.map((option) => h('button', {
-          key: option.id,
-          type: 'button',
-          className: 'dshc-segBtn',
-          'data-active': option.id === os ? 'true' : 'false',
-          'aria-pressed': option.id === os ? 'true' : 'false',
-          onClick: () => setOs(option.id),
-        }, option.label))),
-      h('div', { className: 'dshc-switchRow' },
-        h('div', { className: 'dshc-switchText' },
-          h('div', { className: 'dshc-switchTitle' }, t('connect.replace.title')),
-          h('div', { className: 'dshc-switchHint' }, t('connect.replace.hint'))),
-        h('button', {
-          type: 'button',
-          className: 'dshc-switch',
-          role: 'switch',
-          'aria-checked': replace ? 'true' : 'false',
-          'aria-label': t('connect.replace.title'),
-          onClick: () => setReplace((value) => !value),
-        }, h('span', { className: 'dshc-switchThumb' }))),
-      h('div', { className: 'dshc-cmd' },
-        h('span', { className: 'dshc-cmdLabel' }, t('connect.command.label')),
-        h('button', {
-          type: 'button',
-          className: 'dshc-cmdCopy',
-          'data-copied': copied ? 'true' : 'false',
-          'aria-label': copied ? t('connect.copied') : t('connect.copy'),
-          title: copied ? t('connect.copied') : t('connect.copy'),
-          disabled: command === '',
-          onClick: () => { void copy(); },
-        }, copied ? h(IconCheck, { size: 15 }) : h(IconCopy, { size: 15 })),
-        h('code', {
-          className: 'dshc-cmdText',
-          'data-placeholder': command === '' ? 'true' : 'false',
-        }, command === '' ? t('connect.pendingCommand') : command),
-        h('span', { className: 'dshc-sr', role: 'status', 'aria-live': 'polite' },
-          copied ? t('connect.copied') : (copyFailure ? t('connect.copyFailed') : ''))),
-      copyFailure ? h('p', { className: 'dshc-formError', role: 'alert' }, t('connect.copyFailed')) : null,
-      h('details', { className: 'dshc-details' },
-        h('summary', { className: 'dshc-detailsSummary' }, t('connect.desktopHint')),
-        h('div', { className: 'dshc-detailsBody' },
-          h(CopyRow, {
-            label: t('connect.serverUrl'),
-            value: keyInfo && typeof keyInfo.serverUrl === 'string' ? keyInfo.serverUrl : (props.serverUrl || ''),
-          }),
-          h(CopyRow, {
-            label: t('connect.enrollmentKey'),
-            value: keyInfo && typeof keyInfo.key === 'string' ? keyInfo.key : '',
-          }))),
+      /* PRIMARY (task-8): the plugin path — paste these into 本机运行时. */
+      h('div', { className: 'dshc-copyStack' },
+        h(CopyRow, {
+          key: 'server',
+          label: t('connect.serverUrl'),
+          hint: t('connect.serverUrlHint'),
+          value: primaryServerUrl,
+        }),
+        h(CopyRow, {
+          key: 'key',
+          label: t('connect.enrollmentKey'),
+          hint: t('connect.enrollmentKeyHint'),
+          value: primaryKey,
+        })),
+      /* Waiting / connected / expired — the 2 s key-status poll drives it. */
       h('div', { className: 'dshc-strip', 'data-state': stripState, role: 'status', 'aria-live': 'polite' },
         stripState === 'waiting' ? h(Spinner) : null,
         stripState === 'connected' ? h(IconCheck, { size: 14 }) : null,
         h('span', { className: 'dshc-stripText' }, stripText),
         canRegenerate
           ? h('button', { type: 'button', className: 'dshc-stripAction', onClick: regenerate }, t('connect.regenerate'))
-          : null));
+          : null),
+      /* SECONDARY: machines without DSH — the terminal one-liner, collapsed. */
+      h('details', { className: 'dshc-details' },
+        h('summary', { className: 'dshc-detailsSummary' },
+          h('span', { className: 'dshc-detailsLabel' }, t('connect.cliToggle'))),
+        h('div', { className: 'dshc-cliBody' },
+          h('p', { className: 'dshc-hint', style: { margin: '0' } }, t('connect.cliHint')),
+          h('div', { className: 'dshc-seg', role: 'group', 'aria-label': t('connect.osGroup') },
+            osOptions.map((option) => h('button', {
+              key: option.id,
+              type: 'button',
+              className: 'dshc-segBtn',
+              'data-active': option.id === os ? 'true' : 'false',
+              'aria-pressed': option.id === os ? 'true' : 'false',
+              onClick: () => setOs(option.id),
+            }, option.label))),
+          h('div', { className: 'dshc-switchRow' },
+            h('div', { className: 'dshc-switchText' },
+              h('div', { className: 'dshc-switchTitle' }, t('connect.replace.title')),
+              h('div', { className: 'dshc-switchHint' }, t('connect.replace.hint'))),
+            h('button', {
+              type: 'button',
+              className: 'dshc-switch',
+              role: 'switch',
+              'aria-checked': replace ? 'true' : 'false',
+              'aria-label': t('connect.replace.title'),
+              onClick: () => setReplace((value) => !value),
+            }, h('span', { className: 'dshc-switchThumb' }))),
+          h('div', { className: 'dshc-cmd' },
+            h('span', { className: 'dshc-cmdLabel' }, t('connect.command.label')),
+            h('button', {
+              type: 'button',
+              className: 'dshc-cmdCopy',
+              'data-copied': copied ? 'true' : 'false',
+              'aria-label': copied ? t('connect.copied') : t('connect.copy'),
+              title: copied ? t('connect.copied') : t('connect.copy'),
+              disabled: command === '',
+              onClick: () => { void copy(); },
+            }, copied ? h(IconCheck, { size: 15 }) : h(IconCopy, { size: 15 })),
+            h('code', {
+              className: 'dshc-cmdText',
+              'data-placeholder': command === '' ? 'true' : 'false',
+            }, command === '' ? t('connect.pendingCommand') : command),
+            h('span', { className: 'dshc-sr', role: 'status', 'aria-live': 'polite' },
+              copied ? t('connect.copied') : (copyFailure ? t('connect.copyFailed') : ''))),
+          copyFailure ? h('p', { className: 'dshc-formError', role: 'alert' }, t('connect.copyFailed')) : null)));
     }
 
-    /**
-     * The page body: list, empty state, loading and error states.
-     * @returns {object} the 电脑 page.
-     */
     /**
      * Which of the four §10.6 runtime states the status object describes.
      * @param {object|null} status - §10.3 status() plus serverUrl.
@@ -2276,6 +2338,10 @@ window.__ModuleLoader__.load({
       failure !== null ? h('p', { className: 'dshc-formError', role: 'alert' }, failure) : null);
     }
 
+    /**
+     * The page body: the 本机运行时 card, the 已连接的电脑 list, and their states.
+     * @returns {object} the 电脑 page.
+     */
     function ComputersBoard() {
       useStyles();
       useLocaleRevision();
