@@ -16,7 +16,8 @@
  * and its fallback, 405s, join.sh/join.ps1/agent.mjs/health, both tools through
  * the recorded definitions, runtime mode (§10): role gating, runtime.json
  * persistence, connect/enable/disconnect/auto-restart against a fake hub, and
- * base-URL auto-detection (§4.2 proxy headers, Origin rescue, IPv6, sub-path).
+ * base-URL auto-detection (§4.2 proxy headers, Origin rescue, IPv6, sub-path),
+ * and per-session target selection (selection routes, tool default, list marker).
  */
 
 import assert from 'node:assert/strict'
@@ -29,6 +30,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 
 import { apply, PLUGIN_VERSION, resolveConfig } from '../index.js'
 import { resolveBaseUrl } from '../lib/http.js'
+import { createSelectionStore, MAX_SELECTIONS } from '../lib/selection.js'
 import { mintSecret, newComputerId, normalizeDisplayName, sha256Hex, tokenMatches } from '../lib/keys.js'
 import { prunePendingKeys } from '../lib/state.js'
 
@@ -648,6 +650,7 @@ async function phaseA(root) {
       const value = await listTool.execute({}, {})
       assert.equal(value.computers.length, 1)
       assert.equal(value.computers[0].online, true)
+      assert.equal(value.selectedComputerId, null, 'no session agent means no selection')
       const content = listTool.output.render({}, value)
       assert.equal(content.length, 1)
       assert.equal(content[0].type, 'text')
@@ -940,7 +943,7 @@ async function phaseB(root) {
 
     await check('computer_exec: bad arguments are rejected', async () => {
       const execTool = app.fake.tools.get('computer_exec')
-      await assert.rejects(execTool.execute({ command: 'ls' }, {}), /requires "computer"/)
+      await assert.rejects(execTool.execute({ command: 'ls' }, {}), /no computer selected/)
       await assert.rejects(execTool.execute({ computer: 'Mac mini 2', command: '   ' }, {}), /requires "command"/)
       await assert.rejects(execTool.execute({ computer: 'Mac mini 2', command: 'ls', timeoutMs: 'soon' }, {}), /"timeoutMs" must be a finite number/)
     })
@@ -1892,6 +1895,233 @@ async function phaseG(root) {
 }
 
 // ---------------------------------------------------------------------------
+// Phase H — per-session target selection (task-9)
+// ---------------------------------------------------------------------------
+
+async function phaseH(root) {
+  const dir = join(root, 'h')
+  const selectionsFile = join(dir, 'selections.json')
+  const secondId = newComputerId()
+  const secondToken = mintSecret()
+  // Pre-seed a second computer whose bearer token we know, so two live SSE
+  // streams can answer the override test.
+  seedState(dir, {
+    version: 1,
+    computers: [seedComputer(secondId, 'Second Mac', { tokenHash: sha256Hex(secondToken) })],
+    pendingKeys: [],
+  })
+
+  const app = await mount({ ...FAST_CONFIG, stateDir: dir })
+  const sseClients = []
+  try {
+    const origin = app.origin
+    // Enroll the first computer through the real hub API.
+    const key = await call(origin, `${API}/keys`, { method: 'POST', body: { os: 'macos' } })
+    const enrolled = await call(origin, `${API}/agent/enroll`, {
+      method: 'POST',
+      body: {
+        key: key.data.key,
+        agentVersion: '1.0.0',
+        machine: { hostname: 'first.local', name: 'First Mac', os: 'darwin', platform: 'macOS' },
+      },
+    })
+    assert.equal(enrolled.status, 200)
+    const firstId = enrolled.data.computerId
+    const firstToken = enrolled.data.token
+    const firstSse = await openSse(origin, `${API}/agent/events`, { authorization: `Bearer ${firstToken}` })
+    sseClients.push(firstSse)
+    await firstSse.nextEvent('hello', 2000)
+    const secondSse = await openSse(origin, `${API}/agent/events`, { authorization: `Bearer ${secondToken}` })
+    sseClients.push(secondSse)
+    await secondSse.nextEvent('hello', 2000)
+
+    const execTool = app.fake.tools.get('computer_exec')
+    const listTool = app.fake.tools.get('computer_list')
+    const sessionId = 'sess_smoke_selection'
+
+    /** Run one computer_exec call, answer its exec event, return the outcome. */
+    const runExec = async (args, sse, token, session, expectedCommand) => {
+      const exec = session === undefined
+        ? { signal: new AbortController().signal }
+        : { signal: new AbortController().signal, agent: { id: session } }
+      const outcome = execTool.execute(args, exec).then((value) => ({ value }), (error) => ({ error }))
+      const event = await sse.nextEvent('exec', 3000)
+      assert.equal(event.data.command, expectedCommand)
+      const posted = await raw(origin, `${API}/agent/results`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          requestId: event.data.requestId,
+          ok: true,
+          exitCode: 0,
+          stdout: 'ok\n',
+          stderr: '',
+          durationMs: 1,
+          truncated: false,
+          timedOut: false,
+        }),
+      })
+      assert.equal(posted.status, 200)
+      return await outcome
+    }
+
+    await check('selection: GET is empty before anything is pinned', async () => {
+      const response = await call(origin, `${API}/selection?sessionId=${encodeURIComponent(sessionId)}`)
+      assert.equal(response.status, 200)
+      assert.deepEqual(response.data, { sessionId, computerId: null, computer: null })
+      assert.equal(existsSync(selectionsFile), false, 'nothing persisted before the first pin')
+    })
+
+    await check('selection: POST pins a computer, GET agrees, disk is 0600', async () => {
+      const pin = await call(origin, `${API}/selection`, { method: 'POST', body: { sessionId, computerId: firstId } })
+      assert.equal(pin.status, 200)
+      assert.equal(pin.data.sessionId, sessionId)
+      assert.equal(pin.data.computerId, firstId)
+      assert.equal(pin.data.computer.id, firstId)
+      assert.equal(pin.data.computer.name, 'First Mac')
+      assert.equal(pin.data.computer.online, true)
+      assert.equal(pin.data.computer.platformLabel, 'macOS')
+      const read = await call(origin, `${API}/selection?sessionId=${encodeURIComponent(sessionId)}`)
+      assert.deepEqual(read.data, pin.data)
+
+      assert.equal(existsSync(selectionsFile), true)
+      assert.equal(statSync(selectionsFile).mode & 0o777, 0o600, 'selections.json must be 0600')
+      const doc = JSON.parse(readFileSync(selectionsFile, 'utf8'))
+      assert.equal(doc.version, 1)
+      assert.equal(doc.selections[sessionId].computerId, firstId)
+      assert.ok(Number.isFinite(Date.parse(doc.selections[sessionId].updatedAt)))
+    })
+
+    await check('computer_list: selectedComputerId and the render marker follow the pin', async () => {
+      const value = await listTool.execute({}, { agent: { id: sessionId } })
+      assert.equal(value.computers.length, 2)
+      assert.equal(value.selectedComputerId, firstId)
+      const content = listTool.output.render({}, value)
+      assert.ok(content[0].text.includes('Pinned target for this session: **First Mac**'))
+      assert.ok(content[0].text.includes('| * First Mac |'))
+      assert.ok(content[0].text.includes('Rows marked * are selected'))
+
+      const anonymous = await listTool.execute({}, {})
+      assert.equal(anonymous.selectedComputerId, null)
+      const anonymousContent = listTool.output.render({}, anonymous)
+      assert.ok(!anonymousContent[0].text.includes('Pinned target'))
+      assert.ok(!anonymousContent[0].text.includes('| * '))
+    })
+
+    await check('computer_exec: no computer argument uses the session pin', async () => {
+      const outcome = await runExec({ command: 'echo pinned' }, firstSse, firstToken, sessionId, 'echo pinned')
+      assert.ok(outcome.value, `expected success, got ${outcome.error && outcome.error.message}`)
+      assert.equal(outcome.value.computer.id, firstId)
+      assert.equal(outcome.value.computer.name, 'First Mac')
+      assert.equal(outcome.value.command, 'echo pinned')
+      const content = execTool.output.render({ command: 'echo pinned' }, outcome.value)
+      assert.ok(content[0].text.includes('First Mac'), 'render describes the machine actually used')
+    })
+
+    await check('computer_exec: an explicit computer overrides the session pin', async () => {
+      const outcome = await runExec({ computer: 'Second Mac', command: 'echo override' }, secondSse, secondToken, sessionId, 'echo override')
+      assert.ok(outcome.value, `expected success, got ${outcome.error && outcome.error.message}`)
+      assert.equal(outcome.value.computer.id, secondId)
+      assert.equal(outcome.value.computer.name, 'Second Mac')
+    })
+
+    await check('computer_exec: no pin and no argument is an actionable error', async () => {
+      const anonymous = execTool.execute({ command: 'echo nope' }, { signal: new AbortController().signal })
+      await assert.rejects(anonymous, /no computer selected: pass `computer` .*pick a target computer in the composer/)
+      const otherSession = execTool.execute(
+        { command: 'echo nope' },
+        { signal: new AbortController().signal, agent: { id: 'sess_without_a_pin' } },
+      )
+      await assert.rejects(otherSession, /no computer selected/)
+      // An empty string computer is treated as "not provided" → selection, not a hard error.
+      const emptyArg = await runExec({ computer: '   ', command: 'echo blank' }, firstSse, firstToken, sessionId, 'echo blank')
+      assert.equal(emptyArg.value.computer.id, firstId)
+    })
+
+    await check('selection: POST null clears and removes the disk entry', async () => {
+      const cleared = await call(origin, `${API}/selection`, { method: 'POST', body: { sessionId, computerId: null } })
+      assert.equal(cleared.status, 200)
+      assert.deepEqual(cleared.data, { sessionId, computerId: null, computer: null })
+      const read = await call(origin, `${API}/selection?sessionId=${encodeURIComponent(sessionId)}`)
+      assert.deepEqual(read.data, { sessionId, computerId: null, computer: null })
+      const doc = JSON.parse(readFileSync(selectionsFile, 'utf8'))
+      assert.equal(doc.selections[sessionId], undefined)
+      // With the pin gone, a bare exec is an error again.
+      const outcome = execTool.execute({ command: 'echo none' }, { signal: new AbortController().signal, agent: { id: sessionId } })
+        .then((value) => ({ value }), (error) => ({ error }))
+      const settled = await outcome
+      assert.ok(settled.error)
+      assert.match(settled.error.message, /no computer selected/)
+    })
+
+    await check('selection: validation and unknown ids', async () => {
+      const emptyQuery = await call(origin, `${API}/selection?sessionId=`)
+      assert.equal(emptyQuery.status, 400)
+      assert.equal(emptyQuery.data.error, 'bad-request')
+      const longQuery = await call(origin, `${API}/selection?sessionId=${'x'.repeat(257)}`)
+      assert.equal(longQuery.status, 400)
+      const emptyPost = await call(origin, `${API}/selection`, { method: 'POST', body: { sessionId: '  ', computerId: firstId } })
+      assert.equal(emptyPost.status, 400)
+      const missingField = await call(origin, `${API}/selection`, { method: 'POST', body: { sessionId } })
+      assert.equal(missingField.status, 400)
+      const badType = await call(origin, `${API}/selection`, { method: 'POST', body: { sessionId, computerId: 42 } })
+      assert.equal(badType.status, 400)
+      const unknown = await call(origin, `${API}/selection`, { method: 'POST', body: { sessionId, computerId: 'cmp_000000000000' } })
+      assert.equal(unknown.status, 404)
+      assert.equal(unknown.data.error, 'not-found')
+    })
+
+    await check('selection: routes sit behind the browser gate', async () => {
+      app.fake.setGate({ requestRejection: () => 403, trustedHosts: [] })
+      const refused = await raw(origin, `${API}/selection?sessionId=${encodeURIComponent(sessionId)}`)
+      assert.equal(refused.status, 403)
+      assert.equal(refused.data.error, 'unadmitted')
+      app.fake.setGate(undefined)
+    })
+
+    await check('selection: a deleted computer leaves the session unselected', async () => {
+      const pinned = await call(origin, `${API}/selection`, { method: 'POST', body: { sessionId, computerId: secondId } })
+      assert.equal(pinned.data.computerId, secondId)
+      const deleted = await call(origin, `${API}/delete`, { method: 'POST', body: { id: secondId } })
+      assert.deepEqual(deleted.data, { ok: true })
+      const stale = await call(origin, `${API}/selection?sessionId=${encodeURIComponent(sessionId)}`)
+      assert.deepEqual(stale.data, { sessionId, computerId: null, computer: null })
+      const value = await listTool.execute({}, { agent: { id: sessionId } })
+      assert.equal(value.selectedComputerId, null)
+    })
+  } finally {
+    for (const client of sseClients) client.close()
+    await app.close()
+  }
+
+  await check('selection: store prunes to the 200 most recently updated entries', async () => {
+    const pruneDir = join(root, 'h-prune')
+    let clock = 1_000_000
+    const store = createSelectionStore({ stateDir: pruneDir, now: () => (clock += 1_000) })
+    for (let index = 0; index < MAX_SELECTIONS + 5; index += 1) store.set(`sess_${index}`, `cmp_${index}`)
+    const all = store.all()
+    assert.equal(Object.keys(all).length, MAX_SELECTIONS)
+    assert.equal(all.sess_0, undefined)
+    assert.equal(all.sess_4, undefined)
+    assert.ok(all.sess_5)
+    assert.equal(store.get(`sess_${MAX_SELECTIONS + 4}`), `cmp_${MAX_SELECTIONS + 4}`)
+  })
+
+  await check('selection: corrupt selections.json is set aside', async () => {
+    const corruptDir = join(root, 'h-corrupt')
+    mkdirSync(corruptDir, { recursive: true })
+    writeFileSync(join(corruptDir, 'selections.json'), '{oops', { mode: 0o600 })
+    const warnings = []
+    const store = createSelectionStore({ stateDir: corruptDir, onWarn: (message) => warnings.push(message) })
+    assert.equal(store.get('sess_any'), null)
+    assert.equal(existsSync(join(corruptDir, 'selections.json')), false)
+    assert.ok(warnings.some((line) => line.includes('not valid JSON')), `expected a corrupt-file warning, saw ${JSON.stringify(warnings)}`)
+    const aside = readdirSync(corruptDir).filter((name) => name.startsWith('selections.json.corrupt-'))
+    assert.equal(aside.length, 1)
+  })
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -1911,6 +2141,7 @@ try {
   await phaseE(root)
   await phaseF(root)
   await phaseG(root)
+  await phaseH(root)
 } finally {
   rmSync(root, { recursive: true, force: true })
   clearTimeout(watchdog)

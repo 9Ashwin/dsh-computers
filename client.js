@@ -33,6 +33,8 @@ window.__ModuleLoader__.load({
     const NS = 'dsh-computers';
     const SECTION_ID = 'computers';
     const SECTION_ORDER = 45;
+    const TARGET_SLOT_ID = 'computers-target';
+    const TARGET_SLOT_ORDER = 20;
     const STYLE_ID = 'dsh-computers/client.css';
     const STATE_POLL_MS = 5000;
     const KEY_POLL_MS = 2000;
@@ -51,6 +53,8 @@ window.__ModuleLoader__.load({
       runtimeConnect: 'api/dsh-computers/runtime/connect',
       runtimeEnable: 'api/dsh-computers/runtime/enable',
       runtimeDisconnect: 'api/dsh-computers/runtime/disconnect',
+      /* Per-session target computer for the composer chip (task-9 host side). */
+      selection: 'api/dsh-computers/selection',
     };
 
     // #region locales
@@ -157,6 +161,15 @@ window.__ModuleLoader__.load({
       'runtime.lastError': '最近错误：{message}',
       'runtime.connected.notice': '本机已接入 {server}',
       'runtime.disconnected.notice': '已断开本机运行时',
+
+      'target.label': '目标电脑',
+      'target.cloud': '云端电脑',
+      'target.cloudHint': '服务器本机',
+      'target.menuLabel': '选择这台会话使用的电脑',
+      'target.chipLabel': '这台对话使用的电脑：{name}',
+      'target.manage': '在 设置 → 电脑 中管理',
+      'target.offline': '离线',
+      'target.failed': '切换失败：{message}',
     };
 
     const en = {
@@ -260,6 +273,15 @@ window.__ModuleLoader__.load({
       'runtime.lastError': 'Last error: {message}',
       'runtime.connected.notice': 'This computer joined {server}',
       'runtime.disconnected.notice': 'This computer’s runtime is disconnected',
+
+      'target.label': 'Target computer',
+      'target.cloud': 'Cloud computer',
+      'target.cloudHint': 'Server itself',
+      'target.menuLabel': 'Choose the computer this session uses',
+      'target.chipLabel': 'Computer for this chat: {name}',
+      'target.manage': 'Manage in Settings → Computers',
+      'target.offline': 'Offline',
+      'target.failed': 'Could not switch: {message}',
     };
 
     /* Active translate seat, wired by apply() to the locale service. The
@@ -342,6 +364,7 @@ window.__ModuleLoader__.load({
         strokeLinejoin: 'round',
         'aria-hidden': 'true',
         focusable: 'false',
+        className: props.className,
       }, shapes.map((shape, index) => h(shape[0], Object.assign({ key: `s${index}` }, shape[1]))));
     }
 
@@ -387,6 +410,24 @@ window.__ModuleLoader__.load({
           ['rect', { x: 9, y: 9, width: 11, height: 11, rx: 2 }],
           ['path', { d: 'M5 15V5a2 2 0 0 1 2-2h10' }],
         ],
+      });
+    }
+
+    function IconChevron(props) {
+      return h(SvgIcon, {
+        size: props.size,
+        className: props.className,
+        shapes: [['path', { d: 'm6 9 6 6 6-6' }]],
+      });
+    }
+
+    function IconCloud(props) {
+      return h(SvgIcon, {
+        size: props.size,
+        shapes: [[
+          'path',
+          { d: 'M17.5 19a4.5 4.5 0 1 0-1.4-8.8A6 6 0 0 0 4.6 12.7 3.5 3.5 0 0 0 6 19h11.5Z' },
+        ]],
       });
     }
 
@@ -761,6 +802,135 @@ window.__ModuleLoader__.load({
 .dshc-dot[data-state="running"] { background: var(--dsw-alias-state-success-primary); }
 .dshc-dot[data-state="connecting"] { background: var(--dsw-alias-state-warn-primary); }
 .dshc-dot[data-state="failed"] { background: var(--dsw-alias-state-error-primary); }
+
+/* Composer target-computer chip + menu (slot conversation.input.left). */
+.dshc-targetWrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.dshc-target {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 200px;
+  height: 28px;
+  padding: 0 7px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 18px;
+  cursor: pointer;
+}
+.dshc-target svg { flex: none; }
+@media (hover: hover) {
+  .dshc-target:hover {
+    background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
+    color: var(--dsw-alias-label-primary);
+  }
+}
+.dshc-target[data-open="true"] {
+  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
+  color: var(--dsw-alias-label-primary);
+}
+.dshc-target:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 1px;
+}
+.dshc-targetLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dshc-targetChevron { transition: transform 120ms ease; opacity: 0.75; }
+.dshc-target[data-open="true"] .dshc-targetChevron { transform: rotate(180deg); }
+.dshc-targetError {
+  min-width: 0;
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 11.5px;
+  line-height: 16px;
+}
+.dshc-menu {
+  position: fixed;
+  z-index: 1200;
+  min-width: 240px;
+  max-width: min(280px, calc(100vw - 16px));
+  padding: 4px;
+  overflow-y: auto;
+  border: 0.5px solid var(--dsw-alias-border-l1);
+  border-radius: 11px;
+  background: var(--dsw-alias-bg-layer-3, var(--dsw-alias-bg-overlay, var(--dsw-alias-bg-layer-2)));
+  box-shadow: var(--dsw-elevation-prominent, 0 16px 40px rgba(0, 0, 0, 0.24));
+  color: var(--dsw-alias-label-primary);
+}
+.dshc-menuItem {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 30px;
+  padding: 4px 7px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 18px;
+  text-align: left;
+  cursor: pointer;
+}
+.dshc-menuItem:disabled { cursor: not-allowed; opacity: 0.45; }
+@media (hover: hover) {
+  .dshc-menuItem:hover:not(:disabled) {
+    background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
+  }
+}
+.dshc-menuItem:focus-visible {
+  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
+  outline: none;
+}
+.dshc-menuItem svg { flex: none; }
+.dshc-menuName {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dshc-menuItem[data-offline="true"] .dshc-menuName { color: var(--dsw-alias-label-secondary); }
+.dshc-menuHint {
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  line-height: 16px;
+}
+.dshc-menuDot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dsw-alias-state-success-primary);
+}
+.dshc-menuDot[data-offline="true"] { background: var(--dsw-alias-state-idle-primary); }
+.dshc-menuCheck { flex: none; color: var(--dsw-alias-brand-primary); }
+.dshc-menuFooter {
+  margin: 4px 2px 0;
+  padding: 6px 7px 2px;
+  border-top: 1px solid var(--dsw-alias-border-l1);
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  line-height: 16px;
+}
 
 .dshc-errorCard {
   display: flex;
@@ -1360,6 +1530,15 @@ window.__ModuleLoader__.load({
         signal,
       }),
       runtimeDisconnect: (signal) => requestJson(API.runtimeDisconnect, { method: 'POST', body: {}, signal }),
+      readSelection: (sessionId, signal) => requestJson(
+        `${API.selection}?sessionId=${encodeURIComponent(sessionId)}`,
+        { signal },
+      ),
+      selectTarget: (sessionId, computerId, signal) => requestJson(API.selection, {
+        method: 'POST',
+        body: { sessionId, computerId },
+        signal,
+      }),
     };
 
     /** @param {object|null} data - a /state payload. @returns {string} 'hub' | 'runtime' | 'both'. */
@@ -2519,6 +2698,352 @@ window.__ModuleLoader__.load({
 
     // #endregion
 
+    // #region composer target chip
+
+    /**
+     * Composer target-computer chip (slot `conversation.input.left`, session scope).
+     *
+     * Shows which machine this session is aimed at and lets the user switch it:
+     * 云端电脑 (the server itself) or one of the connected computers. The menu is
+     * portaled to <body> because the composer clips its own overflow.
+     * @param {object} props - `sessionId` plus whatever the composer passes.
+     * @returns {object|null} chip element, or null when the chip does not apply.
+     */
+    function TargetChip(props) {
+      useStyles();
+      useLocaleRevision();
+      const sessionId = props && typeof props.sessionId === 'string' ? props.sessionId : '';
+      const [view, setView] = React.useState({ phase: 'loading', role: null, computers: [] });
+      const [selection, setSelection] = React.useState({ computerId: null, computer: null });
+      const [open, setOpen] = React.useState(false);
+      const [anchor, setAnchor] = React.useState(null);
+      const [failure, setFailure] = React.useState(null);
+      const alive = React.useRef(true);
+      const scope = React.useRef(null);
+      const chipRef = React.useRef(null);
+      const menuRef = React.useRef(null);
+      const pending = React.useRef(false);
+      const initialFocus = React.useRef(0);
+      const failureTimer = React.useRef(null);
+      if (scope.current === null) scope.current = createScope();
+
+      const applySelection = React.useCallback((result) => {
+        setSelection({
+          computerId: result && typeof result.computerId === 'string' && result.computerId !== '' ? result.computerId : null,
+          computer: result && result.computer && typeof result.computer === 'object' ? result.computer : null,
+        });
+      }, []);
+
+      /* One /state + /selection round per tick; a state failure hides the chip
+       * (there is no honest target to display). */
+      const load = React.useCallback(async () => {
+        if (sessionId === '') return;
+        let state;
+        try {
+          state = await scope.current.run((signal) => api.readState(signal));
+        } catch (error) {
+          if (!alive.current || (error && error.name === 'AbortError')) return;
+          setView({ phase: 'hidden', role: null, computers: [] });
+          return;
+        }
+        if (!alive.current) return;
+        const role = roleOf(state);
+        if (role === 'runtime') {
+          setView({ phase: 'hidden', role, computers: [] });
+          return;
+        }
+        setView({
+          phase: 'ready',
+          role,
+          computers: state && Array.isArray(state.computers) ? state.computers : [],
+        });
+        try {
+          const current = await scope.current.run((signal) => api.readSelection(sessionId, signal));
+          if (!alive.current || pending.current) return;
+          applySelection(current);
+        } catch (error) {
+          /* A selection read failure keeps the last known target on screen. */
+        }
+      }, [applySelection, sessionId]);
+
+      React.useEffect(() => {
+        alive.current = true;
+        if (sessionId === '') {
+          setView({ phase: 'hidden', role: null, computers: [] });
+          return () => { alive.current = false; };
+        }
+        void load();
+        const poll = setInterval(() => {
+          if (alive.current) void load();
+        }, STATE_POLL_MS);
+        return () => {
+          alive.current = false;
+          clearInterval(poll);
+          if (failureTimer.current !== null) {
+            clearTimeout(failureTimer.current);
+            failureTimer.current = null;
+          }
+          if (scope.current) scope.current.abortAll();
+        };
+      }, [load, sessionId]);
+
+      const computers = view.computers;
+      const selectedId = selection.computerId;
+      const selectedComputer = selection.computer;
+      const currentLabel = selectedId === null || selectedId === ''
+        ? t('target.cloud')
+        : (selectedComputer && typeof selectedComputer.name === 'string' && selectedComputer.name !== ''
+          ? selectedComputer.name
+          : t('target.cloud'));
+
+      const menuRows = [
+        {
+          key: 'cloud',
+          id: null,
+          label: t('target.cloud'),
+          hint: t('target.cloudHint'),
+          computer: null,
+          offline: false,
+        },
+      ].concat(computers.map((computer) => ({
+        key: String(computer.id || computer.name || ''),
+        id: computer.id,
+        label: typeof computer.name === 'string' && computer.name !== ''
+          ? computer.name
+          : (typeof computer.hostname === 'string' && computer.hostname !== '' ? computer.hostname : String(computer.id || '')),
+        hint: typeof computer.platformLabel === 'string' ? computer.platformLabel : '',
+        computer,
+        offline: computer.online !== true,
+      })));
+
+      const menuItems = () => {
+        if (menuRef.current === null || typeof menuRef.current.querySelectorAll !== 'function') return [];
+        try {
+          return Array.prototype.slice.call(menuRef.current.querySelectorAll('[role="menuitemradio"]'));
+        } catch (error) {
+          return [];
+        }
+      };
+
+      const focusRow = (index) => {
+        const items = menuItems();
+        if (items.length === 0) return;
+        const next = ((index % items.length) + items.length) % items.length;
+        try {
+          items[next].focus();
+        } catch (error) {
+          /* ignore */
+        }
+      };
+
+      const openMenu = (preferLast) => {
+        const checked = menuRows.findIndex((row) => (row.id === null ? selectedId === null : row.id === selectedId));
+        initialFocus.current = preferLast ? menuRows.length - 1 : (checked >= 0 ? checked : 0);
+        setFailure(null);
+        setOpen(true);
+      };
+
+      const closeMenu = (restoreFocus) => {
+        setOpen(false);
+        if (!restoreFocus) return;
+        try {
+          if (chipRef.current && typeof chipRef.current.focus === 'function') chipRef.current.focus();
+        } catch (error) {
+          /* ignore */
+        }
+      };
+
+      /* Anchor above the chip, focus the checked row, and own the outside
+       * dismissals while open. */
+      React.useEffect(() => {
+        if (!open || typeof document === 'undefined') return undefined;
+        const doc = document;
+        const position = () => {
+          const chip = chipRef.current;
+          if (!chip || typeof chip.getBoundingClientRect !== 'function') return;
+          const rect = chip.getBoundingClientRect();
+          const viewportWidth = typeof window !== 'undefined' && window.innerWidth ? window.innerWidth : 1024;
+          const viewportHeight = typeof window !== 'undefined' && window.innerHeight ? window.innerHeight : 768;
+          const left = Math.max(8, Math.min(rect.left, viewportWidth - 248 - 8));
+          const bottom = Math.max(8, viewportHeight - rect.top + 6);
+          setAnchor({
+            left,
+            bottom,
+            maxHeight: Math.max(160, Math.min(340, viewportHeight - bottom - 12)),
+          });
+        };
+        position();
+        focusRow(initialFocus.current);
+        const onPointerDown = (event) => {
+          const menu = menuRef.current;
+          const chip = chipRef.current;
+          if (menu && menu.contains && menu.contains(event.target)) return;
+          if (chip && chip.contains && chip.contains(event.target)) return;
+          setOpen(false);
+        };
+        doc.addEventListener('mousedown', onPointerDown, true);
+        doc.addEventListener('touchstart', onPointerDown, true);
+        doc.addEventListener('resize', position, true);
+        doc.addEventListener('scroll', position, true);
+        return () => {
+          doc.removeEventListener('mousedown', onPointerDown, true);
+          doc.removeEventListener('touchstart', onPointerDown, true);
+          doc.removeEventListener('resize', position, true);
+          doc.removeEventListener('scroll', position, true);
+        };
+      }, [open]);
+
+      const onMenuKeyDown = (event) => {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          event.stopPropagation();
+          closeMenu(true);
+          return;
+        }
+        const items = menuItems();
+        if (event.key === 'Tab') {
+          event.preventDefault();
+          event.stopPropagation();
+          if (items.length === 0) return;
+          const active = typeof document !== 'undefined' ? document.activeElement : null;
+          const index = items.indexOf(active);
+          const next = event.shiftKey
+            ? (index <= 0 ? items.length - 1 : index - 1)
+            : (index < 0 || index === items.length - 1 ? 0 : index + 1);
+          try {
+            items[next].focus();
+          } catch (error) {
+            /* ignore */
+          }
+          return;
+        }
+        if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp' && event.key !== 'Home' && event.key !== 'End') return;
+        event.preventDefault();
+        if (items.length === 0) return;
+        const active = typeof document !== 'undefined' ? document.activeElement : null;
+        const index = items.indexOf(active);
+        let next = index;
+        if (event.key === 'Home') next = 0;
+        else if (event.key === 'End') next = items.length - 1;
+        else if (event.key === 'ArrowDown') next = index < 0 ? 0 : (index + 1) % items.length;
+        else next = index <= 0 ? items.length - 1 : index - 1;
+        try {
+          items[next].focus();
+        } catch (error) {
+          /* ignore */
+        }
+      };
+
+      /* Optimistic switch: the chip moves first, then reverts on failure. */
+      const choose = async (row) => {
+        if (view.phase !== 'ready' || sessionId === '' || pending.current) return;
+        const previous = selection;
+        const nextId = row.id;
+        const nextComputer = row.computer;
+        setOpen(false);
+        setFailure(null);
+        setSelection({ computerId: nextId, computer: nextComputer });
+        pending.current = true;
+        try {
+          const result = await scope.current.run((signal) => api.selectTarget(sessionId, nextId, signal));
+          if (!alive.current) return;
+          applySelection(result && typeof result === 'object' ? result : { computerId: nextId, computer: nextComputer });
+        } catch (error) {
+          if (!alive.current) return;
+          if (error && error.name === 'AbortError') return;
+          setSelection(previous);
+          setFailure(t('target.failed', { message: messageOf(error) }));
+          if (failureTimer.current !== null) clearTimeout(failureTimer.current);
+          failureTimer.current = setTimeout(() => {
+            failureTimer.current = null;
+            if (alive.current) setFailure(null);
+          }, 5000);
+        } finally {
+          pending.current = false;
+        }
+      };
+
+      if (view.phase !== 'ready') return null;
+
+      const chip = h('button', {
+        ref: chipRef,
+        type: 'button',
+        className: 'dshc-target',
+        'data-open': open ? 'true' : 'false',
+        'aria-haspopup': 'menu',
+        'aria-expanded': open ? 'true' : 'false',
+        'aria-label': t('target.chipLabel', { name: currentLabel }),
+        title: currentLabel,
+        onClick: () => {
+          if (open) closeMenu(false);
+          else openMenu(false);
+        },
+        onKeyDown: (event) => {
+          if (open) return;
+          if (event.key === 'ArrowDown') {
+            event.preventDefault();
+            openMenu(false);
+          } else if (event.key === 'ArrowUp') {
+            event.preventDefault();
+            openMenu(true);
+          }
+        },
+      },
+        h(IconMonitor, { size: 14 }),
+        h('span', { className: 'dshc-targetLabel' }, currentLabel),
+        h(IconChevron, { size: 12, className: 'dshc-targetChevron' }));
+
+      const menu = open && anchor !== null
+        ? renderLayer(h('div', {
+          ref: menuRef,
+          className: 'dshc-menu',
+          role: 'menu',
+          'aria-label': t('target.menuLabel'),
+          style: {
+            left: `${anchor.left}px`,
+            bottom: `${anchor.bottom}px`,
+            maxHeight: `${anchor.maxHeight}px`,
+          },
+          onKeyDown: onMenuKeyDown,
+          /* React portals bubble through the REACT tree, so a row click would
+           * reach the composer's own handlers without this stop (the shipped
+           * Menu primitive does the same). */
+          onClick: (event) => event.stopPropagation(),
+          onMouseDown: (event) => event.stopPropagation(),
+        },
+          menuRows.map((row) => {
+            const checked = row.id === null ? selectedId === null : row.id === selectedId;
+            return h('button', {
+              key: row.key,
+              type: 'button',
+              role: 'menuitemradio',
+              'aria-checked': checked ? 'true' : 'false',
+              className: 'dshc-menuItem',
+              'data-checked': checked ? 'true' : 'false',
+              'data-offline': row.offline ? 'true' : 'false',
+              tabIndex: -1,
+              onClick: () => { void choose(row); },
+            },
+              row.id === null ? h(IconCloud, { size: 14 }) : h(IconMonitor, { size: 14 }),
+              h('span', { className: 'dshc-menuName' }, row.label),
+              row.hint ? h('span', { className: 'dshc-menuHint' }, row.hint) : null,
+              row.id === null ? null : h('span', { className: 'dshc-menuDot', 'data-offline': row.offline ? 'true' : 'false' }),
+              row.offline ? h('span', { className: 'dshc-menuHint' }, t('target.offline')) : null,
+              checked ? h(IconCheck, { size: 13, className: 'dshc-menuCheck' }) : null);
+          }),
+          h('div', { className: 'dshc-menuFooter' }, t('target.manage'))))
+        : null;
+
+      return h('span', { className: 'dshc-targetWrap' },
+        chip,
+        failure !== null
+          ? h('span', { className: 'dshc-targetError', role: 'status', title: failure }, failure)
+          : null,
+        menu);
+    }
+
+    // #endregion
+
     // #region error boundary
 
     /**
@@ -2625,33 +3150,59 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const mount = () => ctx.slots.inject('settings.section', () => ctx.slots.register({
-        name: 'settings.section',
-        id: SECTION_ID,
-        order: SECTION_ORDER,
-        label: () => t('nav'),
-      }, ComputersPanel));
+      /* Both seats are declared by shell plugins this package does not depend
+       * on, so each registration goes through slots.inject: a shell without the
+       * seat leaves that surface simply absent instead of failing boot. */
+      const mount = (slotName, register) => {
+        try {
+          const stop = ctx.slots.inject(slotName, register);
+          return typeof stop === 'function' ? stop : null;
+        } catch (error) {
+          try {
+            console.warn(`[dsh-computers] ${slotName} registration failed:`, error);
+          } catch (ignored) {
+            /* ignore */
+          }
+          return null;
+        }
+      };
+
+      const mountAll = () => {
+        const stops = [];
+        const settingsStop = mount('settings.section', () => ctx.slots.register({
+          name: 'settings.section',
+          id: SECTION_ID,
+          order: SECTION_ORDER,
+          label: () => t('nav'),
+        }, ComputersPanel));
+        if (settingsStop !== null) stops.push(settingsStop);
+        const targetStop = mount('conversation.input.left', () => ctx.slots.register({
+          name: 'conversation.input.left',
+          id: TARGET_SLOT_ID,
+          order: TARGET_SLOT_ORDER,
+          label: () => t('target.label'),
+        }, TargetChip));
+        if (targetStop !== null) stops.push(targetStop);
+        return () => {
+          for (const stop of stops) {
+            try {
+              stop();
+            } catch (error) {
+              /* ignore */
+            }
+          }
+        };
+      };
 
       try {
         if (typeof ctx.effect === 'function') {
-          ctx.effect(() => {
-            const stop = mount();
-            return () => {
-              if (typeof stop === 'function') {
-                try {
-                  stop();
-                } catch (error) {
-                  /* ignore */
-                }
-              }
-            };
-          }, 'dsh-computers: settings section');
+          ctx.effect(mountAll, 'dsh-computers: slots');
         } else {
-          mount();
+          mountAll();
         }
       } catch (error) {
         try {
-          console.warn('[dsh-computers] settings section registration failed:', error);
+          console.warn('[dsh-computers] slot registration failed:', error);
         } catch (ignored) {
           /* ignore */
         }

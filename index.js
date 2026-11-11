@@ -14,6 +14,7 @@
 import { createHub } from './lib/hub.js'
 import { createRoutes, createRuntimeRoutes, createRuntimeStatusRoutes } from './lib/routes.js'
 import { createRuntimeManager } from './lib/runtime.js'
+import { createSelectionStore } from './lib/selection.js'
 import { resolveStateDir, createStore } from './lib/state.js'
 import { createTools } from './lib/tools.js'
 
@@ -24,7 +25,7 @@ export const name = 'dsh-computers'
 export const inject = ['tools', 'webServer']
 
 /** Version reported by `/api/dsh-computers/health` (and asserted by the smoke harness). */
-export const PLUGIN_VERSION = '1.0.2'
+export const PLUGIN_VERSION = '1.1.0'
 
 /** The machine agent bundle, served at request time (never imported). */
 const AGENT_URL = new URL('./agent/dsh-computers-agent.mjs', import.meta.url)
@@ -149,6 +150,7 @@ export function apply(ctx, config) {
   // API, register computer_* tools or contribute a prompt section.
   if (resolved.role !== 'runtime') {
     const store = createStore({ stateDir, onWarn })
+    const selections = createSelectionStore({ stateDir, onWarn })
     const hub = createHub({
       store,
       heartbeatMs: resolved.heartbeatMs,
@@ -163,12 +165,13 @@ export function apply(ctx, config) {
       config: resolved,
       store,
       hub,
+      selections,
       role: resolved.role,
       version: PLUGIN_VERSION,
       agentUrl: AGENT_URL,
       onWarn,
     })
-    createTools({ ctx, config: resolved, store, hub, onWarn })
+    createTools({ ctx, config: resolved, store, hub, selections, onWarn })
 
     // Every registered route is its own effect; this one owns the timers and
     // the in-flight exec promises so a plugin reload cannot leak either.
