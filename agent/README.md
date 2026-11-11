@@ -13,6 +13,14 @@ dsh web  ──SSE (outbound from the Mac)──▶  dsh-computers-agent  ──
                                             └─ launchd / systemd user service
 ```
 
+The same file is used two ways, with one implementation:
+
+- **CLI / service** (headless, always-on): `enroll` + `run` + `launchd`/`systemd`
+  from the installer one-liner.
+- **Embedded runtime** (desktop DSH app): the plugin's Settings → 电脑 →
+  *本机运行时* card calls the module's exported `startRuntime()` in-process, so
+  the user never opens a terminal (PROTOCOL §10.4).
+
 The file is served verbatim by the host plugin at
 `/api/dsh-computers/agent.mjs`, so what you run is exactly what the repository
 contains. It imports only Node built-ins, never opens a listening socket, and
@@ -99,6 +107,54 @@ pid file (`~/.dsh-computers/agent.pid`).
 **Windows.** v1 prints the manual command and the Task Scheduler setup and exits
 `0` (no service automation yet).
 
+## Embedded runtime mode (`startRuntime`)
+
+When the plugin runs inside the user's **desktop** DSH, `lib/runtime.js` imports
+this same file and starts an in-process runtime — no CLI, no service, no
+`~/.dsh-computers` config:
+
+```js
+import { startRuntime } from '../agent/dsh-computers-agent.mjs'
+
+const runtime = startRuntime({
+  serverUrl: 'https://dsh.example.com',
+  token: 'dshc_…',            // from the hub's enroll response
+  computerId: 'cmp_…',
+  name: 'Desk Mac mini',      // optional display name
+  heartbeatMs: 20000,         // optional; `hello` overrides it
+  log: (level, message) => {}, // 'info' | 'warn' | 'error'
+  onState: (state) => {},      // connect/disconnect/error/stop transitions
+})
+
+runtime.status() // synchronous snapshot (see below)
+await runtime.stop() // idempotent: aborts SSE, SIGKILLs children, awaits the loop
+```
+
+`status()` returns
+`{ running, connected, serverUrl, computerId, name, heartbeatMs, since, lastConnectedAt, lastError, attempts, exitCode }`
+(`since`/`lastConnectedAt` are ISO strings; `lastError` is `null` when healthy).
+`onState` receives the same shape and is de-duplicated to real transitions.
+
+Semantics guaranteed to the host:
+
+- `startRuntime()` returns immediately; the SSE loop/backoff runs in the
+  background. The module is **import-safe**: importing it never runs CLI code,
+  touches the filesystem, prints, or starts child processes (the CLI main only
+  runs when this file is the process entry point, via `process.argv[1]` +
+  `pathToFileURL`, handling relative and symlinked paths).
+- `stop()` aborts the SSE fetch, retains no timers, sends `SIGKILL` to every
+  in-flight command's process group and **waits** for those children to be
+  reaped before resolving. It is safe to call twice (and from inside `onState`).
+- A fatal `{"error":"invalid-token"}` 401 never throws: the loop ends,
+  `status()` reports `lastError: 'invalid-token'` and `exitCode: 1`, and
+  `onState` fires so the host can surface it. Any other 401/403/404/5xx is
+  treated as a transient server condition and retried with backoff.
+- The embedded runtime never writes `~/.dsh-computers`; the host persists its
+  own `runtime.json` (PROTOCOL §10.2) and the CLI remains the only writer of
+  `config.json`.
+
+`AGENT_VERSION` is exported too (the host can put it in the §3.1 enroll body).
+
 ## Files and environment
 
 | Path | Purpose |
@@ -149,7 +205,8 @@ removed).
 
 | Symptom | Meaning / fix |
 | --- | --- |
-| `run` exits with `✗ 服务器拒绝了已保存的凭据（HTTP 401）` | The token was revoked or the server state was reset. Generate a new key and `enroll` again. This is the one error the agent does **not** retry, on purpose. |
+| `run` exits with `✗ 服务器拒绝了已保存的凭据（HTTP 401 invalid-token）` | The server explicitly answered JSON `{"error":"invalid-token"}`: the token was revoked or the server state was reset. Generate a new key and `enroll` again. This is the one error the agent does **not** retry. |
+| A bare `401` / `403` / `404` / `503` while connecting | That is **not** a token rejection (plugin reloading, generic `/api` gateway fence, proxy). The agent logs a throttled `⚠ 服务器暂时不可用…` at most once a minute and keeps retrying — machines survive plugin disable/enable and upgrades. |
 | `status` says 未注册, exit 1 | No `config.json`; enroll first. |
 | `注册失败（invalid-key / key-expired / key-used）` | The one-time key is wrong, older than 15 min, or already used — create a new one in Settings → 连接电脑. |
 | Service not running (`service status`) | `service start`, then check `~/.dsh-computers/agent.log`. `KeepAlive` restarts it after crashes with a 10 s throttle. |
@@ -159,11 +216,15 @@ removed).
 
 ## Protocol notes (intentional choices)
 
-- **401 on the SSE connect is fatal.** PROTOCOL §6 asks for backoff on
-  disconnect; a rejected **token** cannot heal by retrying, so `run` logs
-  `✗ … HTTP 401` and exits non-zero (the process supervisor will keep
-  restarting it, but the message is in the log and `status` shows the state).
-  The user must re-enroll.
+- **Only our own `invalid-token` 401 is fatal.** A rejected **token** cannot
+  heal by retrying, so `run` logs `✗ … HTTP 401 invalid-token` and exits
+  non-zero. The classification is deliberately narrow: HTTP 401 **and** a JSON
+  body with `error === 'invalid-token'` (the host plugin's rejection shape).
+  Any other 401 (bare text, another JSON error, empty body) — and 403/404/5xx —
+  is a transient server-side condition (plugin reload, gateway fence, proxy)
+  and is retried with the normal 1 s → 30 s backoff, warning at most once per
+  60 s. Without this, disabling/enabling or upgrading the hub plugin would
+  knock every connected machine offline until the user re-ran the installer.
 - **Heartbeats** call `POST /api/dsh-computers/agent/heartbeat` every
   `heartbeatMs` (from `hello`). This is belt-and-braces next to the open
   stream and also picks up renames echoed by the server.
@@ -201,5 +262,15 @@ Covered by the suite: enroll happy path / invalid / expired / used key,
 exec → result, exit codes + stdout/stderr, default and explicit `cwd`,
 environment inheritance, timeout process-group kill, truncation at 1 MiB,
 cancel process-group kill, reconnect after a dropped stream, heartbeats,
-server-driven rename, 401 exit without retry, log rotation, and idempotent
-launchd install/status/stop/uninstall.
+server-driven rename, log rotation, idempotent launchd
+install/status/stop/uninstall, plus the runtime-mode and 401-classification
+paths:
+
+- import is side-effect free and exports `startRuntime` + `AGENT_VERSION`;
+- embedded `startRuntime()` connects to the mock, executes a command,
+  `status()` reports `connected`/`since`, `stop()` closes the stream, reaps the
+  `sleep` child (process group), posts no result after shutdown, and returns
+  `running: false, connected: false, exitCode: 0`;
+- a foreign bare/other-JSON 401 is retried and the machine reconnects (throttled
+  single warning), while JSON `invalid-token` exits 1 without retry;
+- 404/503 during connect are retried and the stream recovers.
