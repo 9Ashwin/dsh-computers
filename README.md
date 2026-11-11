@@ -46,14 +46,14 @@ dsh plugin install github:9Ashwin/dsh-computers
 **npm 安装**：插件市场 → 已安装 → 「检查更新」即可，或者在 CLI 里装具体版本：
 
 ```bash
-dsh plugin install dsh-computers@1.3.0
+dsh plugin install dsh-computers@1.3.1
 ```
 
 **GitHub 安装**：profile 里是按 spec + commit 固定的（`github:user/repo` 或 `#v1.0.2`），所以
 
 - 用**同一个 spec** 再装一次只会得到 `already-installed`（这就是「再安装没法更新」的原因）；
 - 装 **tag** 会被冻住，市场永远检测不到更新；装**分支**（不带 `#`）才能被市场「检查更新」发现新提交；
-- 手动升级到某个版本要**换 spec**：`dsh plugin install github:9Ashwin/dsh-computers#v1.3.0`。
+- 手动升级到某个版本要**换 spec**：`dsh plugin install github:9Ashwin/dsh-computers#v1.3.1`。
 
 > 更新完记得重启 Host 并刷新页面，具体见 [docs/deploy.md](./docs/deploy.md)。
 
@@ -126,7 +126,7 @@ tail -f ~/.dsh-computers/agent.log
 
 ## 3.1 能力、流式与后台任务
 
-- **能力协商**：agent 在握手时上报 `capabilities`（`exec` / `fs`，以后还有 `pty`）和 `workspaceBase`（默认工作目录）。服务器据此决定是否提供文件类工具；agent 过旧时工具调用会明确提示"升级这台电脑的 agent"，设置页也会显示 `可升级`。
+- **能力协商**：agent 在握手时上报 `capabilities`（`exec` / `fs`，以后还有 `pty`）和 `workspaceBase`（默认工作目录）。服务器据此决定是否提供文件类工具——**旧 agent 不会因为版本落后而被拒绝**，只是没有新能力；设置页会用 `可升级` 徽标提示（版本落后不影响 `computer_exec`）。只有在配置里显式写 `minAgentVersion` 才会强制拦截旧 agent。
 - **流式**：长命令的分块输出会随帧回传（含心跳），后台任务的输出可在 DSH 的任务里查看。
 - **超时转后台**：前台命令超时默认不杀（`promoteOnTimeout: true`），而是转入后台任务并返回 jobId，之后用内置的 `job_output` / `job_kill` 接管。
 - **激活时机**：新电脑要等 agent 首次建流后才出现在列表（从生成密钥到真正连上之间，弹窗会一直显示"等待电脑连接…"）。

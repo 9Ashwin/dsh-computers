@@ -28,7 +28,7 @@ export const name = 'dsh-computers'
 export const inject = ['tools', 'webServer']
 
 /** Version reported by `/api/dsh-computers/health` (and asserted by the smoke harness). */
-export const PLUGIN_VERSION = '1.3.0'
+export const PLUGIN_VERSION = '1.3.1'
 
 /** The machine agent bundle, served at request time (never imported). */
 const AGENT_URL = new URL('./agent/dsh-computers-agent.mjs', import.meta.url)
@@ -128,8 +128,9 @@ export function resolveConfig(raw) {
     }
     minAgentVersion = trimmed
   }
-  // Default gate: the plugin's own major.minor (§11.6.5).
-  if (minAgentVersion === '') minAgentVersion = majorMinor(PLUGIN_VERSION)
+  // '' means "no version gate": an older agent keeps working for everything it
+  // advertises (capability gating covers fs/pty). Operators opt in with an
+  // explicit minAgentVersion when they want to force upgrades.
 
   let execEnabled = DEFAULTS.execEnabled
   if (raw.execEnabled !== undefined && raw.execEnabled !== null) {

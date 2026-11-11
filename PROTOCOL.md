@@ -686,9 +686,13 @@ stream frames, background adoption, update-required) without copying any of its 
    successful stream; that moment sets `activatedAt` and marks the key used. A never-activated
    computer is hidden from the list (only `pendingKey` shows in the connect dialog), matching
    the reference product's activation lifecycle.
-5. **Update-required.** Config `minAgentVersion` (default: the plugin's major.minor) gates
-   tool calls: an older agent gets an actionable "upgrade this computer's agent" error, and
-   `/state` marks the computer `drift: true` with `updateRequired: true`.
+5. **Update-required (opt-in).** Config `minAgentVersion` is empty by default, which means
+   **no version gate**: an older agent keeps working for everything it advertises, because
+   feature availability is decided by the capability handshake (`fs`/`pty`), not by version.
+   Operators who want to force upgrades set `minAgentVersion: '1.3'` (or similar); an older
+   agent then gets an actionable "upgrade this computer's agent" error and `/state` marks it
+   `updateRequired: true`. Independently, `drift` is always reported when the agent version
+   differs from the host plugin's, and the settings page shows it as an advisory badge.
 6. **Revoke kicks the stream.** Deleting a computer ends its live SSE stream in the same
    request and invalidates the token, so a stale agent gets `401 invalid-token` and stops
    retrying until re-enrolled.

@@ -1166,7 +1166,7 @@ async function phaseD() {
       role: 'both',
       publicUrl: '',
       promoteOnTimeout: true,
-      minAgentVersion: PLUGIN_VERSION.split('.').slice(0, 2).join('.'),
+      minAgentVersion: '',
       stateDir: '',
       keyTtlMinutes: 15,
       heartbeatMs: 20_000,
@@ -2625,7 +2625,8 @@ async function phaseJ(root) {
     pendingKeys: [],
   })
 
-  const app = await mount({ ...FAST_CONFIG, stateDir: dir, execTimeoutMs: 400, promoteOnTimeout: true })
+  // Phase J opts into the version gate explicitly; the shipped default is no gate.
+  const app = await mount({ ...FAST_CONFIG, stateDir: dir, execTimeoutMs: 400, promoteOnTimeout: true, minAgentVersion: '1.3' })
   const sseClients = []
   const jobs = createFakeJobs()
   app.fake.setService('jobs', jobs)
