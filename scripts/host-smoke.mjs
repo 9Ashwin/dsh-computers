@@ -33,7 +33,7 @@ import { resolveBaseUrl } from '../lib/http.js'
 import { createSelectionStore, MAX_SELECTIONS } from '../lib/selection.js'
 import { MAX_ACCESS_SESSIONS, createAccessStore } from '../lib/access.js'
 import { mintSecret, newComputerId, normalizeDisplayName, sha256Hex, tokenMatches } from '../lib/keys.js'
-import { prunePendingKeys } from '../lib/state.js'
+import { normalizeState, prunePendingKeys } from '../lib/state.js'
 
 const ROOT = new URL('../', import.meta.url).pathname
 const API = '/api/dsh-computers'
@@ -415,10 +415,11 @@ function seedComputer(id, name, extra = {}) {
     cpuModel: 'Apple M4 Pro',
     memoryBytes: 17_179_869_184,
     nodeVersion: 'v24.0.0',
-    agentVersion: '1.0.0',
+    agentVersion: PLUGIN_VERSION,
     tokenHash: sha256Hex(mintSecret()),
     createdAt: iso(Date.now() - 60_000),
     lastSeenAt: iso(Date.now() - 3_600_000),
+    activatedAt: iso(Date.now() - 60_000),
     ...extra,
   }
 }
@@ -440,7 +441,7 @@ async function phaseA(root) {
     await check('health: empty deployment', async () => {
       const response = await call(origin, `${API}/health`)
       assert.equal(response.status, 200)
-      assert.deepEqual(response.data, { ok: true, version: PLUGIN_VERSION, computers: 0, online: 0 })
+      assert.deepEqual(response.data, { ok: true, version: PLUGIN_VERSION, computers: 0, online: 0, agents: [] })
       assert.equal(response.headers.get('cache-control'), 'no-store')
     })
 
@@ -560,7 +561,7 @@ async function phaseA(root) {
         method: 'POST',
         body: {
           key: app.secondKey,
-          agentVersion: '1.0.0',
+          agentVersion: PLUGIN_VERSION,
           machine: {
             hostname: 'smoke-mac.local',
             name: 'Smoke Mac',
@@ -581,28 +582,29 @@ async function phaseA(root) {
       app.computerId = response.data.computerId
       app.token = response.data.token
 
-      const again = await call(origin, `${API}/agent/enroll`, { method: 'POST', body: { key: app.secondKey, machine: { hostname: 'smoke-mac.local' } } })
-      assert.equal(again.status, 409)
-      assert.equal(again.data.error, 'key-used')
+      // §11.6.4: the key stays pending until the first stream, so a retry
+      // before activation re-enrolls the same record and rotates its token.
+      const again = await call(origin, `${API}/agent/enroll`, {
+        method: 'POST',
+        body: { key: app.secondKey, capabilities: ['exec'], machine: { hostname: 'smoke-mac.local' } },
+      })
+      assert.equal(again.status, 200)
+      assert.equal(again.data.computerId, app.computerId, 'a pending key re-enrolls the same computer')
+      app.token = again.data.token
 
       const status = await call(origin, `${API}/key-status?key=${encodeURIComponent(app.secondKey)}`)
-      assert.equal(status.data.status, 'connected')
-      assert.equal(status.data.computer.id, app.computerId)
+      assert.equal(status.data.status, 'waiting', 'still pending until a stream activates it')
+      assert.equal(status.data.computer, null)
     })
 
-    await check('state: a computer is offline until its stream opens (fresh lastSeenAt is not presence)', async () => {
-      // enroll() stamps lastSeenAt, but presence is the live SSE stream only:
-      // no stream may never read as online.
+    await check('state: a pending enrollment is hidden until its first stream', async () => {
+      // §11.6.4: activation is the first successful stream; before that the
+      // computer is not listed, but the key stays visible to the connect dialog.
       const response = await call(origin, `${API}/state`)
-      assert.equal(response.data.computers.length, 1)
-      const computer = response.data.computers[0]
-      assert.equal(computer.id, app.computerId)
-      assert.equal(computer.name, 'Smoke Mac')
-      assert.equal(computer.platformLabel, 'macOS')
-      assert.equal(computer.online, false)
-      assert.deepEqual(computer.bots, { used: 0, total: 1 })
-      assert.equal(response.data.pendingKey, null)
-      assert.ok(Number.isFinite(Date.parse(computer.lastSeenAt)), 'lastSeenAt is still recorded for display')
+      assert.deepEqual(response.data.computers, [])
+      assert.equal(response.data.pendingKey.key, app.secondKey)
+      const health = await call(origin, `${API}/health`)
+      assert.equal(health.data.computers, 0)
     })
 
     await check('agent routes require the bearer token', async () => {
@@ -623,8 +625,33 @@ async function phaseA(root) {
       assert.equal(client.headers['cache-control'], 'no-store')
       assert.equal(client.headers['x-accel-buffering'], 'no')
       const hello = await client.nextEvent('hello', 2000)
-      assert.deepEqual(hello.data, { computerId: app.computerId, name: 'Smoke Mac', heartbeatMs: 300 })
+      assert.deepEqual(hello.data, {
+        computerId: app.computerId,
+        name: 'Smoke Mac',
+        heartbeatMs: 300,
+        capabilities: ['exec'],
+        features: ['stream', 'fs'],
+      })
       assert.ok(client.raw.includes('retry: 2000'), 'SSE must start with retry: 2000')
+    })
+
+    await check('state: the first stream activates the enrollment and consumes the key', async () => {
+      const state = await call(origin, `${API}/state`)
+      assert.equal(state.data.computers.length, 1)
+      const computer = state.data.computers[0]
+      assert.equal(computer.id, app.computerId)
+      assert.equal(typeof computer.activatedAt, 'string')
+      assert.equal(computer.capabilities[0], 'exec')
+      assert.equal(state.data.pendingKey, null)
+      const status = await call(origin, `${API}/key-status?key=${encodeURIComponent(app.secondKey)}`)
+      assert.equal(status.data.status, 'connected')
+      assert.equal(status.data.computer.id, app.computerId)
+      const consumed = await call(origin, `${API}/agent/enroll`, {
+        method: 'POST',
+        body: { key: app.secondKey, machine: { hostname: 'smoke-mac.local' } },
+      })
+      assert.equal(consumed.status, 409)
+      assert.equal(consumed.data.error, 'key-used')
     })
 
     await check('state: live stream makes the computer online', async () => {
@@ -640,13 +667,13 @@ async function phaseA(root) {
       const response = await raw(origin, `${API}/agent/heartbeat`, {
         method: 'POST',
         headers: { authorization: `Bearer ${app.token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ meta: { cpuModel: 'Apple M4 Max', agentVersion: '1.0.1' } }),
+        body: JSON.stringify({ meta: { cpuModel: 'Apple M4 Max', agentVersion: PLUGIN_VERSION } }),
       })
       assert.equal(response.status, 200)
       assert.deepEqual(response.data, { ok: true, name: 'Smoke Mac' })
       const state = await call(origin, `${API}/state`)
       assert.equal(state.data.computers[0].cpuModel, 'Apple M4 Max')
-      assert.equal(state.data.computers[0].agentVersion, '1.0.1')
+      assert.equal(state.data.computers[0].agentVersion, PLUGIN_VERSION)
     })
 
     // --- tools -------------------------------------------------------------
@@ -675,15 +702,20 @@ async function phaseA(root) {
     await check('computer_exec: end to end through SSE and results', async () => {
       const execTool = app.fake.tools.get('computer_exec')
       assert.ok(execTool, 'computer_exec was not registered')
+      // Handlers attached immediately: a failing assertion below must not
+      // leave the pending execution as an unhandled rejection.
       const pending = execTool.execute(
         { computer: 'Smoke Mac', command: 'echo hi' },
         { signal: new AbortController().signal },
-      )
+      ).then((value) => ({ value }), (error) => ({ error }))
       const execEvent = await app.sse.nextEvent('exec', 2000)
       assert.match(execEvent.data.requestId, /^req_[0-9a-f]{24}$/)
       assert.equal(execEvent.data.command, 'echo hi')
+      // cwd defaults to the agent's reported workspace base (none here → null).
       assert.equal(execEvent.data.cwd, null)
-      assert.equal(execEvent.data.timeoutMs, 600)
+      // The host owns the foreground deadline; the agent gets its own ceiling.
+      assert.equal(execEvent.data.timeoutMs, 86_400_000)
+      assert.equal(execEvent.data.stream, true)
       assert.equal(execEvent.data.shell, 'sh')
 
       const result = await raw(origin, `${API}/agent/results`, {
@@ -705,7 +737,9 @@ async function phaseA(root) {
       assert.equal(result.status, 200)
       assert.deepEqual(result.data, { ok: true })
 
-      const value = await pending
+      const settled = await pending
+      assert.ok(settled.value, `expected success, got ${settled.error && settled.error.message}`)
+      const value = settled.value
       assert.equal(value.command, 'echo hi')
       assert.equal(value.exitCode, 0)
       assert.equal(value.stdout, 'hi there\n')
@@ -740,7 +774,7 @@ async function phaseA(root) {
       assert.equal(cancelEvent.data.requestId, execEvent.data.requestId)
       const settled = await outcome
       assert.ok(settled.error, 'a timed-out command must reject')
-      assert.match(settled.error.message, /did not finish within 600ms/)
+      assert.match(settled.error.message, /did not answer within 600ms/)
       // `ping` frames accumulate while this check awaits; only exec frames matter.
       assert.equal(app.sse.events.filter((event) => event.name === 'exec').length, 0, 'no stray exec events expected')
     })
@@ -762,6 +796,7 @@ async function phaseA(root) {
     await check('results: output is capped at maxOutputBytes and flagged', async () => {
       const execTool = app.fake.tools.get('computer_exec')
       const pending = execTool.execute({ computer: 'Smoke Mac', command: 'big-output' }, {})
+        .then((value) => ({ value }), (error) => ({ error }))
       const execEvent = await app.sse.nextEvent('exec', 2000)
       await raw(origin, `${API}/agent/results`, {
         method: 'POST',
@@ -776,7 +811,9 @@ async function phaseA(root) {
           truncated: false,
         }),
       })
-      const value = await pending
+      const settledBig = await pending
+      assert.ok(settledBig.value, `expected success, got ${settledBig.error && settledBig.error.message}`)
+      const value = settledBig.value
       assert.equal(value.truncated, true)
       assert.ok(value.stdout.length <= 1024 + 32, `stdout was ${value.stdout.length} chars`)
       assert.ok(value.stdout.endsWith('[output truncated]'))
@@ -999,6 +1036,7 @@ async function phaseC(root) {
     ],
   })
   const app = await mount({ ...FAST_CONFIG, stateDir: dir, publicUrl })
+  const sseClients = []
   try {
     const origin = app.origin
     await check('state: publicUrl overrides the bound origin', async () => {
@@ -1035,7 +1073,7 @@ async function phaseC(root) {
         method: 'POST',
         body: {
           key: freshKey,
-          agentVersion: '1.0.0',
+          agentVersion: PLUGIN_VERSION,
           machine: { hostname: 'linux-box.local', name: 'ignored-name', os: 'linux', arch: 'x64', platform: 'linux' },
         },
       })
@@ -1044,6 +1082,10 @@ async function phaseC(root) {
       assert.equal(response.data.serverUrl, publicUrl)
       app.token = response.data.token
       app.computerId = response.data.computerId
+      // §11.6.4: activate with the first stream before it appears in /state.
+      const client = await openSse(origin, `${API}/agent/events`, { authorization: `Bearer ${app.token}` })
+      sseClients.push(client)
+      await client.nextEvent('hello', 2000)
       const state = await call(origin, `${API}/state`)
       assert.equal(state.data.computers[0].platformLabel, 'Linux')
       assert.equal(state.data.computers[0].name, 'Smoke Linux')
@@ -1058,6 +1100,7 @@ async function phaseC(root) {
       assert.equal(entry.label, 'Desk')
     })
   } finally {
+    for (const client of sseClients) client.close()
     await app.close()
   }
 }
@@ -1084,6 +1127,22 @@ async function phaseD() {
     assert.deepEqual(doc.pendingKeys.map((entry) => entry.key), ['used-new', 'expired-new', 'live'])
   })
 
+  await check('state: legacy records missing activatedAt are migrated, explicit null stays pending', async () => {
+    const legacy = normalizeState({
+      version: 1,
+      computers: [
+        { id: 'cmp_legacy', name: 'Old', createdAt: '2026-01-01T00:00:00.000Z' },
+        { id: 'cmp_pending', name: 'New', createdAt: '2026-01-02T00:00:00.000Z', activatedAt: null },
+        { id: 'cmp_active', name: 'Active', createdAt: '2026-01-03T00:00:00.000Z', activatedAt: '2026-01-04T00:00:00.000Z' },
+      ],
+      pendingKeys: [],
+    }, () => Date.parse('2026-06-01T00:00:00.000Z'))
+    const byId = new Map(legacy.computers.map((computer) => [computer.id, computer]))
+    assert.equal(byId.get('cmp_legacy').activatedAt, '2026-01-01T00:00:00.000Z', 'pre-activation records are backfilled')
+    assert.equal(byId.get('cmp_pending').activatedAt, null, 'a v1.1 pending enrollment stays hidden')
+    assert.equal(byId.get('cmp_active').activatedAt, '2026-01-04T00:00:00.000Z')
+  })
+
   await check('keys: token comparison is length-safe and constant time', async () => {
     const token = mintSecret()
     const hash = sha256Hex(token)
@@ -1106,6 +1165,8 @@ async function phaseD() {
     assert.deepEqual(resolveConfig(undefined), {
       role: 'both',
       publicUrl: '',
+      promoteOnTimeout: true,
+      minAgentVersion: PLUGIN_VERSION.split('.').slice(0, 2).join('.'),
       stateDir: '',
       keyTtlMinutes: 15,
       heartbeatMs: 20_000,
@@ -1338,7 +1399,7 @@ async function phaseE(root) {
       assert.equal(response.data.serverUrl, runtimeRole.origin)
       const health = await call(runtimeRole.origin, `${API}/health`)
       assert.equal(health.status, 200)
-      assert.deepEqual(health.data, { ok: true, version: PLUGIN_VERSION, computers: 0, online: 0 })
+      assert.deepEqual(health.data, { ok: true, version: PLUGIN_VERSION, computers: 0, online: 0, agents: [] })
     })
 
     await check('role=runtime: GET /runtime is unconfigured, full status shape, role echoed', async () => {
@@ -1389,7 +1450,7 @@ async function phaseE(root) {
     await check('role=hub: hub routes + tools registered, no runtime routes', async () => {
       assert.ok(hubRole.fake.routes.has(`${API}/state`))
       assert.ok(hubRole.fake.routes.has(`${API}/agent/enroll`))
-      assert.equal(hubRole.fake.tools.size, 2)
+      assert.equal(hubRole.fake.tools.size, 7)
       assert.equal(hubRole.fake.sections.length, 1)
       assert.equal(hubRole.fake.routes.has(`${API}/runtime`), false)
       const runtime = await call(hubRole.origin, `${API}/runtime`)
@@ -1404,7 +1465,7 @@ async function phaseE(root) {
   const bothRole = await mount({ ...FAST_CONFIG, stateDir: join(root, 'e-both') })
   try {
     await check('role default=both: hub and runtime surfaces coexist', async () => {
-      assert.equal(bothRole.fake.tools.size, 2)
+      assert.equal(bothRole.fake.tools.size, 7)
       assert.ok(bothRole.fake.routes.has(`${API}/runtime`))
       assert.ok(bothRole.fake.routes.has(`${API}/state`))
       const state = await call(bothRole.origin, `${API}/state`)
@@ -1927,7 +1988,7 @@ async function phaseH(root) {
       method: 'POST',
       body: {
         key: key.data.key,
-        agentVersion: '1.0.0',
+        agentVersion: PLUGIN_VERSION,
         machine: { hostname: 'first.local', name: 'First Mac', os: 'darwin', platform: 'macOS' },
       },
     })
@@ -2487,6 +2548,432 @@ async function phaseI(root) {
 }
 
 // ---------------------------------------------------------------------------
+// Phase J — protocol v2: capabilities, streaming chunks, DSH jobs, remote files
+// ---------------------------------------------------------------------------
+
+/** Minimal in-memory `ctx.jobs` registry for the v2 assertions. */
+function createFakeJobs() {
+  const records = new Map()
+  let counter = 0
+  return {
+    records,
+    start(spec) {
+      const id = `computer-exec-${String(++counter).padStart(8, '0')}`
+      const record = {
+        id,
+        kind: spec.kind,
+        label: spec.label,
+        owner: spec.owner,
+        outputLimitBytes: spec.outputLimitBytes,
+        chunks: [],
+        progress: null,
+        hooks: null,
+        status: 'running',
+        detail: null,
+      }
+      records.set(id, record)
+      const handle = {
+        id,
+        append(text, options) {
+          record.chunks.push({ channel: options?.channel ?? null, text })
+        },
+        updateProgress(line) {
+          record.progress = line
+        },
+      }
+      record.hooks = spec.run(handle)
+      record.hooks.done.then((outcome) => {
+        record.status = outcome.status
+        record.detail = outcome.detail ?? null
+      }, (error) => {
+        record.status = 'failed'
+        record.detail = error && error.message ? error.message : String(error)
+      })
+      return id
+    },
+    kill(id) {
+      const record = records.get(id)
+      if (record === undefined || record.status !== 'running') return 'already-finished'
+      record.status = 'stopping'
+      record.hooks.cancel('job_kill')
+      return 'requested'
+    },
+  }
+}
+
+async function phaseJ(root) {
+  const dir = join(root, 'j')
+  const v2Id = newComputerId()
+  const oldId = newComputerId()
+  const noFsId = newComputerId()
+  const v2Token = mintSecret()
+  const oldToken = mintSecret()
+  const noFsToken = mintSecret()
+  seedState(dir, {
+    version: 1,
+    computers: [
+      // The handshake header on the SSE connect upgrades this one to fs.
+      seedComputer(v2Id, 'V2 Mac', {
+        tokenHash: sha256Hex(v2Token),
+        capabilities: ['exec'],
+        workspaceBase: null,
+        agentVersion: PLUGIN_VERSION,
+      }),
+      seedComputer(oldId, 'Old Mac', { tokenHash: sha256Hex(oldToken), capabilities: ['exec'], agentVersion: '1.0.0' }),
+      seedComputer(noFsId, 'No FS Mac', { tokenHash: sha256Hex(noFsToken), capabilities: ['exec'], agentVersion: PLUGIN_VERSION }),
+    ],
+    pendingKeys: [],
+  })
+
+  const app = await mount({ ...FAST_CONFIG, stateDir: dir, execTimeoutMs: 400, promoteOnTimeout: true })
+  const sseClients = []
+  const jobs = createFakeJobs()
+  app.fake.setService('jobs', jobs)
+  try {
+    const origin = app.origin
+    const metadata = {
+      version: 1,
+      agentVersion: PLUGIN_VERSION,
+      hostname: 'v2.local',
+      os: 'darwin',
+      arch: 'arm64',
+      capabilities: ['exec', 'fs'],
+      workspaceBase: '/Users/smoke',
+    }
+    const metadataHeader = Buffer.from(JSON.stringify(metadata), 'utf8').toString('base64url')
+    const v2Sse = await openSse(origin, `${API}/agent/events`, {
+      authorization: `Bearer ${v2Token}`,
+      'x-dsh-computers-metadata': metadataHeader,
+    })
+    sseClients.push(v2Sse)
+    const v2Hello = await v2Sse.nextEvent('hello', 2000)
+    const oldSse = await openSse(origin, `${API}/agent/events`, { authorization: `Bearer ${oldToken}` })
+    sseClients.push(oldSse)
+    await oldSse.nextEvent('hello', 2000)
+    const noFsSse = await openSse(origin, `${API}/agent/events`, { authorization: `Bearer ${noFsToken}` })
+    sseClients.push(noFsSse)
+    await noFsSse.nextEvent('hello', 2000)
+
+    const execTool = app.fake.tools.get('computer_exec')
+    const listTool = app.fake.tools.get('computer_list')
+    const session = { id: 'sess_v2', session: { id: 'sess_v2' } }
+    const b64 = (text) => Buffer.from(text, 'utf8').toString('base64')
+    const authHeaders = (token) => ({
+      authorization: `Bearer ${token}`,
+      'content-type': 'application/json',
+    })
+    const postChunk = (payload, token = v2Token) => raw(origin, `${API}/agent/results/chunk`, {
+      method: 'POST',
+      headers: authHeaders(token),
+      body: JSON.stringify(payload),
+    })
+    const postResult = (payload, token = v2Token) => raw(origin, `${API}/agent/results`, {
+      method: 'POST',
+      headers: authHeaders(token),
+      body: JSON.stringify(payload),
+    })
+    const postFs = (payload, token = v2Token) => raw(origin, `${API}/agent/fs/result`, {
+      method: 'POST',
+      headers: authHeaders(token),
+      body: JSON.stringify(payload),
+    })
+    const finalOk = (requestId, stdout = '') => ({
+      requestId,
+      ok: true,
+      exitCode: 0,
+      signal: null,
+      stdout,
+      stderr: '',
+      durationMs: 5,
+      truncated: false,
+      timedOut: false,
+      error: null,
+    })
+
+    await check('capabilities: handshake header refreshes the registry and hello advertises features', async () => {
+      // hello is written before the activation mutation for the new record, but
+      // the capability echo comes from the authenticated record + handshake.
+      assert.deepEqual(v2Hello.data.capabilities, ['exec', 'fs'])
+      assert.deepEqual(v2Hello.data.features, ['stream', 'fs'])
+      const state = await call(origin, `${API}/state`)
+      const v2 = state.data.computers.find((computer) => computer.id === v2Id)
+      assert.deepEqual(v2.capabilities, ['exec', 'fs'])
+      assert.equal(v2.workspaceBase, '/Users/smoke')
+      assert.equal(v2.drift, false)
+      assert.equal(v2.updateRequired, false)
+      const old = state.data.computers.find((computer) => computer.id === oldId)
+      assert.equal(old.drift, true)
+      assert.equal(old.updateRequired, true)
+      const health = await call(origin, `${API}/health`)
+      const healthV2 = health.data.agents.find((agent) => agent.id === v2Id)
+      assert.deepEqual(healthV2.capabilities, ['exec', 'fs'])
+      assert.equal(healthV2.drift, false)
+      const value = await listTool.execute({}, { agent: session })
+      const listV2 = value.computers.find((computer) => computer.id === v2Id)
+      assert.deepEqual(listV2.capabilities, ['exec', 'fs'])
+      assert.equal(listV2.drift, false)
+      assert.equal(listV2.updateRequired, false)
+    })
+
+    await check('exec: cwd defaults to the reported workspaceBase', async () => {
+      const pending = execTool.execute({ computer: 'V2 Mac', command: 'pwd' }, { agent: session })
+        .then((value) => ({ value }), (error) => ({ error }))
+      const event = await v2Sse.nextEvent('exec', 3000)
+      assert.equal(event.data.cwd, '/Users/smoke')
+      assert.equal(event.data.stream, true)
+      await postResult(finalOk(event.data.requestId, '/Users/smoke\n'))
+      const settled = await pending
+      assert.ok(settled.value, settled.error && settled.error.message)
+      assert.equal(settled.value.stdout, '/Users/smoke\n')
+    })
+
+    await check('chunks: out-of-order/duplicate seq reassemble into the job ring', async () => {
+      const background = await execTool.execute(
+        { computer: 'V2 Mac', command: 'stream-test', run_in_background: true },
+        { agent: session },
+      )
+      assert.equal(background.started, true)
+      assert.match(background.jobId, /^computer-exec-/)
+      const record = jobs.records.get(background.jobId)
+      assert.ok(record, 'the job was registered through ctx.jobs')
+      assert.equal(record.kind, 'computer-exec')
+      assert.equal(record.label, 'V2 Mac: stream-test')
+      assert.equal(record.owner, 'sess_v2')
+      assert.equal(record.outputLimitBytes, FAST_CONFIG.maxOutputBytes ?? 1_048_576)
+
+      const event = await v2Sse.nextEvent('exec', 3000)
+      const seq1 = await postChunk({ requestId: event.data.requestId, seq: 1, type: 'stdout', data: b64('world') })
+      const seq0 = await postChunk({ requestId: event.data.requestId, seq: 0, type: 'stdout', data: b64('hello ') })
+      const duplicate = await postChunk({ requestId: event.data.requestId, seq: 0, type: 'stdout', data: b64('hello ') })
+      const seq2 = await postChunk({ requestId: event.data.requestId, seq: 2, type: 'stderr', data: b64('oops') })
+      assert.equal(seq1.status, 200)
+      assert.equal(seq0.status, 200)
+      assert.equal(duplicate.status, 200, 'duplicate seq is accepted and dropped')
+      assert.equal(seq2.status, 200)
+      // Heartbeat frames are liveness only.
+      const heartbeat = await postChunk({ requestId: event.data.requestId, seq: 3, type: 'heartbeat', data: '' })
+      assert.equal(heartbeat.status, 200)
+      const final = await postResult(finalOk(event.data.requestId, 'hello world'))
+      assert.equal(final.status, 200)
+      const done = await record.hooks.done
+      assert.equal(done.status, 'completed')
+      assert.deepEqual(record.chunks.map((chunk) => `${chunk.channel}:${chunk.text}`), [
+        'stdout:hello ',
+        'stdout:world',
+        'stderr:oops',
+      ])
+      // A chunk for a settled execution is 404.
+      const late = await postChunk({ requestId: event.data.requestId, seq: 4, type: 'stdout', data: b64('late') })
+      assert.equal(late.status, 404)
+      assert.equal(late.data.error, 'unknown-request')
+    })
+
+    await check('chunks: heartbeats keep a silent foreground command alive', async () => {
+      const pending = execTool.execute({ computer: 'V2 Mac', command: 'slow-but-alive', timeoutMs: 250 }, { agent: session })
+        .then((value) => ({ value }), (error) => ({ error }))
+      const event = await v2Sse.nextEvent('exec', 3000)
+      for (let index = 0; index < 6; index += 1) {
+        await sleep(80)
+        await postChunk({ requestId: event.data.requestId, seq: index, type: 'heartbeat', data: '' })
+      }
+      await postResult(finalOk(event.data.requestId, 'alive\n'))
+      const settled = await pending
+      assert.ok(settled.value, `heartbeat should prevent the timeout: ${settled.error && settled.error.message}`)
+      assert.equal(settled.value.stdout, 'alive\n')
+      assert.equal(settled.value.timedOut, false)
+    })
+
+    await check('jobs: background kill sends cancel and settles the job as killed', async () => {
+      const background = await execTool.execute(
+        { computer: 'V2 Mac', command: 'kill-me', run_in_background: true },
+        { agent: session },
+      )
+      const record = jobs.records.get(background.jobId)
+      const event = await v2Sse.nextEvent('exec', 3000)
+      assert.equal(jobs.kill(background.jobId), 'requested')
+      const cancel = await v2Sse.nextEvent('cancel', 3000)
+      assert.equal(cancel.data.requestId, event.data.requestId)
+      await postResult({
+        requestId: event.data.requestId,
+        ok: false,
+        exitCode: null,
+        signal: 'SIGKILL',
+        stdout: '',
+        stderr: '',
+        durationMs: 2,
+        truncated: false,
+        timedOut: false,
+        error: 'cancelled',
+      })
+      const done = await record.hooks.done
+      assert.equal(done.status, 'killed')
+      assert.equal(record.status, 'killed')
+    })
+
+    await check('jobs: a foreground timeout is promoted instead of killed', async () => {
+      const pending = execTool.execute({ computer: 'V2 Mac', command: 'promote-me', timeoutMs: 200 }, { agent: session })
+        .then((value) => ({ value }), (error) => ({ error }))
+      const event = await v2Sse.nextEvent('exec', 3000)
+      const settled = await pending
+      assert.ok(settled.value, settled.error && settled.error.message)
+      assert.equal(settled.value.promoted, true)
+      assert.equal(settled.value.computer.id, v2Id)
+      assert.match(settled.value.jobId, /^computer-exec-/)
+      const record = jobs.records.get(settled.value.jobId)
+      assert.ok(record, 'the promoted execution is a real DSH job')
+      assert.equal(v2Sse.events.filter((frame) => frame.name === 'cancel').length, 0, 'promotion must not cancel the command')
+      // Late output keeps flowing into the adopted job, then it settles.
+      await postChunk({ requestId: event.data.requestId, seq: 0, type: 'stdout', data: b64('late output') })
+      await postResult(finalOk(event.data.requestId, 'late output'))
+      const done = await record.hooks.done
+      assert.equal(done.status, 'completed')
+      assert.deepEqual(record.chunks.map((chunk) => chunk.text), ['late output'])
+    })
+
+    await check('exec: the version gate rejects an old agent with an upgrade hint', async () => {
+      const denied = execTool.execute({ computer: 'Old Mac', command: 'echo old' }, { agent: session })
+        .then((value) => ({ value }), (error) => ({ error }))
+      const settled = await denied
+      assert.ok(settled.error)
+      assert.match(settled.error.message, /older than the required/)
+      assert.match(settled.error.message, /upgrade/i)
+      assert.equal(oldSse.events.filter((frame) => frame.name === 'exec').length, 0)
+    })
+
+    await check('fs: the five file tools run end to end over the stream', async () => {
+      const readTool = app.fake.tools.get('computer_read')
+      const writeTool = app.fake.tools.get('computer_write')
+      const editTool = app.fake.tools.get('computer_edit')
+      const globTool = app.fake.tools.get('computer_glob')
+      const grepTool = app.fake.tools.get('computer_grep')
+      for (const tool of [readTool, writeTool, editTool, globTool, grepTool]) assert.ok(tool, 'file tools must be registered')
+
+      // read
+      const readPending = readTool.execute({ computer: 'V2 Mac', path: '/Users/smoke/a.txt' }, { agent: session })
+        .then((value) => ({ value }), (error) => ({ error }))
+      const readEvent = await v2Sse.nextEvent('fs', 3000)
+      assert.equal(readEvent.data.op, 'read')
+      assert.equal(readEvent.data.path, '/Users/smoke/a.txt')
+      await postFs({ requestId: readEvent.data.requestId, ok: true, op: 'read', path: '/Users/smoke/a.txt', text: 'alpha\nbeta\n', lines: 2, bytes: 11, truncated: false })
+      const read = await readPending
+      assert.ok(read.value, read.error && read.error.message)
+      assert.equal(read.value.text, 'alpha\nbeta\n')
+      assert.equal(read.value.lines, 2)
+      assert.match(readTool.output.render({}, read.value)[0].text, /alpha/)
+
+      // write
+      const writePending = writeTool.execute({ computer: 'V2 Mac', path: '/Users/smoke/new.txt', content: 'hello', createDirs: true }, { agent: session })
+        .then((value) => ({ value }), (error) => ({ error }))
+      const writeEvent = await v2Sse.nextEvent('fs', 3000)
+      assert.equal(writeEvent.data.op, 'write')
+      assert.equal(writeEvent.data.content, 'hello')
+      assert.equal(writeEvent.data.createDirs, true)
+      await postFs({ requestId: writeEvent.data.requestId, ok: true, op: 'write', path: '/Users/smoke/new.txt', bytes: 5, created: true })
+      const write = await writePending
+      assert.ok(write.value, write.error && write.error.message)
+      assert.equal(write.value.bytes, 5)
+      assert.equal(write.value.created, true)
+
+      // edit = read + write
+      const editPending = editTool.execute({ computer: 'V2 Mac', path: '/Users/smoke/a.txt', old: 'beta', new: 'gamma' }, { agent: session })
+        .then((value) => ({ value }), (error) => ({ error }))
+      const editRead = await v2Sse.nextEvent('fs', 3000)
+      assert.equal(editRead.data.op, 'read')
+      await postFs({ requestId: editRead.data.requestId, ok: true, op: 'read', path: '/Users/smoke/a.txt', text: 'alpha\nbeta\n', lines: 2, bytes: 11, truncated: false })
+      const editWrite = await v2Sse.nextEvent('fs', 3000)
+      assert.equal(editWrite.data.op, 'write')
+      assert.equal(editWrite.data.content, 'alpha\ngamma\n')
+      await postFs({ requestId: editWrite.data.requestId, ok: true, op: 'write', path: '/Users/smoke/a.txt', bytes: 12, created: false })
+      const edit = await editPending
+      assert.ok(edit.value, edit.error && edit.error.message)
+      assert.equal(edit.value.replacements, 1)
+
+      // edit: ambiguous old text must error without writing
+      const ambiguous = editTool.execute({ computer: 'V2 Mac', path: '/Users/smoke/a.txt', old: 'a', new: 'b' }, { agent: session })
+        .then((value) => ({ value }), (error) => ({ error }))
+      const ambiguousRead = await v2Sse.nextEvent('fs', 3000)
+      await postFs({ requestId: ambiguousRead.data.requestId, ok: true, op: 'read', path: '/Users/smoke/a.txt', text: 'aaa', lines: 1, bytes: 3, truncated: false })
+      const ambiguousSettled = await ambiguous
+      assert.ok(ambiguousSettled.error)
+      assert.match(ambiguousSettled.error.message, /appears 3 times/)
+
+      // glob
+      const globPending = globTool.execute({ computer: 'V2 Mac', pattern: '**/*.ts' }, { agent: session })
+        .then((value) => ({ value }), (error) => ({ error }))
+      const globEvent = await v2Sse.nextEvent('fs', 3000)
+      assert.equal(globEvent.data.op, 'glob')
+      assert.equal(globEvent.data.pattern, '**/*.ts')
+      await postFs({ requestId: globEvent.data.requestId, ok: true, op: 'glob', paths: ['/Users/smoke/a.ts', '/Users/smoke/b.ts'] })
+      const glob = await globPending
+      assert.ok(glob.value, glob.error && glob.error.message)
+      assert.deepEqual(glob.value.paths, ['/Users/smoke/a.ts', '/Users/smoke/b.ts'])
+
+      // grep
+      const grepPending = grepTool.execute({ computer: 'V2 Mac', pattern: 'needle', path: '/Users/smoke', include: '*.ts' }, { agent: session })
+        .then((value) => ({ value }), (error) => ({ error }))
+      const grepEvent = await v2Sse.nextEvent('fs', 3000)
+      assert.equal(grepEvent.data.op, 'grep')
+      assert.equal(grepEvent.data.pattern, 'needle')
+      assert.equal(grepEvent.data.include, '*.ts')
+      await postFs({ requestId: grepEvent.data.requestId, ok: true, op: 'grep', matches: [{ path: '/Users/smoke/a.ts', line: 2, text: 'const needle = 1' }] })
+      const grep = await grepPending
+      assert.ok(grep.value, grep.error && grep.error.message)
+      assert.deepEqual(grep.value.matches, [{ path: '/Users/smoke/a.ts', line: 2, text: 'const needle = 1' }])
+      assert.match(grepTool.output.render({}, grep.value)[0].text, /a\.ts:2: const needle/)
+    })
+
+    await check('fs: an agent without the fs capability answers with the upgrade hint', async () => {
+      const readTool = app.fake.tools.get('computer_read')
+      const settled = await readTool.execute({ computer: 'No FS Mac', path: '/tmp/x' }, { agent: session })
+        .then((value) => ({ value }), (error) => ({ error }))
+      assert.ok(settled.error)
+      assert.match(settled.error.message, /does not support remote file access/)
+      assert.match(settled.error.message, /upgrade/i)
+      assert.equal(noFsSse.events.filter((frame) => frame.name === 'fs').length, 0)
+    })
+
+    await check('exec: run_in_background is refused clearly without a jobs registry', async () => {
+      app.fake.setService('jobs', undefined)
+      const settled = await execTool.execute(
+        { computer: 'V2 Mac', command: 'bg-without-jobs', run_in_background: true },
+        { agent: session },
+      ).then((value) => ({ value }), (error) => ({ error }))
+      assert.ok(settled.error)
+      assert.match(settled.error.message, /jobs registry is not loaded/)
+      app.fake.setService('jobs', jobs)
+    })
+  } finally {
+    for (const client of sseClients) client.close()
+    await app.close()
+  }
+
+  // promoteOnTimeout: false keeps the v1 cancel-and-error behaviour.
+  const fallback = await mount({ ...FAST_CONFIG, stateDir: dir, execTimeoutMs: 200, promoteOnTimeout: false })
+  try {
+    const fallbackToken = v2Token
+    const sse = await openSse(fallback.origin, `${API}/agent/events`, { authorization: `Bearer ${fallbackToken}` })
+    try {
+      await sse.nextEvent('hello', 2000)
+      await check('exec: promoteOnTimeout=false keeps the cancel-and-error path', async () => {
+        const execTool = fallback.fake.tools.get('computer_exec')
+        const pending = execTool.execute({ computer: 'V2 Mac', command: 'no-timeout', timeoutMs: 150 }, { agent: { id: 'sess_v2' } })
+          .then((value) => ({ value }), (error) => ({ error }))
+        const event = await sse.nextEvent('exec', 3000)
+        const cancel = await sse.nextEvent('cancel', 3000)
+        assert.equal(cancel.data.requestId, event.data.requestId)
+        const settled = await pending
+        assert.ok(settled.error)
+        assert.match(settled.error.message, /did not answer within 150ms/)
+      })
+    } finally {
+      sse.close()
+    }
+  } finally {
+    await fallback.close()
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -2508,6 +2995,7 @@ try {
   await phaseG(root)
   await phaseH(root)
   await phaseI(root)
+  await phaseJ(root)
 } finally {
   rmSync(root, { recursive: true, force: true })
   clearTimeout(watchdog)

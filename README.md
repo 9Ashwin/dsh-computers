@@ -46,14 +46,14 @@ dsh plugin install github:9Ashwin/dsh-computers
 **npm 安装**：插件市场 → 已安装 → 「检查更新」即可，或者在 CLI 里装具体版本：
 
 ```bash
-dsh plugin install dsh-computers@1.1.0
+dsh plugin install dsh-computers@1.3.0
 ```
 
 **GitHub 安装**：profile 里是按 spec + commit 固定的（`github:user/repo` 或 `#v1.0.2`），所以
 
 - 用**同一个 spec** 再装一次只会得到 `already-installed`（这就是「再安装没法更新」的原因）；
 - 装 **tag** 会被冻住，市场永远检测不到更新；装**分支**（不带 `#`）才能被市场「检查更新」发现新提交；
-- 手动升级到某个版本要**换 spec**：`dsh plugin install github:9Ashwin/dsh-computers#v1.1.0`。
+- 手动升级到某个版本要**换 spec**：`dsh plugin install github:9Ashwin/dsh-computers#v1.3.0`。
 
 > 更新完记得重启 Host 并刷新页面，具体见 [docs/deploy.md](./docs/deploy.md)。
 
@@ -108,12 +108,28 @@ tail -f ~/.dsh-computers/agent.log
 
 ## 3. 对话里怎么用
 
-智能体会看到两个工具：
+智能体会看到这些工具（`computer` 参数都可省略，省略时用输入框左侧选中的目标电脑）：
 
-- `computer_list` —— 列出已连接电脑（名字、平台、在线状态）
-- `computer_exec` —— 在指定电脑上执行命令：`{"computer": "my-mac-mini.local", "command": "sysctl -n hw.memsize"}`
+| 工具 | 作用 |
+|---|---|
+| `computer_list` | 列出可用电脑（名字、平台、在线、能力、当前固定目标） |
+| `computer_exec` | 执行命令，支持 `run_in_background`；超时默认**转后台**而不是杀掉 |
+| `computer_read` | 读远端文件（offset/limit 行） |
+| `computer_write` | 写远端文件（会自动建目录） |
+| `computer_edit` | 字面替换（`old` 必须唯一，除非 `replaceAll`） |
+| `computer_glob` | 远端 glob（`*`、`?`、`**`、`{a,b}`） |
+| `computer_grep` | 远端正则搜索（支持 `include`、命中上限） |
+
+文件类工具需要那台电脑的 agent 上报 `fs` 能力（见下）。
 
 系统提示里会自动附上当前电脑清单，所以直接说「看看两台 mac 的内存」它就会分别调用。
+
+## 3.1 能力、流式与后台任务
+
+- **能力协商**：agent 在握手时上报 `capabilities`（`exec` / `fs`，以后还有 `pty`）和 `workspaceBase`（默认工作目录）。服务器据此决定是否提供文件类工具；agent 过旧时工具调用会明确提示"升级这台电脑的 agent"，设置页也会显示 `可升级`。
+- **流式**：长命令的分块输出会随帧回传（含心跳），后台任务的输出可在 DSH 的任务里查看。
+- **超时转后台**：前台命令超时默认不杀（`promoteOnTimeout: true`），而是转入后台任务并返回 jobId，之后用内置的 `job_output` / `job_kill` 接管。
+- **激活时机**：新电脑要等 agent 首次建流后才出现在列表（从生成密钥到真正连上之间，弹窗会一直显示"等待电脑连接…"）。
 
 ## 4. 端点一览
 
@@ -121,7 +137,9 @@ tail -f ~/.dsh-computers/agent.log
 |---|---|---|
 | POST | `/api/dsh-computers/agent/enroll` | 加入密钥换取电脑 token（runtime 卡片也走这里） |
 | GET | `/api/dsh-computers/agent/events` | 被控端的 SSE 长连接（Bearer token） |
-| POST | `/api/dsh-computers/agent/results` | 命令执行结果回传 |
+| POST | `/api/dsh-computers/agent/results` | 命令执行结果回传（最终结果，权威） |
+| POST | `/api/dsh-computers/agent/results/chunk` | 流式输出分块（stdout/stderr/heartbeat） |
+| POST | `/api/dsh-computers/agent/fs/result` | 远端文件操作结果 |
 | POST | `/api/dsh-computers/agent/heartbeat` | 心跳 |
 | GET | `/api/dsh-computers/state` | 设置页数据（角色、电脑列表，需要浏览器会话） |
 | POST | `/api/dsh-computers/keys` | 生成一次性加入密钥 |

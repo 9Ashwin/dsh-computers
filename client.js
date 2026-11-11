@@ -188,6 +188,19 @@ window.__ModuleLoader__.load({
       'access.presetsEmpty': '还没有可用的 Bot 预设',
       'access.computersEmpty': '还没有连接的电脑',
       'access.computer.titleFallback': '这台电脑',
+      'access.presetDenied': '该电脑的 Bot 权限未包含当前预设',
+      'cap.exec': '执行',
+      'cap.fs': '文件',
+      'cap.pty': '终端',
+      'drift.chip': '可升级',
+      'drift.title': '升级这台电脑的 agent',
+      'drift.body': '这台电脑运行的是 agent {current}，需要更新的版本才能使用全部能力。',
+      'drift.expected': '当前服务器使用 agent {version}。',
+      'drift.commandLabel': '在要升级的电脑上运行',
+      'drift.hint': '升级会重启这台电脑上的 agent 服务，正在执行的命令会中断。',
+      'drift.close': '关闭',
+      'drift.unknownVersion': '未知版本',
+      'drift.runtimeHint': '本机 agent 版本落后于服务器，升级 DSH 后重启生效',
       'target.offline': '离线',
       'target.failed': '切换失败：{message}',
     };
@@ -316,6 +329,19 @@ window.__ModuleLoader__.load({
       'access.presetsEmpty': 'No Bot presets available yet',
       'access.computersEmpty': 'No computers connected yet',
       'access.computer.titleFallback': 'This computer',
+      'access.presetDenied': 'This computer’s Bot access does not include the current preset',
+      'cap.exec': 'Exec',
+      'cap.fs': 'Files',
+      'cap.pty': 'Terminal',
+      'drift.chip': 'Upgradable',
+      'drift.title': 'Upgrade this computer’s agent',
+      'drift.body': 'This computer runs agent {current}; a newer version is needed for every capability.',
+      'drift.expected': 'This server uses agent {version}.',
+      'drift.commandLabel': 'Run this on the computer you want to upgrade',
+      'drift.hint': 'Upgrading restarts the agent service on that computer; running commands are interrupted.',
+      'drift.close': 'Close',
+      'drift.unknownVersion': 'unknown version',
+      'drift.runtimeHint': 'This computer’s agent is behind the server; update DSH and restart',
       'target.offline': 'Offline',
       'target.failed': 'Could not switch: {message}',
     };
@@ -1153,6 +1179,58 @@ window.__ModuleLoader__.load({
 }
 .dshc-switch:disabled { opacity: 0.6; cursor: not-allowed; }
 
+/* Row capability chips + the amber upgrade chip (task-15). */
+.dshc-capChip {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 5px;
+  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
+  color: var(--dsw-alias-label-secondary);
+  font-size: 10.5px;
+  line-height: 15px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.dshc-driftChip {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 5px;
+  border: 1px solid currentColor;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--dsw-alias-state-warn-primary);
+  font: inherit;
+  font-size: 10.5px;
+  line-height: 15px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .dshc-driftChip:hover { background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2)); }
+}
+.dshc-driftChip:focus-visible { outline: 2px solid var(--dsw-alias-state-warn-primary); outline-offset: 1px; }
+.dshc-driftHint {
+  margin: 8px 0 0;
+  color: var(--dsw-alias-state-warn-primary);
+  font-size: 11.5px;
+  line-height: 16px;
+}
+.dshc-runtimeAgent {
+  margin-top: 2px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
+.dshc-accessReason {
+  margin: 2px 0 4px 25px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  line-height: 16px;
+}
+
 /* Composer menu: the manage-access row replaces the old muted footer. */
 .dshc-menuSep {
   height: 1px;
@@ -1462,10 +1540,22 @@ window.__ModuleLoader__.load({
 .dshc-copyRowKey {
   flex: 0 0 auto;
   min-width: 56px;
+  white-space: nowrap;
   color: var(--dsw-alias-label-secondary);
   font-size: 11.5px;
   line-height: 16px;
 }
+/* Long label + long command (upgrade dialog): label on its own line, copy
+ * pinned to the card's top-right corner. */
+.dshc-copyRow--stacked { position: relative; padding-right: 36px; }
+.dshc-copyRow--stacked .dshc-copyRowTop { flex-wrap: wrap; }
+.dshc-copyRow--stacked .dshc-copyRowBtn { position: absolute; top: 6px; right: 6px; }
+.dshc-copyRow--stacked .dshc-copyRowKey {
+  flex: 0 0 100%;
+  min-width: 0;
+  margin-bottom: 2px;
+}
+.dshc-copyRow--stacked .dshc-copyRowHint { padding-left: 0; }
 .dshc-copyRowHint {
   margin: 0;
   padding-left: 64px;
@@ -1683,6 +1773,15 @@ window.__ModuleLoader__.load({
         signal,
       }),
     };
+
+    /* Capability ids → localized chip labels; unknown ids render raw. */
+    const CAPABILITY_KEYS = { exec: 'cap.exec', fs: 'cap.fs', pty: 'cap.pty' };
+
+    /** @param {string} capability - capability id. @returns {string} chip text. */
+    function capabilityLabel(capability) {
+      const key = CAPABILITY_KEYS[capability];
+      return key === undefined ? String(capability) : t(key);
+    }
 
     /** @param {object|null} data - a /state payload. @returns {string} 'hub' | 'runtime' | 'both'. */
     function roleOf(data) {
@@ -1945,7 +2044,7 @@ window.__ModuleLoader__.load({
         }
       };
       const action = t('connect.copyField', { field: props.label });
-      return h('div', { className: 'dshc-copyRow' },
+      return h('div', { className: props.stacked === true ? 'dshc-copyRow dshc-copyRow--stacked' : 'dshc-copyRow' },
         h('div', { className: 'dshc-copyRowTop' },
           h('span', { className: 'dshc-copyRowKey' }, props.label),
           h('span', { className: 'dshc-copyRowValue' }, typeof props.value === 'string' && props.value !== '' ? props.value : '—'),
@@ -1985,6 +2084,10 @@ window.__ModuleLoader__.load({
       const name = typeof computer.name === 'string' && computer.name !== ''
         ? computer.name
         : (typeof computer.hostname === 'string' ? computer.hostname : '');
+      const capabilities = Array.isArray(computer.capabilities)
+        ? computer.capabilities.filter((capability) => typeof capability === 'string' && capability !== '')
+        : [];
+      const drift = computer.updateRequired === true || computer.drift === true;
       return h('div', { className: 'dshc-row', 'data-online': online ? 'true' : 'false' },
         h('div', { className: 'dshc-rowMain' },
           h('span', { className: 'dshc-name', title: name }, name),
@@ -1994,7 +2097,21 @@ window.__ModuleLoader__.load({
             'aria-label': t('access.badgeAria', { name }),
             title: t('access.badgeAria', { name }),
             onClick: () => props.onAccess(computer),
-          }, t('badge.bots', { used, total }))),
+          }, t('badge.bots', { used, total })),
+          capabilities.map((capability) => h('span', {
+            key: `cap-${capability}`,
+            className: 'dshc-capChip',
+          }, capabilityLabel(capability))),
+          drift
+            ? h('button', {
+              key: 'drift',
+              type: 'button',
+              className: 'dshc-driftChip',
+              'aria-label': t('drift.title'),
+              title: t('drift.title'),
+              onClick: () => props.onUpgrade(computer),
+            }, t('drift.chip'))
+            : null),
         h('span', { className: 'dshc-status' },
           h('span', { className: 'dshc-dot', 'aria-hidden': 'true' }),
           online ? t('online') : t('offline')),
@@ -2566,8 +2683,21 @@ window.__ModuleLoader__.load({
           h('p', { className: 'dshc-hint' }, t('runtime.hint')));
       } else {
         const name = typeof status.name === 'string' && status.name !== '' ? status.name : t('runtime.nameUnknown');
+        const agentVersion = typeof status.agentVersion === 'string' && status.agentVersion !== ''
+          ? status.agentVersion
+          : '';
+        const capabilities = Array.isArray(status.capabilities)
+          ? status.capabilities.filter((capability) => typeof capability === 'string' && capability !== '')
+          : [];
+        const agentParts = [];
+        if (agentVersion !== '') agentParts.push(`agent ${agentVersion}`);
+        if (capabilities.length > 0) agentParts.push(capabilities.map(capabilityLabel).join(' / '));
+        const drift = status.updateRequired === true || status.drift === true;
         body = h('div', null,
           h('div', { className: 'dshc-runtimeName', title: name }, name),
+          agentParts.length > 0
+            ? h('div', { className: 'dshc-runtimeAgent' }, agentParts.join(' · '))
+            : null,
           h('div', { className: 'dshc-runtimeMeta' },
             h('span', { className: 'dshc-runtimeMetaKey' }, t('runtime.target')),
             h('span', { className: 'dshc-runtimeMetaValue' }, typeof status.serverUrl === 'string' ? status.serverUrl : '')),
@@ -2589,6 +2719,7 @@ window.__ModuleLoader__.load({
               disabled: busy,
               onClick: () => setConfirming(true),
             }, t('runtime.disconnect'))),
+          drift ? h('p', { className: 'dshc-driftHint' }, t('drift.runtimeHint')) : null,
           status.lastError
             ? h('p', { className: 'dshc-formError', role: 'status' },
               t('runtime.lastError', { message: String(status.lastError) }))
@@ -2806,6 +2937,7 @@ window.__ModuleLoader__.load({
           onRename: (target) => setDialog({ kind: 'rename', computer: target }),
           onDelete: (target) => setDialog({ kind: 'delete', computer: target }),
           onAccess: (target) => setDialog({ kind: 'access', computer: target }),
+          onUpgrade: (target) => setDialog({ kind: 'upgrade', computer: target }),
         })));
       }
 
@@ -2832,6 +2964,13 @@ window.__ModuleLoader__.load({
             accessCounts.current.set(id, counts);
             setCountsVersion((value) => value + 1);
           },
+        });
+      } else if (dialog !== null && dialog.kind === 'upgrade' && dialog.computer) {
+        layer = h(UpgradeDialog, {
+          computer: dialog.computer,
+          serverUrl: data && typeof data.serverUrl === 'string' ? data.serverUrl : '',
+          expectedVersion: data && typeof data.agentVersion === 'string' ? data.agentVersion : '',
+          onClose: () => setDialog(null),
         });
       } else if (dialog !== null && dialog.kind === 'delete' && dialog.computer) {
         layer = h(DeleteDialog, {
@@ -2937,7 +3076,46 @@ window.__ModuleLoader__.load({
                 'aria-hidden': 'true',
               }),
               props.online === true ? t('online') : t('offline'))),
-        props.switch);
+        props.switch,
+        props.reason ? h('p', { className: 'dshc-accessReason' }, props.reason) : null);
+    }
+
+    /**
+     * Agent upgrade dialog: the manual one-liner for a machine whose agent is
+     * behind the server (task-14 drift flag).
+     * @param {object} props - `computer`, `serverUrl`, `expectedVersion`, `onClose`.
+     * @returns {object} dialog layer.
+     */
+    function UpgradeDialog(props) {
+      const computer = props.computer || {};
+      const serverUrl = typeof props.serverUrl === 'string' && props.serverUrl !== '' ? props.serverUrl : '';
+      const command = `node ~/.dsh-computers/agent.mjs service stop && curl -fsSL '${serverUrl}/api/dsh-computers/agent.mjs' -o ~/.dsh-computers/agent.mjs && node ~/.dsh-computers/agent.mjs service start`;
+      const current = typeof computer.agentVersion === 'string' && computer.agentVersion !== ''
+        ? computer.agentVersion
+        : t('drift.unknownVersion');
+      const expected = typeof props.expectedVersion === 'string' && props.expectedVersion !== ''
+        ? props.expectedVersion
+        : '';
+      return h(Dialog, {
+        title: t('drift.title'),
+        size: 'sm',
+        onClose: props.onClose,
+        footer: [
+          h('button', {
+            key: 'close',
+            type: 'button',
+            className: 'dshc-primary',
+            onClick: props.onClose,
+          }, t('drift.close')),
+        ],
+      },
+      h('p', { className: 'dshc-dialogBody' }, t('drift.body', { current })),
+      expected !== ''
+        ? h('p', { className: 'dshc-dialogBody', style: { marginTop: '4px' } }, t('drift.expected', { version: expected }))
+        : null,
+      h('div', { className: 'dshc-copyStack', style: { marginTop: '12px' } },
+        h(CopyRow, { label: t('drift.commandLabel'), value: command, stacked: true })),
+      h('p', { className: 'dshc-hint' }, t('drift.hint')));
     }
 
     /**
@@ -2978,20 +3156,33 @@ window.__ModuleLoader__.load({
       const toggle = async (computer) => {
         if (computers === null || busy) return;
         const previous = view.data;
+        /* The switch acts on the SESSION rule: `sessionAllowed` is the raw
+         * rule (null = all), while each row's `allowed` is the effective
+         * (session AND preset) state. */
+        const rawRule = Array.isArray(previous.sessionAllowed)
+          ? previous.sessionAllowed
+          : computers.map((entry) => entry.id);
+        const ruleSet = new Set(rawRule);
+        if (ruleSet.has(computer.id)) ruleSet.delete(computer.id);
+        else ruleSet.add(computer.id);
+        const nextIds = Array.from(ruleSet).sort();
+        /* Allowing every known computer posts null ("all, including future
+         * machines"); an explicit list would freeze the set. */
+        const allOn = computers.length > 0 && nextIds.length === computers.length;
         const optimistic = {
           ...previous,
-          computers: computers.map((entry) => (entry.id === computer.id
-            ? { ...entry, allowed: entry.allowed !== true }
-            : entry)),
+          sessionAllowed: allOn ? null : nextIds,
+          computers: computers.map((entry) => ({
+            ...entry,
+            sessionAllowed: ruleSet.has(entry.id),
+            allowed: ruleSet.has(entry.id) && entry.presetAllowed !== false,
+          })),
         };
-        const nextAllowed = optimistic.computers
-          .filter((entry) => entry.allowed === true)
-          .map((entry) => entry.id);
         setFailure(null);
         setView({ phase: 'ready', data: optimistic });
         setBusy(true);
         try {
-          const result = await scope.current.run((signal) => api.setAccess(props.sessionId, nextAllowed, signal));
+          const result = await scope.current.run((signal) => api.setAccess(props.sessionId, allOn ? null : nextIds, signal));
           if (!alive.current) return;
           const next = result && typeof result === 'object' ? result : optimistic;
           setView({ phase: 'ready', data: next });
@@ -3025,6 +3216,9 @@ window.__ModuleLoader__.load({
           icon: h(IconMonitor, { size: 15 }),
           name: typeof computer.name === 'string' && computer.name !== '' ? computer.name : String(computer.id || ''),
           online: computer.online === true,
+          reason: computer.allowed !== true && computer.sessionAllowed === true && computer.presetAllowed === false
+            ? t('access.presetDenied')
+            : null,
           switch: h(SwitchControl, {
             checked: computer.allowed === true,
             disabled: busy,
@@ -3120,20 +3314,25 @@ window.__ModuleLoader__.load({
       const toggle = async (preset) => {
         if (presets === null || busy) return;
         const previous = view.data;
+        const rawRule = Array.isArray(previous.allowedPresets)
+          ? previous.allowedPresets
+          : presets.map((entry) => entry.id);
+        const ruleSet = new Set(rawRule);
+        if (ruleSet.has(preset.id)) ruleSet.delete(preset.id);
+        else ruleSet.add(preset.id);
+        const nextIds = Array.from(ruleSet).sort();
+        /* All presets on posts null ("all, including presets added later"). */
+        const allOn = presets.length > 0 && nextIds.length === presets.length;
         const optimistic = {
           ...previous,
-          presets: presets.map((entry) => (entry.id === preset.id
-            ? { ...entry, allowed: entry.allowed !== true }
-            : entry)),
+          allowedPresets: allOn ? null : nextIds,
+          presets: presets.map((entry) => ({ ...entry, allowed: ruleSet.has(entry.id) })),
         };
-        const nextAllowed = optimistic.presets
-          .filter((entry) => entry.allowed === true)
-          .map((entry) => entry.id);
         setFailure(null);
         setView({ phase: 'ready', data: optimistic });
         setBusy(true);
         try {
-          const result = await scope.current.run((signal) => api.setComputerAccess(computerId, nextAllowed, signal));
+          const result = await scope.current.run((signal) => api.setComputerAccess(computerId, allOn ? null : nextIds, signal));
           if (!alive.current) return;
           const next = result && typeof result === 'object' ? result : optimistic;
           setView({ phase: 'ready', data: next });

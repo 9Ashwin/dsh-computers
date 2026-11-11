@@ -48,6 +48,18 @@ export class MockComputerServer {
     this.heartbeatMs = options.heartbeatMs ?? 20_000
     this.name = options.name ?? 'Mock Mac'
     this.verbose = options.verbose ?? false
+    /** §11.5: features advertised in `hello`; null/undefined = v1 host (none). */
+    this.features = Array.isArray(options.features) ? [...options.features] : null
+    /** §11.2: chunk POSTs captured as { requestId, seq, type, data, at }. */
+    this.chunks = []
+    /** Every chunk POST attempt (including retried/failed ones). */
+    this.chunkAttempts = 0
+    /** Number of leading chunk POSTs to fail with 503 (retry/failure tests). */
+    this.chunkFailuresRemaining = options.chunkFailures ?? 0
+    /** §11.3: fs results captured as { requestId, payload, at }. */
+    this.fsResults = []
+    /** SSE requests with headers, for handshake-metadata assertions. */
+    this.eventsRequests = []
 
     /** key -> { key, expiresAt, usedAt, replace, computerId } */
     this.keys = new Map()
@@ -239,6 +251,41 @@ export class MockComputerServer {
     })
   }
 
+  /** All stream frames captured for one request, in arrival order. */
+  chunksFor(requestId) {
+    return this.chunks.filter((chunk) => chunk.requestId === requestId)
+  }
+
+  waitForChunks(requestId, count = 1, { timeoutMs = 15_000 } = {}) {
+    const startedAt = Date.now()
+    return new Promise((resolve, reject) => {
+      const tick = () => {
+        const frames = this.chunksFor(requestId)
+        if (frames.length >= count) return resolve(frames)
+        if (Date.now() - startedAt > timeoutMs) {
+          return reject(new Error(`timed out waiting for ${count} chunk(s) of ${requestId} (saw ${frames.length})`))
+        }
+        setTimeout(tick, 20)
+      }
+      tick()
+    })
+  }
+
+  waitForFsResult(requestId, { timeoutMs = 15_000 } = {}) {
+    const startedAt = Date.now()
+    return new Promise((resolve, reject) => {
+      const tick = () => {
+        const entry = this.fsResults.find((candidate) => candidate.requestId === requestId)
+        if (entry) return resolve(entry.payload)
+        if (Date.now() - startedAt > timeoutMs) {
+          return reject(new Error(`timed out waiting for fs result ${requestId}`))
+        }
+        setTimeout(tick, 20)
+      }
+      tick()
+    })
+  }
+
   waitForHeartbeat({ timeoutMs = 20_000 } = {}) {
     const startedAt = Date.now()
     return new Promise((resolve, reject) => {
@@ -264,7 +311,7 @@ export class MockComputerServer {
   }
 
   /** Push an exec event. Throws when no agent is connected. */
-  pushExec({ command, cwd = null, timeoutMs = 120_000, shell, requestId } = {}) {
+  pushExec({ command, cwd = null, timeoutMs = 120_000, shell, requestId, stream = false } = {}) {
     const id = requestId || `req_${randomBytes(6).toString('hex')}`
     if (this.pending.has(id)) throw new Error(`duplicate requestId ${id}`)
     if (this.streams.size === 0) throw new Error('no connected agent SSE stream to push exec to')
@@ -275,6 +322,7 @@ export class MockComputerServer {
       timeoutMs,
       shell: shell ?? (process.platform === 'win32' ? 'cmd' : 'sh'),
     }
+    if (stream) payload.stream = true
     this.pending.set(id, { payload, sentAt: Date.now() })
     this.emitEvent('exec', payload)
     return id
@@ -296,6 +344,15 @@ export class MockComputerServer {
       if (computer) computer.name = name
     }
     this.emitEvent('config', { name, execEnabled })
+  }
+
+  /** Push a §11.3 fs request and return its requestId. */
+  pushFs({ op, path, requestId, ...rest } = {}) {
+    const id = requestId || `fsr_${randomBytes(6).toString('hex')}`
+    if (this.streams.size === 0) throw new Error('no connected agent SSE stream to push fs to')
+    const payload = { requestId: id, op, path, ...rest }
+    this.emitEvent('fs', payload)
+    return id
   }
 
   /** Close every open SSE stream without shutting the server down. */
@@ -366,6 +423,12 @@ export class MockComputerServer {
     if (req.method === 'POST' && url.pathname === '/api/dsh-computers/agent/heartbeat') {
       return this.handleHeartbeat(req, res)
     }
+    if (req.method === 'POST' && url.pathname === '/api/dsh-computers/agent/results/chunk') {
+      return this.handleChunk(req, res)
+    }
+    if (req.method === 'POST' && url.pathname === '/api/dsh-computers/agent/fs/result') {
+      return this.handleFsResult(req, res)
+    }
     return this.sendJson(res, 404, { error: 'not-found', message: `no mock route for ${req.method} ${url.pathname}` })
   }
 
@@ -421,7 +484,15 @@ export class MockComputerServer {
     key.usedAt = Date.now()
     key.computerId = computer.id
 
-    this.enrollments.push({ at: Date.now(), key: body.key, agentVersion: body.agentVersion, machine, replace: body.replace === true })
+    this.enrollments.push({
+      at: Date.now(),
+      key: body.key,
+      agentVersion: body.agentVersion,
+      capabilities: body.capabilities,
+      metadata: body.metadata,
+      machine,
+      replace: body.replace === true,
+    })
 
     return this.sendJson(res, 200, {
       computerId: computer.id,
@@ -432,6 +503,7 @@ export class MockComputerServer {
   }
 
   handleEvents(req, res) {
+    this.eventsRequests.push({ at: Date.now(), headers: { ...req.headers } })
     // A plugin reload / generic /api fence answers before our route is reached,
     // so the fence deliberately bypasses auth.
     if (this.eventsFence.length > 0) {
@@ -472,7 +544,9 @@ export class MockComputerServer {
     this.streamHistory.push(entry)
     if (this.verbose) process.stderr.write(`[mock] stream open for ${computer.id}\n`)
 
-    res.write(`event: hello\ndata: ${JSON.stringify({ computerId: computer.id, name: computer.name, heartbeatMs: this.heartbeatMs })}\n\n`)
+    const hello = { computerId: computer.id, name: computer.name, heartbeatMs: this.heartbeatMs }
+    if (this.features !== null) hello.features = [...this.features]
+    res.write(`event: hello\ndata: ${JSON.stringify(hello)}\n\n`)
 
     for (const waiter of this.streamWaiters.splice(0)) waiter.resolve(computer.id)
 
@@ -518,6 +592,47 @@ export class MockComputerServer {
       this.resultWaiters.delete(body.requestId)
       waiter(body)
     }
+    return this.sendJson(res, 200, { ok: true })
+  }
+
+  async handleChunk(req, res) {
+    this.chunkAttempts += 1
+    if (this.chunkFailuresRemaining > 0) {
+      this.chunkFailuresRemaining -= 1
+      return this.sendJson(res, 503, { error: 'unavailable', message: 'chunk sink temporarily unavailable' })
+    }
+    if (!this.authenticate(req)) return this.sendJson(res, 401, { error: 'invalid-token', message: 'invalid or missing agent token' })
+    let body
+    try {
+      body = JSON.parse(await readRequestBody(req, 8 * 1024 * 1024))
+    } catch {
+      return this.sendJson(res, 400, { error: 'bad-request', message: 'body must be JSON' })
+    }
+    if (
+      !body ||
+      typeof body.requestId !== 'string' ||
+      typeof body.seq !== 'number' ||
+      !['stdout', 'stderr', 'heartbeat'].includes(body.type) ||
+      typeof body.data !== 'string'
+    ) {
+      return this.sendJson(res, 400, { error: 'bad-request', message: 'malformed chunk frame' })
+    }
+    this.chunks.push({ requestId: body.requestId, seq: body.seq, type: body.type, data: body.data, at: Date.now() })
+    return this.sendJson(res, 200, { ok: true })
+  }
+
+  async handleFsResult(req, res) {
+    if (!this.authenticate(req)) return this.sendJson(res, 401, { error: 'invalid-token', message: 'invalid or missing agent token' })
+    let body
+    try {
+      body = JSON.parse(await readRequestBody(req, 8 * 1024 * 1024))
+    } catch {
+      return this.sendJson(res, 400, { error: 'bad-request', message: 'body must be JSON' })
+    }
+    if (!body || typeof body.requestId !== 'string') {
+      return this.sendJson(res, 400, { error: 'bad-request', message: 'missing requestId' })
+    }
+    this.fsResults.push({ requestId: body.requestId, payload: body, at: Date.now() })
     return this.sendJson(res, 200, { ok: true })
   }
 

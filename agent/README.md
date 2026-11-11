@@ -21,6 +21,13 @@ The same file is used two ways, with one implementation:
   *本机运行时* card calls the module's exported `startRuntime()` in-process, so
   the user never opens a terminal (PROTOCOL §10.4).
 
+Since v1.3.0 the agent implements PROTOCOL §11: it advertises the `exec` and
+`fs` capabilities, streams live output when the host asks for it, serves remote
+file operations over the same SSE stream, and reports §11.6 handshake metadata
+(`agentVersion`, `hostname`, `os`, `arch`, `capabilities`, `workspaceBase`) at
+enroll and on every reconnect. Old hosts that advertise no `features` get
+exactly the v1 behaviour.
+
 The file is served verbatim by the host plugin at
 `/api/dsh-computers/agent.mjs`, so what you run is exactly what the repository
 contains. It imports only Node built-ins, never opens a listening socket, and
@@ -70,7 +77,7 @@ node ~/.dsh-computers/agent.mjs enroll --server http://<server> --key dshc_… -
 ## Commands
 
 ```
-dsh-computers-agent enroll --server <url> --key <key> [--name <name>] [--replace]
+dsh-computers-agent enroll --server <url> --key <key> [--name <name>] [--workspace-base <path>] [--replace]
 dsh-computers-agent run
 dsh-computers-agent service install|uninstall|start|stop|restart|status
 dsh-computers-agent status
@@ -79,7 +86,7 @@ dsh-computers-agent --version | --help
 
 | Command | What it does |
 | --- | --- |
-| `enroll` | POSTs the join key to `/api/dsh-computers/agent/enroll`, saves `{serverUrl, computerId, token, name, enrolledAt}` to `config.json` (atomic, `0600`), then opens the SSE stream for ~5 s to prove the round trip. Exits non-zero with the server's message on failure. |
+| `enroll` | POSTs the join key (plus `capabilities` and §11.6 `metadata`) to `/api/dsh-computers/agent/enroll`, saves `{serverUrl, computerId, token, name, enrolledAt, workspaceBase}` to `config.json` (atomic, `0600`), then opens the SSE stream for ~5 s to prove the round trip. `--workspace-base` sets the default working directory (default `$HOME`). Exits non-zero with the server's message on failure. |
 | `run` | Foreground worker: one SSE stream to `/api/dsh-computers/agent/events`; executes `exec` events, kills the process group on `cancel`, POSTs results, sends heartbeats, reconnects with jittered 1 s → 30 s backoff. |
 | `status` | Prints server, computer id/name, redacted token (last 6 chars only), config/log paths and service state. Exit `0` when enrolled, `1` when not. |
 | `service` | Login/auto-restart service. See below. |
@@ -155,11 +162,95 @@ Semantics guaranteed to the host:
 
 `AGENT_VERSION` is exported too (the host can put it in the §3.1 enroll body).
 
+## Protocol v1.3.0 / §11 features
+
+### Capabilities and gating (§11.1, §11.5)
+
+The agent reports `capabilities: ["exec", "fs"]` in the enroll body, in the
+heartbeat `meta`, in the §11.6 metadata and in `startRuntime().status()`.
+Nothing new is sent to an old host: the `hello` event's `features` list decides
+what is enabled per connection —
+
+| `hello.features` | behaviour |
+| --- | --- |
+| absent / no `stream`, no `fs` | exactly v1: `exec` results only, `fs` events ignored, no chunk POSTs |
+| `stream` | `exec` with `"stream": true` gets incremental chunk POSTs |
+| `fs` | `fs` events are served and answered on `/agent/fs/result` |
+
+### Handshake metadata (§11.6)
+
+Enroll sends `metadata: { version: 1, agentVersion, hostname, os, arch,
+capabilities, workspaceBase }`, and every SSE connect (probe and each
+reconnect) carries the same JSON in the `x-dsh-computers-metadata` header as
+base64url — an SSE GET has no body, so the header is how the reference-product
+handshake metadata maps onto this wire. `workspaceBase` comes from
+`config.json` (`--workspace-base`, default `$HOME`), is the default `cwd` for
+`exec`, and is the base for relative `glob`/`grep` patterns.
+
+### Streaming results (§11.2 + §11.6 frames)
+
+When the host advertises `stream` and an `exec` event has `stream: true`, the
+agent POSTs frames to `/api/dsh-computers/agent/results/chunk`:
+
+```json
+{ "requestId": "req_…", "seq": 0, "type": "stdout", "data": "<base64>" }
+```
+
+- `type` is `stdout`, `stderr`, or `heartbeat` (empty `data`).
+- `seq` starts at 0 and increases by one per frame; frames are posted strictly
+  sequentially so arrival order matches `seq` (the host can still drop dupes).
+- Batches flush at most every 100 ms or 32 KiB (whichever first); a heartbeat
+  frame is emitted after each 10 s of silence from a running command.
+- A failed chunk POST retries once, then that batch is dropped — the command
+  keeps running and the final authoritative `POST /agent/results` still carries
+  the capped `stdout`/`stderr` buffers, `exitCode`, `durationMs`, `timedOut`
+  and `truncated`.
+- `stop()` drops buffered frames, clears every chunk timer and leaves no pending
+  POSTs (they are aborted with the runtime).
+
+### Remote file access (§11.3)
+
+`fs` events are served in-process (no shell) and answered on
+`POST /api/dsh-computers/agent/fs/result` with the §11.3 field set.
+
+| op | request fields | response highlights |
+| --- | --- | --- |
+| `read` | `path`, `offset?`, `limit?`, `encoding?` (`utf8`/`base64`) | `encoding`, `text` (utf8) or `content` (base64), `bytes`, `lines`, `truncated` |
+| `write` | `path`, `content`, `encoding?`, `createDirs?` | `bytes`, `created` |
+| `list` | `path` | `entries[{name,path,type,size,mtimeMs}]`, `truncated` |
+| `stat` | `path` | `stat{type,size,mtimeMs,mode}` |
+| `mkdir` | `path`, `recursive?` | `created` |
+| `rename` | `path`, `to` | `path` (new) |
+| `delete` | `path`, `recursive?` | `ok` |
+| `glob` | `pattern` (`*`, `?`, `**`, `{a,b}`) | `paths`, `truncated` |
+| `grep` | `pattern` (RegExp), `path?`, `include?` (glob), `maxMatches?` | `matches[{path,line,text}]`, `truncated` |
+
+Rules and limits:
+
+- `read`/`write`/`list`/`stat`/`mkdir`/`rename`/`delete` require **absolute**
+  paths (`ok:false, error:"path must be absolute"`); `glob`/`grep` accept
+  relative paths/patterns resolved against `workspaceBase`.
+- read 1 MiB / 20 000 lines, write 4 MiB, list 5 000 entries, glob 2 000
+  paths, grep 500 matches, 15 s per request (a timed-out request answers
+  `ok:false, error:"request timed out"`).
+- Text vs binary: a NUL byte in the first 8 KiB (or `encoding:"base64"`) makes
+  the read return base64 `content`; everything else returns utf8 `text`.
+- Symlinks: `read` follows them like `cat`; `stat`/`list` report the link
+  itself; directory walks never follow symlinked directories (loop safety) and
+  skip `.git`; `write` follows an existing symlink.
+- grep skips binary files and files larger than 8 MiB; `include` matches the
+  basename or workspace-relative path.
+- OS errors are returned verbatim in `error` (e.g. `ENOENT: no such file or
+  directory, open '…'`); a request never throws out of the loop.
+
+`startRuntime().status()` additionally exposes `workspaceBase`, `capabilities`
+and the last advertised `features`.
+
 ## Files and environment
 
 | Path | Purpose |
 | --- | --- |
-| `${DSH_COMPUTERS_HOME:-$HOME/.dsh-computers}/config.json` | Credentials, mode `0600`, atomic tmp+rename |
+| `${DSH_COMPUTERS_HOME:-$HOME/.dsh-computers}/config.json` | Credentials + `workspaceBase`, mode `0600`, atomic tmp+rename |
 | `${DSH_COMPUTERS_HOME}/agent.log` | Append-only log, rotates at 5 MiB (keeps one `agent.log.1`) |
 | `~/Library/LaunchAgents/com.dsh.computers.agent.plist` | macOS service unit |
 | `~/.config/systemd/user/dsh-computers-agent.service` | Linux service unit |
@@ -178,7 +269,13 @@ Environment variables:
 - **Token**: generated by the server, stored only on this machine in a `0600`
   file, sent as `authorization: Bearer …` on every request. It is never printed,
   never logged, and `status` shows only its last 6 characters.
-- **Outbound only**: enroll, SSE stream, result POSTs, heartbeats. No listener.
+- **Outbound only**: enroll, SSE stream, result POSTs, heartbeats, chunk/fs
+  result POSTs. No listener.
+- **Remote files**: when the server advertises the `fs` feature it can read and
+  write files as your user, but only through the ops above; paths outside
+  `workspaceBase` are allowed when absolute (documented §11.3 semantics), while
+  relative paths are anchored at `workspaceBase`. Directory walks skip `.git`
+  and symlinked directories.
 - **Execution identity**: commands run as your user through
   `/bin/sh -lc '<command>'` (Windows: `cmd.exe /d /s /c`), inheriting your
   environment — the same power as your own terminal. Only connect your server
@@ -213,6 +310,7 @@ removed).
 | `launchctl bootstrap` fails (`5: Input/output error` / domain unsupported) | The `gui/<uid>` domain is unavailable — usually an SSH session without a GUI login. The agent falls back to `launchctl load -w`; if both fail, run `service start` once from a logged-in desktop terminal. |
 | `✗ 需要 Node.js >= 22` | Upgrade Node; the script relies on global `fetch` and modern ESM. |
 | Computer shows offline in the UI | Check `agent.log` for reconnect lines; the stream reconnects with 1 s → 30 s backoff. |
+| Streaming/file tools unavailable after upgrading | The host must advertise `stream`/`fs` in `hello.features`; old hosts get v1 behaviour by design (§11.5). The agent log line `已连接 … features=…` shows what the host offered. |
 
 ## Protocol notes (intentional choices)
 
@@ -273,4 +371,13 @@ paths:
   `running: false, connected: false, exitCode: 0`;
 - a foreign bare/other-JSON 401 is retried and the machine reconnects (throttled
   single warning), while JSON `invalid-token` exits 1 without retry;
-- 404/503 during connect are retried and the stream recovers.
+- 404/503 during connect are retried and the stream recovers;
+- §11: enroll reports `capabilities:['exec','fs']` + full handshake metadata,
+  the metadata header is on every SSE connect, `exec` defaults to
+  `workspaceBase`, typed chunk frames arrive with contiguous `seq` (stdout,
+  stderr and silent-command heartbeats), chunk POSTs retry once / drop without
+  killing the command, an old host (no `features`) gets no chunks and no fs,
+  and the fs ops round-trip (read text/binary + windows + limits, relative-path
+  rejection, write/list/stat/mkdir/rename/delete, glob with `**` and `{a,b}`,
+  grep with `include`/`maxMatches`/binary skip, and `stop()` during an
+  in-flight fs request leaves no result POST).

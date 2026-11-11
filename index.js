@@ -15,7 +15,9 @@ import { createAccessControl, createAccessStore } from './lib/access.js'
 import { createHub } from './lib/hub.js'
 import { createRoutes, createRuntimeRoutes, createRuntimeStatusRoutes } from './lib/routes.js'
 import { createRuntimeManager } from './lib/runtime.js'
+import { createFsOps } from './lib/fs-ops.js'
 import { createSelectionStore } from './lib/selection.js'
+import { majorMinor } from './lib/version.js'
 import { resolveStateDir, createStore } from './lib/state.js'
 import { createTools } from './lib/tools.js'
 
@@ -26,7 +28,7 @@ export const name = 'dsh-computers'
 export const inject = ['tools', 'webServer']
 
 /** Version reported by `/api/dsh-computers/health` (and asserted by the smoke harness). */
-export const PLUGIN_VERSION = '1.1.0'
+export const PLUGIN_VERSION = '1.3.0'
 
 /** The machine agent bundle, served at request time (never imported). */
 const AGENT_URL = new URL('./agent/dsh-computers-agent.mjs', import.meta.url)
@@ -37,6 +39,8 @@ const ROLES = Object.freeze(['hub', 'runtime', 'both'])
 const DEFAULTS = Object.freeze({
   role: 'both',
   publicUrl: '',
+  promoteOnTimeout: true,
+  minAgentVersion: '',
   stateDir: '',
   keyTtlMinutes: 15,
   heartbeatMs: 20_000,
@@ -109,6 +113,24 @@ export function resolveConfig(raw) {
     role = raw.role
   }
 
+  let promoteOnTimeout = DEFAULTS.promoteOnTimeout
+  if (raw.promoteOnTimeout !== undefined && raw.promoteOnTimeout !== null) {
+    if (typeof raw.promoteOnTimeout !== 'boolean') throw configError('promoteOnTimeout must be a boolean')
+    promoteOnTimeout = raw.promoteOnTimeout
+  }
+
+  let minAgentVersion = DEFAULTS.minAgentVersion
+  if (raw.minAgentVersion !== undefined && raw.minAgentVersion !== null && raw.minAgentVersion !== '') {
+    if (typeof raw.minAgentVersion !== 'string') throw configError('minAgentVersion must be a string')
+    const trimmed = raw.minAgentVersion.trim()
+    if (!/^v?\d+(\.\d+){0,2}$/.test(trimmed)) {
+      throw configError(`minAgentVersion must look like 1.2 or 1.2.3 (received ${JSON.stringify(raw.minAgentVersion)})`)
+    }
+    minAgentVersion = trimmed
+  }
+  // Default gate: the plugin's own major.minor (§11.6.5).
+  if (minAgentVersion === '') minAgentVersion = majorMinor(PLUGIN_VERSION)
+
   let execEnabled = DEFAULTS.execEnabled
   if (raw.execEnabled !== undefined && raw.execEnabled !== null) {
     if (typeof raw.execEnabled !== 'boolean') throw configError('execEnabled must be a boolean')
@@ -118,6 +140,8 @@ export function resolveConfig(raw) {
   return Object.freeze({
     role,
     publicUrl,
+    promoteOnTimeout,
+    minAgentVersion,
     stateDir,
     keyTtlMinutes: boundedInteger(raw.keyTtlMinutes, 'keyTtlMinutes', DEFAULTS.keyTtlMinutes),
     heartbeatMs: boundedInteger(raw.heartbeatMs, 'heartbeatMs', DEFAULTS.heartbeatMs),
@@ -159,6 +183,7 @@ export function apply(ctx, config) {
       maxOutputBytes: resolved.maxOutputBytes,
       onWarn,
     })
+    const fsOps = createFsOps({ hub, onWarn })
 
     // Routes first (the browser page and the agents can arrive immediately),
     // then the tools and the prompt section.
@@ -169,16 +194,18 @@ export function apply(ctx, config) {
       hub,
       selections,
       access,
+      fsOps,
       role: resolved.role,
       version: PLUGIN_VERSION,
       agentUrl: AGENT_URL,
       onWarn,
     })
-    createTools({ ctx, config: resolved, store, hub, selections, access, onWarn })
+    createTools({ ctx, config: resolved, store, hub, selections, access, fsOps, version: PLUGIN_VERSION, onWarn })
 
     // Every registered route is its own effect; this one owns the timers and
     // the in-flight exec promises so a plugin reload cannot leak either.
     ctx.effect(() => () => {
+      fsOps.dispose()
       hub.dispose()
     }, 'dsh-computers: dispose hub and pending executions')
   } else {

@@ -20,4 +20,6 @@
         heartbeatMs: 20000
         execTimeoutMs: 120000
         execEnabled: true
+        promoteOnTimeout: true
+        minAgentVersion: ''
         maxOutputBytes: 1048576

@@ -36,6 +36,12 @@ function readJsonLine(output, prefix) {
   return JSON.parse(line.slice(prefix.length))
 }
 
+/** Push one fs request and wait for its result (PROTOCOL §11.3). */
+async function fsCall(mock, request, { timeoutMs = 20_000 } = {}) {
+  const requestId = mock.pushFs(request)
+  return { requestId, result: await mock.waitForFsResult(requestId, { timeoutMs }) }
+}
+
 async function setup(t, options = {}) {
   const mock = new MockComputerServer(options)
   await mock.start()
@@ -379,6 +385,7 @@ test('run sends heartbeats and picks up the server display name', async (t) => {
 
   const heartbeat = await mock.waitForHeartbeat({ timeoutMs: 10_000 })
   assert.equal(heartbeat.body.meta.agentVersion, AGENT_VERSION)
+  assert.deepEqual(heartbeat.body.meta.capabilities, ['exec', 'fs'])
   assert.ok(heartbeat.body.meta.memoryBytes > 0)
 
   mock.pushConfig({ name: 'Renamed Mac' })
@@ -612,6 +619,409 @@ test('startRuntime embedded: connects, execs, status(), stop() reclaims children
     timeoutMs: 5000,
     label: 'embedded SSE stream to close',
   })
+})
+
+// ---------------------------------------------------------------------------
+// PROTOCOL §11 — capabilities, handshake metadata, streaming, remote fs
+// ---------------------------------------------------------------------------
+
+test('enroll reports capabilities and §11.6 handshake metadata', async (t) => {
+  const { mock, home } = await setup(t)
+  const workspace = await tempHome('dshc-workspace-')
+  t.after(() => rmQuiet(workspace))
+  const key = mock.createEnrollKey({ replace: true })
+
+  const result = await runCli(
+    ['enroll', '--server', mock.url, '--key', key, '--name', 'Metadata Mac', '--workspace-base', workspace],
+    { home },
+  )
+  assert.equal(result.code, 0, result.stderr)
+  assert.match(result.stdout, /工作目录/)
+  assert.ok(result.stdout.includes(workspace))
+
+  const enrollment = await mock.waitForEnrollment()
+  assert.deepEqual(enrollment.capabilities, ['exec', 'fs'])
+  assert.equal(enrollment.metadata.version, 1)
+  assert.equal(enrollment.metadata.agentVersion, AGENT_VERSION)
+  assert.equal(enrollment.metadata.hostname, os.hostname())
+  assert.equal(enrollment.metadata.os, process.platform)
+  assert.equal(enrollment.metadata.arch, process.arch)
+  assert.deepEqual(enrollment.metadata.capabilities, ['exec', 'fs'])
+  assert.equal(await fs.realpath(enrollment.metadata.workspaceBase), await fs.realpath(workspace))
+
+  const config = await readConfig(home)
+  assert.equal(await fs.realpath(config.workspaceBase), await fs.realpath(workspace))
+
+  const status = await runCli(['status'], { home })
+  assert.equal(status.code, 0)
+  assert.ok(status.stdout.includes('能力：exec, fs'), status.stdout)
+  assert.ok(status.stdout.includes(workspace), status.stdout)
+})
+
+test('exec uses workspaceBase as the default cwd', async (t) => {
+  const { mock, home } = await setup(t)
+  const workspace = await tempHome('dshc-default-cwd-')
+  t.after(() => rmQuiet(workspace))
+  await enrollAgent(mock, home, { extraArgs: ['--workspace-base', workspace] })
+
+  const agent = startAgent({ home })
+  t.after(() => agent.stop())
+  await mock.waitForStream()
+  const requestId = mock.pushExec({ command: 'pwd' })
+  const result = await mock.waitForResult(requestId)
+  assert.equal(await fs.realpath(result.stdout.trim()), await fs.realpath(workspace))
+})
+
+test('every reconnect carries the handshake metadata header (§11.6)', async (t) => {
+  const { mock, home } = await setup(t, { features: ['stream', 'fs'] })
+  const { config } = await enrollAgent(mock, home)
+  const agent = startAgent({ home })
+  t.after(() => agent.stop())
+  await mock.waitForStream()
+  await waitUntil(async () => mock.eventsRequests.length >= 2, { timeoutMs: 10_000, label: 'probe + run SSE requests' })
+
+  const last = mock.eventsRequests.at(-1)
+  const header = last.headers['x-dsh-computers-metadata']
+  assert.ok(typeof header === 'string' && header.length > 0, 'metadata header present')
+  const metadata = JSON.parse(Buffer.from(header, 'base64url').toString('utf8'))
+  assert.equal(metadata.version, 1)
+  assert.equal(metadata.agentVersion, AGENT_VERSION)
+  assert.deepEqual(metadata.capabilities, ['exec', 'fs'])
+  assert.equal(await fs.realpath(metadata.workspaceBase), await fs.realpath(os.homedir()))
+  assert.equal(metadata.hostname, os.hostname())
+  assert.equal(metadata.os, process.platform)
+  assert.equal(config.computerId, mock.getComputerByToken(config.token)?.id)
+})
+
+test('streams typed chunk frames when the host advertises `stream` (§11.2/§11.6)', async (t) => {
+  const { mock, home } = await setup(t, { features: ['stream', 'fs'] })
+  await enrollAgent(mock, home)
+  const agent = startAgent({ home })
+  t.after(() => agent.stop())
+  await mock.waitForStream()
+
+  const requestId = mock.pushExec({
+    stream: true,
+    command: "printf 'aa'; sleep 0.18; printf 'bb' >&2; sleep 0.18; printf 'cc'",
+    timeoutMs: 20_000,
+  })
+  const result = await mock.waitForResult(requestId)
+  assert.equal(result.ok, true)
+  assert.equal(result.stdout, 'aacc')
+  assert.equal(result.stderr, 'bb')
+
+  const frames = await mock.waitForChunks(requestId, 2)
+  assert.ok(mock.chunkAttempts >= 2)
+  // seq starts at 0, increases by exactly 1, no gaps/duplicates.
+  const seqs = frames.map((frame) => frame.seq)
+  assert.deepEqual(seqs, seqs.map((_value, index) => index))
+  for (const frame of frames) {
+    assert.ok(['stdout', 'stderr', 'heartbeat'].includes(frame.type), frame.type)
+    assert.equal(typeof frame.data, 'string')
+  }
+  const decode = (type) =>
+    Buffer.concat(frames.filter((frame) => frame.type === type).map((frame) => Buffer.from(frame.data, 'base64'))).toString('utf8')
+  assert.equal(decode('stdout'), 'aacc')
+  assert.equal(decode('stderr'), 'bb')
+})
+
+test('old hosts without `features` get exactly v1 behaviour (no chunks, no fs)', async (t) => {
+  const { mock, home } = await setup(t) // no features advertised
+  await enrollAgent(mock, home)
+  const agent = startAgent({ home })
+  t.after(() => agent.stop())
+  await mock.waitForStream()
+
+  const requestId = mock.pushExec({ stream: true, command: 'echo legacy-host' })
+  const result = await mock.waitForResult(requestId)
+  assert.equal(result.stdout, 'legacy-host\n')
+
+  mock.pushFs({ op: 'read', path: '/etc/hosts' })
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  assert.equal(mock.fsResults.length, 0, 'fs events must be ignored without the fs feature')
+  assert.equal(mock.chunkAttempts, 0, 'no chunk POSTs without the stream feature')
+  assert.equal(agent.state.exited, false)
+})
+
+test('chunk POST failures retry once and never kill the command', async (t) => {
+  const flaky = await setup(t, { features: ['stream'], chunkFailures: 1 })
+  await enrollAgent(flaky.mock, flaky.home)
+  const firstAgent = startAgent({ home: flaky.home })
+  t.after(() => firstAgent.stop())
+  await flaky.mock.waitForStream()
+  const firstId = flaky.mock.pushExec({ stream: true, command: "printf 'retry-me'" })
+  const firstResult = await flaky.mock.waitForResult(firstId)
+  assert.equal(firstResult.stdout, 'retry-me')
+  await flaky.mock.waitForChunks(firstId, 1)
+  assert.ok(flaky.mock.chunkAttempts >= 2, 'the failed batch was retried')
+  await firstAgent.stop()
+
+  const broken = await setup(t, { features: ['stream'], chunkFailures: 10_000 })
+  await enrollAgent(broken.mock, broken.home)
+  const secondAgent = startAgent({ home: broken.home })
+  t.after(() => secondAgent.stop())
+  await broken.mock.waitForStream()
+  const secondId = broken.mock.pushExec({ stream: true, command: "printf 'still-alive'" })
+  const secondResult = await broken.mock.waitForResult(secondId)
+  assert.equal(secondResult.ok, true)
+  assert.equal(secondResult.stdout, 'still-alive')
+  assert.ok(broken.mock.chunkAttempts >= 2, 'chunk POSTs were attempted and dropped')
+  assert.equal(secondAgent.state.exited, false, 'dropped chunks must not kill the agent')
+})
+
+test('embedded status() exposes capabilities and the host feature set', async (t) => {
+  const { mock, home } = await setup(t, { features: ['stream', 'fs'] })
+  const { config } = await enrollAgent(mock, home)
+  const script = [
+    `import { startRuntime } from ${JSON.stringify(agentPath)}`,
+    'const options = JSON.parse(process.env.DSHC_EMBEDDED_OPTIONS)',
+    'const runtime = startRuntime({ serverUrl: options.serverUrl, token: options.token, computerId: options.computerId, log: () => {}, onState: () => {} })',
+    'const deadline = Date.now() + 10000',
+    'while (!runtime.status().connected && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25))',
+    'const status = runtime.status()',
+    'await new Promise((resolve) => process.stdout.write("STATUS " + JSON.stringify({ capabilities: status.capabilities, features: status.features, workspaceBase: status.workspaceBase }) + String.fromCharCode(10), resolve))',
+    'await runtime.stop()',
+    'process.exit(0)',
+  ].join('\n')
+  const embedded = spawnNodeEval(script, {
+    home,
+    env: {
+      DSHC_EMBEDDED_OPTIONS: JSON.stringify({ serverUrl: mock.url, token: config.token, computerId: config.computerId }),
+    },
+  })
+  t.after(() => embedded.stop())
+  await embedded.waitForOutput(/STATUS /)
+  const status = readJsonLine(embedded.stdout, 'STATUS ')
+  assert.deepEqual(status.capabilities, ['exec', 'fs'])
+  assert.deepEqual(status.features, ['stream', 'fs'])
+  assert.equal(await fs.realpath(status.workspaceBase), await fs.realpath(os.homedir()))
+  await embedded.closed
+})
+
+test('a silent streamed command emits heartbeat frames (§11.6)', async (t) => {
+  const { mock, home } = await setup(t, { features: ['stream'] })
+  const { config } = await enrollAgent(mock, home)
+  const script = [
+    `import { startRuntime } from ${JSON.stringify(agentPath)}`,
+    'const options = JSON.parse(process.env.DSHC_EMBEDDED_OPTIONS)',
+    'const runtime = startRuntime({ serverUrl: options.serverUrl, token: options.token, computerId: options.computerId, log: () => {}, onState: () => {}, chunkHeartbeatMs: 300 })',
+    'const deadline = Date.now() + 10000',
+    'while (!runtime.status().connected && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25))',
+    'process.stdout.write("READY" + String.fromCharCode(10))',
+    'process.stdin.setEncoding("utf8")',
+    'process.stdin.resume()',
+    'await new Promise((resolve) => process.stdin.once("data", resolve))',
+    'await runtime.stop()',
+    'process.exit(0)',
+  ].join('\n')
+  const embedded = spawnNodeEval(script, {
+    home,
+    env: {
+      DSHC_EMBEDDED_OPTIONS: JSON.stringify({ serverUrl: mock.url, token: config.token, computerId: config.computerId }),
+    },
+  })
+  t.after(() => embedded.stop())
+  await embedded.waitForOutput(/READY/)
+
+  const requestId = mock.pushExec({
+    stream: true,
+    command: "printf 'start'; sleep 1.2; printf 'end'",
+    timeoutMs: 20_000,
+  })
+  const result = await mock.waitForResult(requestId)
+  assert.equal(result.stdout, 'startend')
+
+  const frames = await mock.waitForChunks(requestId, 2)
+  await waitUntil(async () => mock.chunksFor(requestId).some((frame) => frame.type === 'heartbeat'), {
+    timeoutMs: 5000,
+    label: 'a heartbeat chunk frame for the silent command',
+  })
+  const all = mock.chunksFor(requestId)
+  const seqs = all.map((frame) => frame.seq)
+  assert.deepEqual(seqs, seqs.map((_value, index) => index))
+  const heartbeats = all.filter((frame) => frame.type === 'heartbeat')
+  assert.ok(heartbeats.length >= 1)
+  for (const heartbeat of heartbeats) assert.equal(heartbeat.data, '')
+
+  embedded.sendLine('stop')
+  const exited = await embedded.closed
+  assert.equal(exited.code, 0)
+})
+
+// --- remote fs ------------------------------------------------------------
+
+test('fs read: text window, binary base64, relative rejection and OS errors', async (t) => {
+  const { mock, home } = await setup(t, { features: ['fs'] })
+  const workspace = await tempHome('dshc-fs-read-')
+  t.after(() => rmQuiet(workspace))
+  await enrollAgent(mock, home, { extraArgs: ['--workspace-base', workspace] })
+  const agent = startAgent({ home })
+  t.after(() => agent.stop())
+  await mock.waitForStream()
+
+  const textPath = path.join(workspace, 'text.txt')
+  await fs.writeFile(textPath, 'line1\nline2\nline3\nline4\nline5\n')
+  const binaryPath = path.join(workspace, 'binary.bin')
+  const binaryBytes = Buffer.from([0, 1, 2, 255, 254, 10, 0])
+  await fs.writeFile(binaryPath, binaryBytes)
+
+  const window = await fsCall(mock, { op: 'read', path: textPath, offset: 1, limit: 2 })
+  assert.equal(window.result.ok, true)
+  assert.equal(window.result.encoding, 'utf8')
+  assert.equal(window.result.text, 'line2\nline3')
+  assert.equal(window.result.lines, 2)
+  assert.equal(window.result.truncated, true)
+
+  const binary = await fsCall(mock, { op: 'read', path: binaryPath })
+  assert.equal(binary.result.ok, true)
+  assert.equal(binary.result.encoding, 'base64')
+  assert.deepEqual(Buffer.from(binary.result.content, 'base64'), binaryBytes)
+
+  const forcedBase64 = await fsCall(mock, { op: 'read', path: textPath, encoding: 'base64' })
+  assert.equal(forcedBase64.result.encoding, 'base64')
+  assert.equal(Buffer.from(forcedBase64.result.content, 'base64').toString('utf8'), 'line1\nline2\nline3\nline4\nline5\n')
+
+  const relative = await fsCall(mock, { op: 'read', path: 'relative.txt' })
+  assert.equal(relative.result.ok, false)
+  assert.equal(relative.result.error, 'path must be absolute')
+
+  const missing = await fsCall(mock, { op: 'read', path: path.join(workspace, 'nope.txt') })
+  assert.equal(missing.result.ok, false)
+  assert.match(missing.result.error, /ENOENT/)
+
+  const tooManyLines = path.join(workspace, 'long.txt')
+  await fs.writeFile(tooManyLines, Array.from({ length: 25_000 }, (_value, index) => `row-${index}`).join('\n'))
+  const longRead = await fsCall(mock, { op: 'read', path: tooManyLines, limit: 20_000 })
+  assert.equal(longRead.result.ok, true)
+  assert.equal(longRead.result.lines, 20_000)
+  assert.equal(longRead.result.truncated, true)
+})
+
+test('fs write/list/stat/mkdir/rename/delete round trip', async (t) => {
+  const { mock, home } = await setup(t, { features: ['fs'] })
+  const workspace = await tempHome('dshc-fs-write-')
+  t.after(() => rmQuiet(workspace))
+  await enrollAgent(mock, home, { extraArgs: ['--workspace-base', workspace] })
+  const agent = startAgent({ home })
+  t.after(() => agent.stop())
+  await mock.waitForStream()
+
+  const dir = path.join(workspace, 'sub')
+  const created = await fsCall(mock, { op: 'mkdir', path: dir, recursive: true })
+  assert.equal(created.result.ok, true)
+  assert.ok(existsSync(dir))
+
+  const fileA = path.join(dir, 'a.txt')
+  const write = await fsCall(mock, { op: 'write', path: fileA, content: 'hello fs' })
+  assert.equal(write.result.ok, true)
+  assert.equal(write.result.bytes, 8)
+  assert.equal(write.result.created, true)
+  assert.equal(await fs.readFile(fileA, 'utf8'), 'hello fs')
+
+  const overwrite = await fsCall(mock, { op: 'write', path: fileA, content: 'hello again' })
+  assert.equal(overwrite.result.created, false)
+
+  const stat = await fsCall(mock, { op: 'stat', path: fileA })
+  assert.equal(stat.result.ok, true)
+  assert.equal(stat.result.stat.type, 'file')
+  assert.equal(stat.result.stat.size, 11)
+  assert.ok(stat.result.stat.mtimeMs > 0)
+  assert.equal(typeof stat.result.stat.mode, 'number')
+
+  const list = await fsCall(mock, { op: 'list', path: dir })
+  assert.equal(list.result.ok, true)
+  assert.deepEqual(list.result.entries.map((entry) => entry.name), ['a.txt'])
+  assert.equal(list.result.entries[0].type, 'file')
+
+  const fileB = path.join(dir, 'b.txt')
+  const renamed = await fsCall(mock, { op: 'rename', path: fileA, to: fileB })
+  assert.equal(renamed.result.ok, true)
+  assert.ok(!existsSync(fileA) && existsSync(fileB))
+
+  const deleted = await fsCall(mock, { op: 'delete', path: fileB })
+  assert.equal(deleted.result.ok, true)
+  assert.ok(!existsSync(fileB))
+
+  const nested = path.join(workspace, 'deep', 'nested', 'c.txt')
+  const nestedWrite = await fsCall(mock, { op: 'write', path: nested, content: 'nested', createDirs: true })
+  assert.equal(nestedWrite.result.ok, true)
+  assert.equal(await fs.readFile(nested, 'utf8'), 'nested')
+
+  // §11.3: write is capped at 4 MiB.
+  const huge = await fsCall(mock, { op: 'write', path: path.join(workspace, 'huge.bin'), content: 'x'.repeat(4 * 1024 * 1024 + 1) })
+  assert.equal(huge.result.ok, false)
+  assert.match(huge.result.error, /write limit/)
+
+  const relativeStat = await fsCall(mock, { op: 'stat', path: 'nope' })
+  assert.equal(relativeStat.result.ok, false)
+  assert.equal(relativeStat.result.error, 'path must be absolute')
+})
+
+test('fs glob and grep run in-process with §11.3 limits', async (t) => {
+  const { mock, home } = await setup(t, { features: ['fs'] })
+  const workspace = await tempHome('dshc-fs-glob-')
+  t.after(() => rmQuiet(workspace))
+  await enrollAgent(mock, home, { extraArgs: ['--workspace-base', workspace] })
+  const agent = startAgent({ home })
+  t.after(() => agent.stop())
+  await mock.waitForStream()
+
+  await fs.mkdir(path.join(workspace, 'sub', 'deep'), { recursive: true })
+  await fs.writeFile(path.join(workspace, 'a.txt'), 'alpha needle one\nplain\n')
+  await fs.writeFile(path.join(workspace, 'a.log'), 'log a\n')
+  await fs.writeFile(path.join(workspace, 'b.log'), 'log b\n')
+  await fs.writeFile(path.join(workspace, 'sub', 'c.txt'), 'gamma needle two\n')
+  await fs.writeFile(path.join(workspace, 'sub', 'deep', 'd.txt'), 'delta\n')
+  await fs.writeFile(path.join(workspace, 'sub', 'binary.bin'), Buffer.from('needle\u0000binary', 'utf8'))
+
+  const glob = await fsCall(mock, { op: 'glob', pattern: '**/*.txt' })
+  assert.equal(glob.result.ok, true)
+  const relativePaths = glob.result.paths.map((candidate) => path.relative(workspace, candidate)).sort()
+  assert.deepEqual(relativePaths, ['a.txt', 'sub/c.txt', 'sub/deep/d.txt'].map((value) => value))
+  assert.equal(glob.result.truncated, false)
+
+  const braces = await fsCall(mock, { op: 'glob', pattern: '{a,b}.log' })
+  assert.equal(braces.result.ok, true)
+  assert.deepEqual(braces.result.paths.map((candidate) => path.basename(candidate)).sort(), ['a.log', 'b.log'])
+
+  const grep = await fsCall(mock, { op: 'grep', pattern: 'needle', include: '*.txt' })
+  assert.equal(grep.result.ok, true)
+  assert.deepEqual(
+    grep.result.matches.map((match) => ({ file: path.relative(workspace, match.path), line: match.line, text: match.text })),
+    [
+      { file: 'a.txt', line: 1, text: 'alpha needle one' },
+      { file: 'sub/c.txt', line: 1, text: 'gamma needle two' },
+    ],
+  )
+
+  const capped = await fsCall(mock, { op: 'grep', pattern: 'needle', include: '*.txt', maxMatches: 1 })
+  assert.equal(capped.result.matches.length, 1)
+  assert.equal(capped.result.truncated, true)
+
+  const relativeRoot = await fsCall(mock, { op: 'grep', pattern: 'log', path: 'sub' })
+  assert.equal(relativeRoot.result.ok, true)
+
+  const invalid = await fsCall(mock, { op: 'grep', pattern: '[unclosed' })
+  assert.equal(invalid.result.ok, false)
+  assert.match(invalid.result.error, /invalid pattern/)
+})
+
+test('stop() during an in-flight fs request posts nothing and exits cleanly', async (t) => {
+  const { mock, home } = await setup(t, { features: ['fs'] })
+  await enrollAgent(mock, home)
+  const agent = startAgent({ home })
+  t.after(() => agent.stop())
+  await mock.waitForStream()
+
+  const requestId = mock.pushFs({ op: 'grep', pattern: 'needle', path: os.homedir() })
+  const exit = await agent.stop()
+  assert.equal(exit.code, 0)
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  assert.equal(
+    mock.fsResults.some((entry) => entry.requestId === requestId),
+    false,
+    'an fs result must not be posted after stop()',
+  )
 })
 
 // ---------------------------------------------------------------------------

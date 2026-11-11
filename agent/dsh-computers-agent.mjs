@@ -32,7 +32,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 
 // Keep in sync with package.json. The server compares this for display only.
-export const AGENT_VERSION = '1.1.0'
+export const AGENT_VERSION = '1.3.0'
 
 const DEFAULT_EXEC_TIMEOUT_MS = 120_000
 const MAX_EXEC_TIMEOUT_MS = 24 * 60 * 60 * 1000
@@ -44,6 +44,25 @@ const MAX_BACKOFF_MS = 30_000
 const HEARTBEAT_LOG_INTERVAL_MS = 60_000
 const TRANSIENT_SERVER_WARN_INTERVAL_MS = 60_000
 const DEFAULT_HEARTBEAT_MS = 20_000
+
+// PROTOCOL §11: capabilities, streaming frames and remote fs.
+const AGENT_CAPABILITIES = ['exec', 'fs']
+const HANDSHAKE_VERSION = 1
+const CHUNK_FLUSH_INTERVAL_MS = 100
+const CHUNK_MAX_BATCH_BYTES = 32 * 1024
+const CHUNK_HEARTBEAT_MS = 10_000
+const CHUNK_POST_TIMEOUT_MS = 15_000
+const FS_REQUEST_TIMEOUT_MS = 15_000
+const FS_READ_MAX_BYTES = 1024 * 1024
+const FS_READ_MAX_LINES = 20_000
+const FS_READ_DEFAULT_LIMIT = 2000
+const FS_WRITE_MAX_BYTES = 4 * 1024 * 1024
+const FS_LIST_MAX_ENTRIES = 5000
+const FS_GLOB_MAX_PATHS = 2000
+const FS_GREP_MAX_MATCHES = 500
+const FS_GREP_MAX_FILE_BYTES = 8 * 1024 * 1024
+const FS_BINARY_SNIFF_BYTES = 8192
+const FS_OPS = ['read', 'write', 'list', 'stat', 'mkdir', 'rename', 'delete', 'glob', 'grep']
 
 // Service identifier. Overridable so tests (and power users with two installs)
 // can use an isolated launchd/systemd job. Not part of the protocol.
@@ -125,6 +144,37 @@ function machineInfo(name) {
     memoryBytes: os.totalmem(),
     nodeVersion: process.version,
   }
+}
+
+/**
+ * The agent's default working directory (PROTOCOL §11.6): config `workspaceBase`,
+ * default `os.homedir()`. Used as the default exec cwd and the base for
+ * relative glob/grep patterns.
+ */
+function normalizeWorkspaceBase(value) {
+  if (typeof value !== 'string' || !value.trim()) return os.homedir()
+  let text = value.trim()
+  if (text === '~') text = os.homedir()
+  else if (text.startsWith('~/') || text.startsWith('~\\')) text = path.join(os.homedir(), text.slice(2))
+  return path.resolve(text)
+}
+
+/** PROTOCOL §11.6 handshake metadata, reported at enroll and on every connect. */
+function handshakeMetadata(workspaceBase) {
+  const info = machineInfo('')
+  return {
+    version: HANDSHAKE_VERSION,
+    agentVersion: AGENT_VERSION,
+    hostname: info.hostname,
+    os: info.os,
+    arch: info.arch,
+    capabilities: [...AGENT_CAPABILITIES],
+    workspaceBase: normalizeWorkspaceBase(workspaceBase),
+  }
+}
+
+function encodeMetadataHeader(metadata) {
+  return Buffer.from(JSON.stringify(metadata), 'utf8').toString('base64url')
 }
 
 // ---------------------------------------------------------------------------
@@ -262,6 +312,7 @@ async function loadConfig() {
     token: parsed.token,
     name: parsed.name,
     enrolledAt: typeof parsed.enrolledAt === 'string' ? parsed.enrolledAt : '',
+    workspaceBase: normalizeWorkspaceBase(parsed.workspaceBase),
   }
 }
 
@@ -363,6 +414,14 @@ function heartbeatUrl(serverUrl) {
   return `${apiBase(serverUrl)}/agent/heartbeat`
 }
 
+function chunkUrl(serverUrl) {
+  return `${apiBase(serverUrl)}/agent/results/chunk`
+}
+
+function fsResultUrl(serverUrl) {
+  return `${apiBase(serverUrl)}/agent/fs/result`
+}
+
 function normalizeServerUrl(value) {
   if (typeof value !== 'string' || !value.trim()) {
     throw new CliError('缺少 --server <url>（dsh-web 的地址，例如 http://127.0.0.1:3000）')
@@ -448,11 +507,15 @@ async function readErrorBody(response) {
   }
 }
 
-function sseHeaders(token) {
-  return requestHeaders(token, {
+function sseHeaders(token, metadata) {
+  const headers = requestHeaders(token, {
     accept: 'text/event-stream',
     'cache-control': 'no-cache',
   })
+  // PROTOCOL §11.6: every reconnect (SSE GET has no body) carries the handshake
+  // metadata as a base64url JSON header, mirroring the reference product.
+  if (metadata) headers['x-dsh-computers-metadata'] = encodeMetadataHeader(metadata)
+  return headers
 }
 
 /** Parse one SSE block (`event:` / `data:` lines) into { event, data }. */
@@ -509,7 +572,7 @@ async function probeEventStream(config, timeoutMs = 5000) {
   timer.unref?.()
   try {
     const response = await fetch(eventsUrl(config.serverUrl), {
-      headers: sseHeaders(config.token),
+      headers: sseHeaders(config.token, handshakeMetadata(config.workspaceBase)),
       signal: controller.signal,
     })
     if (response.status === 401) {
@@ -607,7 +670,7 @@ function normalizeTimeout(value) {
  * SIGKILLed on timeout/cancel; otherwise `sh -lc 'cmd | pipeline'` would leave
  * grandchildren running and the timeout would not actually stop the work.
  */
-function executeCommand({ command, cwd, timeoutMs }) {
+function executeCommand({ command, cwd, timeoutMs, onStdout, onStderr }) {
   const startedAt = Date.now()
   const limit = normalizeTimeout(timeoutMs)
   const stdout = createCapture()
@@ -684,8 +747,28 @@ function executeCommand({ command, cwd, timeoutMs }) {
     return { promise, cancel() {} }
   }
 
-  child.stdout?.on('data', (chunk) => stdout.push(chunk))
-  child.stderr?.on('data', (chunk) => stderr.push(chunk))
+  // The capture is capped for the final result; streaming (when enabled by the
+  // host) sees every chunk so the job ring/progress view stays live.
+  child.stdout?.on('data', (chunk) => {
+    stdout.push(chunk)
+    if (onStdout) {
+      try {
+        onStdout(chunk)
+      } catch {
+        // a broken stream sink must never kill the command
+      }
+    }
+  })
+  child.stderr?.on('data', (chunk) => {
+    stderr.push(chunk)
+    if (onStderr) {
+      try {
+        onStderr(chunk)
+      } catch {
+        // ignore
+      }
+    }
+  })
   child.on('error', (error) => settle(null, null, `命令进程错误：${describeError(error)}`))
   child.on('close', (code, signalCode) => settle(code, signalCode, null))
   timeoutTimer = setTimeout(() => {
@@ -750,6 +833,7 @@ async function sendHeartbeat(runtime) {
           cpuModel: machineInfo('').cpuModel,
           memoryBytes: os.totalmem(),
           agentVersion: AGENT_VERSION,
+          capabilities: [...AGENT_CAPABILITIES],
         },
       },
       timeoutMs: 15_000,
@@ -786,6 +870,629 @@ function logHeartbeatError(runtime, message) {
 }
 
 // ---------------------------------------------------------------------------
+// Streaming result chunks (§11.2 / §11.6)
+//
+// Only used when an `exec` event carries `stream: true` AND the host's `hello`
+// advertised the `stream` feature (§11.5). Frames are posted sequentially (so
+// `seq` order matches arrival order):
+//   { requestId, seq, type: 'stdout'|'stderr'|'heartbeat', data: base64 }
+// Batches flush at most every 100 ms or 32 KiB (whichever first); a heartbeat
+// frame goes out after each configured silent period (default 10 s). Chunk
+// failures retry once, then that batch is dropped — the final /agent/results
+// POST remains authoritative and still carries the capped buffers.
+// ---------------------------------------------------------------------------
+
+function logChunkDropThrottled(runtime, reason) {
+  const now = Date.now()
+  if (now - runtime.state.lastChunkDropAt < HEARTBEAT_LOG_INTERVAL_MS) return
+  runtime.state.lastChunkDropAt = now
+  runtimeLog(runtime, 'warn', `流式分片上报失败（已丢弃该批）：${reason}`)
+}
+
+function createChunkPump(runtime, requestId) {
+  const buffers = { stdout: [], stderr: [] }
+  const sizes = { stdout: 0, stderr: 0 }
+  const heartbeatMs = runtime.state.chunkHeartbeatMs || CHUNK_HEARTBEAT_MS
+  let seq = 0
+  let queue = Promise.resolve()
+  let flushTimer = null
+  let heartbeatTimer = null
+  let closed = false
+  let aborted = false
+  let lastSentAt = Date.now()
+
+  const clearTimers = () => {
+    if (flushTimer) {
+      clearTimeout(flushTimer)
+      flushTimer = null
+    }
+    if (heartbeatTimer) {
+      clearInterval(heartbeatTimer)
+      heartbeatTimer = null
+    }
+  }
+
+  const postFrame = async (frame) => {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (aborted || runtime.stopping) return false
+      try {
+        const response = await requestJson(chunkUrl(runtime.config.serverUrl), {
+          method: 'POST',
+          token: runtime.config.token,
+          body: frame,
+          timeoutMs: CHUNK_POST_TIMEOUT_MS,
+          signal: runtime.controller.signal,
+        })
+        if (response.status === 200) {
+          lastSentAt = Date.now()
+          return true
+        }
+        if (response.status === 401 && isInvalidTokenRejection(response.status, response.text)) {
+          runtimeLog(runtime, 'error', '流式分片被拒绝（invalid-token）：token 已失效，需要重新 enroll')
+          return false
+        }
+        if (attempt === 0) {
+          await sleep(50)
+          continue
+        }
+        logChunkDropThrottled(runtime, `HTTP ${response.status}`)
+        return false
+      } catch (error) {
+        if (attempt === 0 && !aborted && !runtime.controller.signal.aborted) {
+          await sleep(50)
+          continue
+        }
+        logChunkDropThrottled(runtime, describeError(error))
+        return false
+      }
+    }
+    return false
+  }
+
+  const enqueue = (frame) => {
+    queue = queue.then(() => postFrame(frame)).catch(() => {})
+  }
+
+  const takeFrames = () => {
+    const frames = []
+    for (const type of ['stdout', 'stderr']) {
+      if (sizes[type] === 0) continue
+      const data = Buffer.concat(buffers[type], sizes[type])
+      buffers[type] = []
+      sizes[type] = 0
+      frames.push({ requestId, seq: seq++, type, data: data.toString('base64') })
+    }
+    return frames
+  }
+
+  const flushNow = () => {
+    if (closed || aborted) return
+    if (flushTimer) {
+      clearTimeout(flushTimer)
+      flushTimer = null
+    }
+    for (const frame of takeFrames()) enqueue(frame)
+  }
+
+  const scheduleFlush = () => {
+    if (flushTimer || closed || aborted) return
+    flushTimer = setTimeout(() => {
+      flushTimer = null
+      flushNow()
+    }, CHUNK_FLUSH_INTERVAL_MS)
+    flushTimer.unref?.()
+  }
+
+  const maybeHeartbeat = () => {
+    if (closed || aborted || runtime.stopping) return
+    if (Date.now() - lastSentAt >= heartbeatMs) {
+      enqueue({ requestId, seq: seq++, type: 'heartbeat', data: '' })
+    }
+  }
+
+  heartbeatTimer = setInterval(maybeHeartbeat, heartbeatMs)
+  heartbeatTimer.unref?.()
+
+  const pump = {
+    push(type, chunk) {
+      if (closed || aborted) return
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
+      buffers[type].push(buffer)
+      sizes[type] += buffer.length
+      if (sizes.stdout + sizes.stderr >= CHUNK_MAX_BATCH_BYTES) flushNow()
+      else scheduleFlush()
+    },
+    /** Flush what is buffered, stop timers and wait for queued frames. */
+    async close() {
+      flushNow()
+      closed = true
+      clearTimers()
+      await queue
+    },
+    /** Drop everything (shutdown): no flush, no timers, no new frames. */
+    abort() {
+      aborted = true
+      closed = true
+      clearTimers()
+      buffers.stdout = []
+      buffers.stderr = []
+      sizes.stdout = 0
+      sizes.stderr = 0
+    },
+  }
+  runtime.pumps.add(pump)
+  return pump
+}
+
+// ---------------------------------------------------------------------------
+// Remote file access (§11.3)
+//
+// Implemented in-process (no shell). Rules:
+//   · read/write/list/stat/mkdir/rename/delete require ABSOLUTE paths and answer
+//     `ok:false, error:"path must be absolute"` otherwise (§11.3).
+//   · glob/grep accept absolute or cwd-relative paths/patterns; relative ones
+//     resolve against the agent's workspaceBase (§11.6).
+//   · reads follow symlinks (normal OS read semantics, like `cat`); lstat-based
+//     stat/list report a symlink itself. write follows an existing symlink.
+//   · directory walks never follow symlinked directories (loop safety) and skip
+//     `.git`; grep skips binary files and files larger than 8 MiB.
+//   · limits: read 1 MiB / 20 000 lines, write 4 MiB, list 5 000 entries,
+//     glob 2 000 paths, grep 500 matches, 15 s per request.
+// ---------------------------------------------------------------------------
+
+function escapeRegExpText(text) {
+  return String(text).replace(/[|\\{}()[\]^$+*?.]/g, '\\$&')
+}
+
+/** Turn a glob (`*`, `?`, `**`, `{a,b}`) into an anchored RegExp on '/'-paths. */
+function globToRegExp(pattern) {
+  const normalized = String(pattern).replaceAll('\\', '/')
+  let out = '^'
+  for (let index = 0; index < normalized.length; index++) {
+    const char = normalized[index]
+    if (char === '*') {
+      if (normalized[index + 1] === '*') {
+        index += 1
+        if (normalized[index + 1] === '/') {
+          index += 1
+          out += '(?:[^/]+/)*'
+        } else {
+          out += '.*'
+        }
+      } else {
+        out += '[^/]*'
+      }
+    } else if (char === '?') {
+      out += '[^/]'
+    } else if (char === '{') {
+      const close = normalized.indexOf('}', index)
+      if (close === -1) {
+        out += '\\{'
+      } else {
+        const options = normalized.slice(index + 1, close).split(',').map(escapeRegExpText)
+        out += `(?:${options.join('|')})`
+        index = close
+      }
+    } else if (char === '[') {
+      const close = normalized.indexOf(']', index)
+      if (close === -1) {
+        out += '\\['
+      } else {
+        out += normalized.slice(index, close + 1)
+        index = close
+      }
+    } else {
+      out += escapeRegExpText(char)
+    }
+  }
+  return new RegExp(`${out}$`)
+}
+
+function toPosixPath(value) {
+  return String(value).replaceAll('\\', '/')
+}
+
+/** Directory prefix of a glob pattern that contains no wildcards. */
+function globBaseDirectory(pattern) {
+  const normalized = toPosixPath(pattern)
+  const absolute = normalized.startsWith('/')
+  const segments = normalized.split('/')
+  const base = []
+  for (const segment of segments) {
+    if (segment === '') continue
+    if (/[*?[\]{}]/.test(segment)) break
+    base.push(segment)
+  }
+  const joined = base.join('/')
+  if (absolute) return joined ? `/${joined}` : '/'
+  return joined || '.'
+}
+
+function requireAbsoluteFsPath(value) {
+  if (typeof value !== 'string' || value.trim() === '' || !path.isAbsolute(value)) {
+    throw new Error('path must be absolute')
+  }
+  return value
+}
+
+function resolveWorkspacePath(value, workspaceBase) {
+  if (typeof value !== 'string' || value.trim() === '') return workspaceBase
+  return path.isAbsolute(value) ? value : path.resolve(workspaceBase, value)
+}
+
+function describeFsType(stats) {
+  if (!stats) return 'other'
+  if (stats.isDirectory()) return 'dir'
+  if (stats.isFile()) return 'file'
+  if (stats.isSymbolicLink()) return 'symlink'
+  return 'other'
+}
+
+function looksBinary(buffer) {
+  const window = buffer.subarray(0, Math.min(buffer.length, FS_BINARY_SNIFF_BYTES))
+  return window.includes(0)
+}
+
+function clampInteger(value, minimum, maximum, fallback) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return fallback
+  return Math.min(maximum, Math.max(minimum, Math.floor(number)))
+}
+
+async function readFileWindow(file, maximumBytes) {
+  const handle = await fsp.open(file, 'r')
+  try {
+    const stats = await handle.stat()
+    const length = Math.min(stats.size, maximumBytes)
+    const buffer = Buffer.alloc(length)
+    let offset = 0
+    while (offset < length) {
+      const { bytesRead } = await handle.read(buffer, offset, length - offset, offset)
+      if (bytesRead <= 0) break
+      offset += bytesRead
+    }
+    return { buffer: buffer.subarray(0, offset), stats }
+  } finally {
+    await handle.close().catch(() => {})
+  }
+}
+
+async function fsRead(request) {
+  const target = requireAbsoluteFsPath(request.path)
+  const stats = await fsp.stat(target)
+  if (stats.isDirectory()) throw new Error('EISDIR: illegal operation on a directory, read')
+  const { buffer } = await readFileWindow(target, FS_READ_MAX_BYTES + FS_BINARY_SNIFF_BYTES)
+  const requestedBase64 = request.encoding === 'base64'
+  const requestedUtf8 = request.encoding === 'utf8'
+  const binary = requestedBase64 || (!requestedUtf8 && looksBinary(buffer))
+  const windowTruncated = stats.size > buffer.length
+  if (binary) {
+    const content = buffer.subarray(0, FS_READ_MAX_BYTES)
+    return {
+      encoding: 'base64',
+      content: content.toString('base64'),
+      bytes: content.length,
+      truncated: windowTruncated || buffer.length > FS_READ_MAX_BYTES,
+    }
+  }
+  let text = buffer.subarray(0, FS_READ_MAX_BYTES).toString('utf8')
+  let readTruncated = windowTruncated || buffer.length > FS_READ_MAX_BYTES
+  if (readTruncated) {
+    // Do not return a half line/character at the window edge.
+    const lastNewline = text.lastIndexOf('\n')
+    if (lastNewline > 0) text = text.slice(0, lastNewline)
+  }
+  const lines = text.split('\n')
+  const offset = clampInteger(request.offset, 0, Number.MAX_SAFE_INTEGER, 0)
+  const limit = clampInteger(request.limit, 1, FS_READ_MAX_LINES, FS_READ_DEFAULT_LIMIT)
+  const selected = lines.slice(offset, offset + limit)
+  const selectedText = selected.join('\n')
+  return {
+    encoding: 'utf8',
+    text: selectedText,
+    lines: selected.length,
+    bytes: Buffer.byteLength(selectedText, 'utf8'),
+    truncated: readTruncated || offset + selected.length < lines.length,
+  }
+}
+
+async function fsWrite(request) {
+  const target = requireAbsoluteFsPath(request.path)
+  const encoding = request.encoding === 'base64' ? 'base64' : 'utf8'
+  const raw = typeof request.content === 'string' ? request.content : request.content == null ? '' : String(request.content)
+  const content = encoding === 'base64' ? Buffer.from(raw, 'base64') : Buffer.from(raw, 'utf8')
+  if (content.length > FS_WRITE_MAX_BYTES) {
+    throw new Error(`content exceeds the ${FS_WRITE_MAX_BYTES} byte write limit`)
+  }
+  let existed = true
+  try {
+    await fsp.access(target)
+  } catch {
+    existed = false
+  }
+  if (request.createDirs === true) await fsp.mkdir(path.dirname(target), { recursive: true })
+  await fsp.writeFile(target, content)
+  return { encoding, bytes: content.length, created: !existed }
+}
+
+async function fsList(request) {
+  const target = requireAbsoluteFsPath(request.path)
+  const dirents = await fsp.readdir(target, { withFileTypes: true })
+  dirents.sort((left, right) => left.name.localeCompare(right.name))
+  const truncated = dirents.length > FS_LIST_MAX_ENTRIES
+  const entries = []
+  for (const dirent of dirents.slice(0, FS_LIST_MAX_ENTRIES)) {
+    const entryPath = path.join(target, dirent.name)
+    let stats = null
+    try {
+      stats = await fsp.lstat(entryPath)
+    } catch {
+      stats = null
+    }
+    entries.push({
+      name: dirent.name,
+      path: entryPath,
+      type: describeFsType(stats ?? dirent),
+      size: stats ? stats.size : 0,
+      mtimeMs: stats ? stats.mtimeMs : 0,
+    })
+  }
+  return { entries, truncated }
+}
+
+async function fsStat(request) {
+  const target = requireAbsoluteFsPath(request.path)
+  const stats = await fsp.lstat(target)
+  return {
+    stat: {
+      type: describeFsType(stats),
+      size: stats.size,
+      mtimeMs: stats.mtimeMs,
+      mode: stats.mode & 0o777,
+    },
+  }
+}
+
+async function fsMkdir(request) {
+  const target = requireAbsoluteFsPath(request.path)
+  await fsp.mkdir(target, { recursive: request.recursive === true })
+  return { created: true }
+}
+
+async function fsRename(request) {
+  const from = requireAbsoluteFsPath(request.path)
+  const to = requireAbsoluteFsPath(request.to)
+  await fsp.rename(from, to)
+  return { path: to }
+}
+
+async function fsDelete(request) {
+  const target = requireAbsoluteFsPath(request.path)
+  await fsp.rm(target, { recursive: request.recursive === true, force: false })
+  return {}
+}
+
+/** Depth-first walk; never follows symlinked directories, checks abort/deadline. */
+async function walkTree(root, context, onEntry) {
+  const stack = [root]
+  while (stack.length > 0) {
+    if (context.signal?.aborted) throw new Error('request aborted')
+    if (Date.now() > context.deadline) throw new Error('request timed out')
+    const directory = stack.pop()
+    let entries
+    try {
+      entries = await fsp.readdir(directory, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    entries.sort((left, right) => left.name.localeCompare(right.name))
+    for (const entry of entries) {
+      if (entry.name === '.git') continue
+      const full = path.join(directory, entry.name)
+      if (entry.isDirectory()) {
+        stack.push(full)
+        await onEntry(full, 'dir')
+      } else if (entry.isFile()) {
+        await onEntry(full, 'file')
+      } else if (entry.isSymbolicLink()) {
+        await onEntry(full, 'symlink')
+      }
+    }
+  }
+}
+
+async function fsGlob(request, context) {
+  const rawPattern = typeof request.pattern === 'string' ? request.pattern.trim() : ''
+  if (!rawPattern) throw new Error('pattern is required')
+  const pattern = path.isAbsolute(rawPattern) ? rawPattern : path.resolve(context.workspaceBase, rawPattern)
+  const regex = globToRegExp(toPosixPath(pattern))
+  const base = globBaseDirectory(pattern)
+  const paths = []
+  let truncated = false
+
+  const record = (candidate) => {
+    if (!regex.test(toPosixPath(candidate))) return
+    if (paths.length >= FS_GLOB_MAX_PATHS) {
+      truncated = true
+      return
+    }
+    paths.push(candidate)
+  }
+
+  let baseStats = null
+  try {
+    baseStats = await fsp.stat(base)
+  } catch {
+    baseStats = null
+  }
+  if (baseStats && baseStats.isFile()) {
+    // A fully literal pattern (no wildcards) that points at a file.
+    record(base)
+  } else {
+    await walkTree(base, context, async (full, type) => {
+      record(full)
+      if (type === 'dir') return
+    })
+  }
+  paths.sort()
+  return { paths, truncated }
+}
+
+async function fsGrep(request, context) {
+  const root = resolveWorkspacePath(request.path, context.workspaceBase)
+  const rawPattern = typeof request.pattern === 'string' ? request.pattern : ''
+  let regex
+  try {
+    regex = new RegExp(rawPattern)
+  } catch (error) {
+    throw new Error(`invalid pattern: ${describeError(error)}`)
+  }
+  const includeRegex =
+    typeof request.include === 'string' && request.include.trim() ? globToRegExp(request.include.trim()) : null
+  const maxMatches = clampInteger(request.maxMatches, 1, FS_GREP_MAX_MATCHES, FS_GREP_MAX_MATCHES)
+  const matches = []
+  let truncated = false
+
+  const consider = async (file) => {
+    if (Date.now() > context.deadline) throw new Error('request timed out')
+    if (context.signal?.aborted) throw new Error('request aborted')
+    const relative = toPosixPath(path.relative(context.workspaceBase, file))
+    const basename = path.basename(file)
+    if (includeRegex && !includeRegex.test(relative) && !includeRegex.test(basename)) return
+    let stats
+    try {
+      stats = await fsp.stat(file)
+    } catch {
+      return
+    }
+    if (!stats.isFile() || stats.size > FS_GREP_MAX_FILE_BYTES) return
+    let buffer
+    try {
+      buffer = await fsp.readFile(file)
+    } catch {
+      return
+    }
+    if (looksBinary(buffer)) return
+    const lines = buffer.toString('utf8').split(/\r?\n/)
+    for (let index = 0; index < lines.length; index++) {
+      if (!regex.test(lines[index])) continue
+      if (matches.length >= maxMatches) {
+        truncated = true
+        return
+      }
+      matches.push({ path: file, line: index + 1, text: lines[index].slice(0, 2000) })
+    }
+  }
+
+  const stats = await fsp.stat(root)
+  if (stats.isFile()) await consider(root)
+  else await walkTree(root, context, async (full, type) => {
+    if (type === 'file') await consider(full)
+  })
+  return { matches, truncated }
+}
+
+async function runFsRequest(runtime, request, context) {
+  const base = {
+    requestId: request.requestId,
+    ok: true,
+    op: request.op,
+    path: typeof request.path === 'string' ? request.path : '',
+    error: null,
+  }
+  switch (request.op) {
+    case 'read':
+      return { ...base, ...(await fsRead(request)) }
+    case 'write':
+      return { ...base, ...(await fsWrite(request)) }
+    case 'list':
+      return { ...base, ...(await fsList(request)) }
+    case 'stat':
+      return { ...base, ...(await fsStat(request)) }
+    case 'mkdir':
+      return { ...base, ...(await fsMkdir(request)) }
+    case 'rename':
+      return { ...base, ...(await fsRename(request)) }
+    case 'delete':
+      return { ...base, ...(await fsDelete(request)) }
+    case 'glob':
+      return { ...base, ...(await fsGlob(request, context)) }
+    case 'grep':
+      return { ...base, ...(await fsGrep(request, context)) }
+    default:
+      throw new Error(`unsupported fs op: ${request.op}`)
+  }
+}
+
+/** Run one fs request with the 15 s deadline/abort wrapper. Never throws. */
+async function executeFsRequest(runtime, request) {
+  const controller = new AbortController()
+  runtime.fs.controllers.add(controller)
+  const deadline = Date.now() + FS_REQUEST_TIMEOUT_MS
+  let timer
+  const timeout = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort()
+      reject(new Error('request timed out'))
+    }, FS_REQUEST_TIMEOUT_MS)
+    timer.unref?.()
+  })
+  try {
+    return await Promise.race([
+      runFsRequest(runtime, request, {
+        workspaceBase: runtime.config.workspaceBase,
+        signal: controller.signal,
+        deadline,
+      }),
+      timeout,
+    ])
+  } catch (error) {
+    return {
+      requestId: request.requestId,
+      ok: false,
+      op: request.op,
+      path: typeof request.path === 'string' ? request.path : '',
+      error: describeError(error),
+    }
+  } finally {
+    clearTimeout(timer)
+    runtime.fs.controllers.delete(controller)
+  }
+}
+
+async function postFsResult(runtime, payload) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if (runtime.stopping) return false
+    try {
+      const response = await requestJson(fsResultUrl(runtime.config.serverUrl), {
+        method: 'POST',
+        token: runtime.config.token,
+        body: payload,
+        timeoutMs: 15_000,
+        signal: runtime.controller.signal,
+      })
+      if (response.status === 200) return true
+      if (response.status === 404) {
+        runtimeLog(runtime, 'info', `fs 结果被服务器忽略（未知请求 ${payload.requestId}）`)
+        return false
+      }
+      if (response.status === 401 && isInvalidTokenRejection(response.status, response.text)) {
+        runtimeLog(runtime, 'error', 'fs 结果上报被拒绝（invalid-token）：token 已失效，需要重新 enroll')
+        return false
+      }
+      throw new Error(`HTTP ${response.status}`)
+    } catch (error) {
+      if (attempt === 1 || runtime.stopping) {
+        runtimeLog(runtime, 'warn', `fs 结果上报失败（${payload.requestId}）：${describeError(error)}`)
+        return false
+      }
+      await sleep(300)
+    }
+  }
+  return false
+}
+
+// ---------------------------------------------------------------------------
 // SSE event handlers
 // ---------------------------------------------------------------------------
 
@@ -803,9 +1510,20 @@ function handleExec(runtime, rawData) {
     runtimeLog(runtime, 'warn', `忽略重复的请求 ${request.requestId}`)
     return
   }
-  const job = executeCommand({ command: request.command, cwd: request.cwd ?? null, timeoutMs: request.timeoutMs })
+  const explicitCwd = typeof request.cwd === 'string' && request.cwd.trim() ? request.cwd : null
+  // §11.2/§11.5: stream chunks only when the host asked for this exec AND
+  // advertised the `stream` feature in `hello`.
+  const streaming = request.stream === true && runtime.state.features.includes('stream')
+  const pump = streaming ? createChunkPump(runtime, request.requestId) : null
+  const job = executeCommand({
+    command: request.command,
+    cwd: explicitCwd ?? runtime.config.workspaceBase,
+    timeoutMs: request.timeoutMs,
+    onStdout: pump ? (chunk) => pump.push('stdout', chunk) : undefined,
+    onStderr: pump ? (chunk) => pump.push('stderr', chunk) : undefined,
+  })
   runtime.jobs.set(request.requestId, job)
-  runtimeLog(runtime, 'info', `▶ ${request.requestId} ${abbreviate(request.command)}`)
+  runtimeLog(runtime, 'info', `▶ ${request.requestId}${streaming ? ' [stream]' : ''} ${abbreviate(request.command)}`)
   void job.promise
     .then(async (result) => {
       runtimeLog(
@@ -815,15 +1533,22 @@ function handleExec(runtime, rawData) {
           `${result.timedOut ? ' timedOut' : ''}${result.truncated ? ' truncated' : ''}`,
       )
       if (runtime.stopping) {
+        pump?.abort()
         runtimeLog(runtime, 'info', `运行时已停止，不再上报结果 ${request.requestId}`)
         return
       }
+      // Flush the tail chunks before the authoritative final result so the host
+      // assembles output in order, then close the pump (no timers left).
+      if (pump) await pump.close()
       await postResult(runtime, { requestId: request.requestId, ...result })
     })
     .catch((error) => {
+      pump?.abort()
       runtimeLog(runtime, 'error', `✗ ${request.requestId} 执行失败：${describeError(error)}`)
     })
     .finally(() => {
+      pump?.abort()
+      if (pump) runtime.pumps.delete(pump)
       runtime.jobs.delete(request.requestId)
     })
 }
@@ -838,6 +1563,37 @@ function handleCancel(runtime, rawData) {
   }
   runtimeLog(runtime, 'info', `取消 ${request.requestId}`)
   job.cancel()
+}
+
+function handleFs(runtime, rawData) {
+  const request = parseJsonSafe(rawData)
+  if (!request || typeof request.requestId !== 'string' || typeof request.op !== 'string') {
+    runtimeLog(runtime, 'warn', '忽略一条字段不完整的 fs 事件')
+    return
+  }
+  // §11.5: an old host never sends fs events; only accept them when it
+  // advertised the `fs` feature in `hello`.
+  if (!runtime.state.features.includes('fs')) {
+    runtimeLog(runtime, 'warn', `忽略 fs 事件（服务器未声明 fs 能力）：${request.op} ${request.requestId}`)
+    return
+  }
+  if (!FS_OPS.includes(request.op)) {
+    runtimeLog(runtime, 'warn', `忽略不支持的 fs op：${request.op}`)
+    return
+  }
+  if (runtime.stopping || !runtime.state.running) return
+  const promise = (async () => {
+    const result = await executeFsRequest(runtime, request)
+    if (runtime.stopping) return
+    await postFsResult(runtime, result)
+  })()
+    .catch((error) => {
+      runtimeLog(runtime, 'error', `fs 请求失败：${describeError(error)}`)
+    })
+    .finally(() => {
+      runtime.fs.promises.delete(promise)
+    })
+  runtime.fs.promises.add(promise)
 }
 
 function applyConfigEvent(runtime, rawData) {
@@ -871,6 +1627,13 @@ function normalizeRuntimeHeartbeat(value) {
   return Math.min(Math.max(1000, Math.floor(number)), 300_000)
 }
 
+/** Chunk heartbeat cadence (§11.6 default 10 s; overridable for diagnostics). */
+function normalizeChunkHeartbeat(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number) || number <= 0) return CHUNK_HEARTBEAT_MS
+  return Math.min(Math.max(100, Math.floor(number)), 300_000)
+}
+
 function createRuntime(options) {
   if (!options || typeof options !== 'object' || Array.isArray(options)) {
     throw new TypeError('startRuntime(options) requires an options object')
@@ -887,6 +1650,7 @@ function createRuntime(options) {
     token: requireOptionString(options.token, 'token'),
     computerId: requireOptionString(options.computerId, 'computerId'),
     name: typeof options.name === 'string' ? options.name.trim() : '',
+    workspaceBase: normalizeWorkspaceBase(options.workspaceBase),
   }
   return {
     config,
@@ -899,11 +1663,15 @@ function createRuntime(options) {
     emittingState: false,
     lastStateKey: '',
     loopPromise: null,
+    fs: { controllers: new Set(), promises: new Set() },
+    pumps: new Set(),
     state: {
       running: true,
       connected: false,
       heartbeatMs: normalizeRuntimeHeartbeat(options.heartbeatMs),
       name: config.name,
+      features: [],
+      chunkHeartbeatMs: normalizeChunkHeartbeat(options.chunkHeartbeatMs),
       since: null,
       lastConnectedAt: null,
       lastError: null,
@@ -911,6 +1679,7 @@ function createRuntime(options) {
       exitCode: null,
       lastPingLogAt: 0,
       lastHeartbeatErrorAt: 0,
+      lastChunkDropAt: 0,
     },
   }
 }
@@ -967,6 +1736,9 @@ function runtimeStatus(runtime) {
     serverUrl: runtime.config.serverUrl,
     computerId: runtime.config.computerId,
     name: state.name || runtime.config.name,
+    workspaceBase: runtime.config.workspaceBase,
+    capabilities: [...AGENT_CAPABILITIES],
+    features: [...state.features],
     heartbeatMs: state.heartbeatMs,
     since: state.since,
     lastConnectedAt: state.lastConnectedAt,
@@ -980,7 +1752,7 @@ function runtimeStatus(runtime) {
 function emitRuntimeState(runtime) {
   if (!runtime.onState || runtime.emittingState) return
   const status = runtimeStatus(runtime)
-  const key = [status.running, status.connected, status.since, status.lastError, status.name, status.exitCode].join('|')
+  const key = [status.running, status.connected, status.since, status.lastError, status.name, status.exitCode, status.features.join(',')].join('|')
   if (key === runtime.lastStateKey) return
   runtime.lastStateKey = key
   runtime.emittingState = true
@@ -1020,8 +1792,24 @@ async function stopRuntime(runtime) {
     runtime.stopping = true
     runtimeLog(runtime, 'info', '正在停止运行时…')
     runtime.controller.abort()
+    // Drop buffered stream frames without flushing and clear every timer.
+    for (const pump of [...runtime.pumps]) {
+      try {
+        pump.abort()
+      } catch {
+        // ignore
+      }
+    }
   }
   await cancelAndReapJobs(runtime)
+  for (const controller of [...runtime.fs.controllers]) {
+    try {
+      controller.abort()
+    } catch {
+      // ignore
+    }
+  }
+  if (runtime.fs.promises.size > 0) await Promise.allSettled([...runtime.fs.promises])
   if (runtime.loopPromise) await runtime.loopPromise.catch(() => {})
   // Reap jobs that a last in-flight event may have started before the flag.
   await cancelAndReapJobs(runtime)
@@ -1114,7 +1902,10 @@ async function runRuntimeLoop(runtime) {
  */
 async function runOneSession(runtime, signal) {
   const config = runtime.config
-  const response = await fetch(eventsUrl(config.serverUrl), { headers: sseHeaders(config.token), signal })
+  const response = await fetch(eventsUrl(config.serverUrl), {
+    headers: sseHeaders(config.token, handshakeMetadata(config.workspaceBase)),
+    signal,
+  })
   if (response.status === 401) {
     const body = await readErrorBody(response)
     if (isInvalidTokenRejection(response.status, body)) return { kind: 'unauthorized' }
@@ -1159,6 +1950,10 @@ async function runOneSession(runtime, signal) {
           gotHello = true
           if (typeof hello.name === 'string' && hello.name) state.name = hello.name
           if (typeof hello.heartbeatMs === 'number' && hello.heartbeatMs > 0) state.heartbeatMs = hello.heartbeatMs
+          // PROTOCOL §11.5: an old host sends no `features`; behave exactly like v1.
+          state.features = Array.isArray(hello.features)
+            ? hello.features.filter((feature) => typeof feature === 'string')
+            : []
           state.connected = true
           state.since = new Date().toISOString()
           state.lastConnectedAt = state.since
@@ -1167,7 +1962,8 @@ async function runOneSession(runtime, signal) {
             runtime,
             'info',
             `已连接 ${config.serverUrl} · computer=${config.computerId}` +
-              `${state.name ? ` · name=${state.name}` : ''} · heartbeat=${state.heartbeatMs}ms`,
+              `${state.name ? ` · name=${state.name}` : ''} · heartbeat=${state.heartbeatMs}ms` +
+              ` · features=${state.features.length > 0 ? state.features.join(',') : 'none'}`,
           )
           emitRuntimeState(runtime)
           startHeartbeatTimer()
@@ -1187,6 +1983,9 @@ async function runOneSession(runtime, signal) {
           }
           break
         }
+        case 'fs':
+          handleFs(runtime, event.data)
+          break
         case 'config':
           applyConfigEvent(runtime, event.data)
           break
@@ -1226,6 +2025,7 @@ async function cmdRun(argv) {
     token: config.token,
     computerId: config.computerId,
     name: config.name,
+    workspaceBase: config.workspaceBase,
     heartbeatMs: DEFAULT_HEARTBEAT_MS,
     log: sink,
     onState: (state) => {
@@ -1277,6 +2077,7 @@ async function cmdEnroll(argv) {
         server: { type: 'string' },
         key: { type: 'string' },
         name: { type: 'string' },
+        'workspace-base': { type: 'string' },
         replace: { type: 'boolean' },
         help: { type: 'boolean', short: 'h' },
       },
@@ -1300,7 +2101,15 @@ async function cmdEnroll(argv) {
     console.error(`提示：${configFile()} 已存在，本次注册会覆盖旧的凭据。`)
   }
 
-  const body = { key, agentVersion: AGENT_VERSION, machine: machineInfo(requestedName) }
+  const workspaceBase = normalizeWorkspaceBase(values['workspace-base'])
+  const body = {
+    key,
+    agentVersion: AGENT_VERSION,
+    // PROTOCOL §11.1 (top-level capabilities) + §11.6 (handshake metadata).
+    capabilities: [...AGENT_CAPABILITIES],
+    machine: machineInfo(requestedName),
+    metadata: handshakeMetadata(workspaceBase),
+  }
   if (values.replace) body.replace = true
 
   let response
@@ -1333,9 +2142,11 @@ async function cmdEnroll(argv) {
     token: data.token,
     name: data.name,
     enrolledAt: new Date().toISOString(),
+    workspaceBase,
   }
   await saveConfig(config)
   console.log(`✓ 凭据已保存到 ${configFile()}（仅本机可读，权限 0600）`)
+  console.log(`工作目录：${workspaceBase}（exec 默认 cwd，glob/grep 的相对基准）`)
 
   // Prove the round trip once. Failure to receive hello is not fatal: the
   // enrollment itself succeeded and `run` retries forever.
@@ -1862,6 +2673,8 @@ async function cmdStatus(argv) {
   console.log(`电脑：${config.name}（${config.computerId}）`)
   console.log(`注册时间：${config.enrolledAt || '未知'}`)
   console.log(`Token：${redactToken(config.token)}（已脱敏）`)
+  console.log(`工作目录：${config.workspaceBase}`)
+  console.log(`能力：${AGENT_CAPABILITIES.join(', ')}`)
   console.log(`配置：${configFile()}`)
   console.log(`日志：${logFile()}`)
   console.log(`服务：${await serviceSummary()}`)
@@ -1872,12 +2685,13 @@ async function cmdStatus(argv) {
 // CLI plumbing
 // ---------------------------------------------------------------------------
 
-const ENROLL_USAGE = `用法：dsh-computers-agent enroll --server <url> --key <key> [--name <name>] [--replace]
+const ENROLL_USAGE = `用法：dsh-computers-agent enroll --server <url> --key <key> [--name <name>] [--workspace-base <path>] [--replace]
 
-  --server <url>    dsh-web 的地址，例如 http://127.0.0.1:3000
-  --key <key>       服务器生成的加入密钥（dshc_…），只能使用一次
-  --name <name>     显示在服务器电脑列表里的名称，默认使用主机名
-  --replace         让服务器用这台电脑的新凭据替换同名记录`
+  --server <url>          dsh-web 的地址，例如 http://127.0.0.1:3000
+  --key <key>             服务器生成的加入密钥（dshc_…），只能使用一次
+  --name <name>           显示在服务器电脑列表里的名称，默认使用主机名
+  --workspace-base <path> 默认工作目录（exec 默认 cwd，glob/grep 的相对基准），默认 $HOME
+  --replace               让服务器用这台电脑的新凭据替换同名记录`
 
 const RUN_USAGE = `用法：dsh-computers-agent run
 
@@ -1892,7 +2706,7 @@ const HELP_TEXT = `dsh-computers-agent ${AGENT_VERSION}
 把本机接入 dsh-web，让服务器上的 agent 通过 computer_exec 在这台电脑执行命令。
 
 用法 / Usage:
-  dsh-computers-agent enroll --server <url> --key <key> [--name <name>] [--replace]
+  dsh-computers-agent enroll --server <url> --key <key> [--name <name>] [--workspace-base <path>] [--replace]
       用服务器给出的加入密钥注册这台电脑，并把凭据保存到本机。
   dsh-computers-agent run
       前台运行：保持 SSE 连接并执行服务器发来的命令（Ctrl-C 退出）。
@@ -1911,7 +2725,8 @@ const HELP_TEXT = `dsh-computers-agent ${AGENT_VERSION}
   · 配置文件 ${configFile()} 权限 0600，原子写入。
   · token 只保存在本机，不会写入日志；status 只显示末 6 位。
   · 本程序只发起对外连接（enroll / SSE / 结果上报 / 心跳），不监听任何端口。
-  · 命令以当前用户身份在 /bin/sh -lc 中执行，因此拥有与终端相同的权限。`
+  · 命令以当前用户身份在 /bin/sh -lc 中执行，因此拥有与终端相同的权限。
+  · 能力：exec（远程命令）+ fs（远程文件读写/glob/grep），默认工作目录可在 enroll 时指定。`
 
 function parseCliArgs(args, options) {
   try {
