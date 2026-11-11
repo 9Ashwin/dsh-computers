@@ -1,0 +1,13 @@
+# dsh-computers: one Host row that registers the computer registry, the
+# agent-facing endpoints, the model-facing tools and the settings page.
+- insert:
+    - id: dsh-computers
+      name: dsh-computers
+      config:
+        publicUrl: ''
+        stateDir: ''
+        keyTtlMinutes: 15
+        heartbeatMs: 20000
+        execTimeoutMs: 120000
+        execEnabled: true
+        maxOutputBytes: 1048576
