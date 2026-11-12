@@ -36,6 +36,8 @@ import { mintSecret, newComputerId, normalizeDisplayName, sha256Hex, tokenMatche
 import { normalizeState, prunePendingKeys } from '../lib/state.js'
 import { collectServerUrls, resolveAddressPayload } from '../lib/addresses.js'
 import { createTunnel } from '../lib/tunnel.js'
+import * as contracts from '../lib/contracts.js'
+import { capsOf, legacyCaps, normalizeCaps, supports } from '../lib/policy.js'
 
 const ROOT = new URL('../', import.meta.url).pathname
 const API = '/api/dsh-computers'
@@ -687,13 +689,15 @@ async function phaseA(root) {
       const response = await raw(origin, `${API}/agent/heartbeat`, {
         method: 'POST',
         headers: { authorization: `Bearer ${app.token}`, 'content-type': 'application/json' },
-        body: JSON.stringify({ meta: { cpuModel: 'Apple M4 Max', agentVersion: PLUGIN_VERSION } }),
+        body: JSON.stringify({ meta: { cpuModel: 'Apple M4 Max', agentVersion: PLUGIN_VERSION, caps: { exec: true, fs: true, jobs: true } } }),
       })
       assert.equal(response.status, 200)
       assert.deepEqual(response.data, { ok: true, name: 'Smoke Mac' })
       const state = await call(origin, `${API}/state`)
       assert.equal(state.data.computers[0].cpuModel, 'Apple M4 Max')
       assert.equal(state.data.computers[0].agentVersion, PLUGIN_VERSION)
+      // R2: caps from heartbeat meta are stored and normalized.
+      assert.deepEqual(state.data.computers[0].caps, { exec: true, fs: true, jobs: true, pty: false, tunnel: false })
     })
 
     // --- tools -------------------------------------------------------------
@@ -703,6 +707,8 @@ async function phaseA(root) {
       const value = await listTool.execute({}, {})
       assert.equal(value.computers.length, 1)
       assert.equal(value.computers[0].online, true)
+      // R2: the list exposes caps; pty:false hides nothing that worked before.
+      assert.deepEqual(value.computers[0].caps, { exec: true, fs: true, jobs: true, pty: false, tunnel: false })
       assert.equal(value.selectedComputerId, null, 'no session agent means no selection')
       const content = listTool.output.render({}, value)
       assert.equal(content.length, 1)
@@ -1095,7 +1101,7 @@ async function phaseC(root) {
           key: freshKey,
           agentVersion: PLUGIN_VERSION,
           capabilities: ['exec', 'fs'],
-          metadata: { version: 1, agentVersion: PLUGIN_VERSION, mode: 'embedded', workspaceBase: '/home/smoke' },
+          metadata: { version: 1, agentVersion: PLUGIN_VERSION, mode: 'embedded', workspaceBase: '/home/smoke', caps: { exec: true, fs: false, jobs: true } },
           machine: { hostname: 'linux-box.local', name: 'ignored-name', os: 'linux', arch: 'x64', platform: 'linux' },
         },
       })
@@ -1112,6 +1118,7 @@ async function phaseC(root) {
       assert.equal(state.data.computers[0].platformLabel, 'Linux')
       assert.equal(state.data.computers[0].name, 'Smoke Linux')
       assert.equal(state.data.computers[0].mode, 'embedded', 'mode is stored from the enroll metadata block')
+      assert.deepEqual(state.data.computers[0].caps, { exec: true, fs: false, jobs: true, pty: false, tunnel: false }, 'caps are stored from the enroll metadata block')
       assert.equal(state.data.computers[0].workspaceBase, '/home/smoke')
       assert.deepEqual(state.data.computers[0].capabilities, ['exec', 'fs'])
     })
@@ -2722,6 +2729,7 @@ async function phaseJ(root) {
       capabilities: ['exec', 'fs'],
       workspaceBase: '/Users/smoke',
       mode: 'embedded',
+      caps: { exec: true, fs: true, jobs: true, pty: false, tunnel: false },
     }
     const metadataHeader = Buffer.from(JSON.stringify(metadata), 'utf8').toString('base64url')
     const v2Sse = await openSse(origin, `${API}/agent/events`, {
@@ -2805,17 +2813,24 @@ async function phaseJ(root) {
       assert.equal(legacy.mode, 'service', 'a legacy record without mode defaults to service')
       const embOld = state.data.computers.find((computer) => computer.id === embeddedOldId)
       assert.equal(embOld.mode, 'embedded')
+      // R2: caps from the connect handshake; a legacy record derives them.
+      assert.deepEqual(v2.caps, { exec: true, fs: true, jobs: true, pty: false, tunnel: false })
+      assert.deepEqual(legacy.caps, { exec: true, fs: false, jobs: true, pty: false, tunnel: false })
+      assert.deepEqual(state.data.computers.find((computer) => computer.id === noFsId).caps, legacy.caps)
       assert.equal(legacy.drift, true)
       assert.equal(legacy.updateRequired, true)
       const health = await call(origin, `${API}/health`)
       const healthV2 = health.data.agents.find((agent) => agent.id === v2Id)
       assert.deepEqual(healthV2.capabilities, ['exec', 'fs'])
       assert.equal(healthV2.mode, 'embedded')
+      assert.deepEqual(healthV2.caps, { exec: true, fs: true, jobs: true, pty: false, tunnel: false })
       assert.equal(health.data.agents.find((agent) => agent.id === oldId).mode, 'service')
       assert.equal(healthV2.drift, false)
       const value = await listTool.execute({}, { agent: session })
       const listV2 = value.computers.find((computer) => computer.id === v2Id)
       assert.deepEqual(listV2.capabilities, ['exec', 'fs'])
+      assert.deepEqual(listV2.caps, { exec: true, fs: true, jobs: true, pty: false, tunnel: false })
+      assert.deepEqual(value.computers.find((computer) => computer.id === oldId).caps, { exec: true, fs: false, jobs: true, pty: false, tunnel: false })
       assert.equal(listV2.mode, 'embedded')
       assert.equal(value.computers.find((computer) => computer.id === oldId).mode, 'service')
       assert.equal(listV2.drift, false)
@@ -3046,6 +3061,8 @@ async function phaseJ(root) {
         .then((value) => ({ value }), (error) => ({ error }))
       assert.ok(settled.error)
       assert.match(settled.error.message, /does not support remote file access/)
+      assert.match(settled.error.message, /'fs' capability is missing/, 'the error names the missing capability')
+      assert.match(settled.error.message, /"fs":false/, 'the error shows the reported caps')
       assert.match(settled.error.message, /设置 → 插件市场 → 检查更新/, 'this machine is embedded, so the plugin-update hint is used')
       assert.doesNotMatch(settled.error.message, /重新运行安装命令/)
       assert.equal(noFsSse.events.filter((frame) => frame.name === 'fs').length, 0)
@@ -3538,6 +3555,400 @@ async function phaseL(root) {
 }
 
 // ---------------------------------------------------------------------------
+// Phase M — lib/contracts.js unit assertions (R1, docs/refactor-plan.md)
+// ---------------------------------------------------------------------------
+
+async function phaseM() {
+  await check('contracts: leaf module has no imports and no state', async () => {
+    const source = readFileSync(new URL('../lib/contracts.js', import.meta.url), 'utf8')
+    assert.equal(source.includes('require('), false, 'no CommonJS require')
+    assert.equal(/(^|\n)\s*import\s/.test(source), false, 'no ES imports: zero-dependency leaf')
+  })
+
+  await check('contracts: vocabulary constants are complete and frozen', async () => {
+    assert.equal(contracts.PROTOCOL_VERSION, 2)
+    assert.equal(contracts.STATE_VERSION, 1)
+    assert.equal(contracts.API_BASE, '/api/dsh-computers')
+    assert.deepEqual(contracts.CAPABILITIES, ['exec', 'fs', 'jobs', 'pty', 'tunnel'])
+    assert.deepEqual(contracts.HOST_FEATURES, ['stream', 'fs'])
+    assert.deepEqual(contracts.EXECUTION_STATUSES, ['completed', 'failed', 'cancelled', 'timeout'])
+    assert.deepEqual(contracts.DISPOSITIONS, ['reusable', 'broken'])
+    assert.equal(contracts.EXECUTION_STATUS.TIMEOUT, 'timeout')
+    assert.equal(contracts.DISPOSITION.BROKEN, 'broken')
+    assert.equal(contracts.WIRE_EVENT.HELLO, 'hello')
+    assert.equal(contracts.WIRE_EVENT.FS, 'fs')
+    assert.equal(contracts.CHUNK_TYPE.HEARTBEAT, 'heartbeat')
+    assert.equal(contracts.ERROR_CODES.INVALID_TOKEN, 'invalid-token')
+    assert.equal(contracts.ERROR_CODES.UNKNOWN_REQUEST, 'unknown-request')
+    assert.equal(contracts.JOB_STATUS.KILLED, 'killed')
+    assert.ok(Object.isFrozen(contracts.CAPABILITIES))
+    assert.ok(Object.isFrozen(contracts.ERROR_CODES))
+  })
+
+  await check('contracts: frame constructors reproduce the wire field order', async () => {
+    assert.deepEqual(
+      contracts.helloFrame({ computerId: 'cmp_1', name: 'Mac', heartbeatMs: 20000, capabilities: ['exec'], features: ['stream', 'fs'] }),
+      { computerId: 'cmp_1', name: 'Mac', heartbeatMs: 20000, capabilities: ['exec'], features: ['stream', 'fs'] },
+    )
+    assert.deepEqual(
+      contracts.execFrame({ requestId: 'req_1', command: 'echo hi', timeoutMs: 500 }),
+      { requestId: 'req_1', command: 'echo hi', cwd: null, timeoutMs: 500, shell: 'sh', stream: true },
+    )
+    assert.deepEqual(contracts.cancelFrame('req_1'), { requestId: 'req_1' })
+    assert.deepEqual(
+      contracts.fsFrame({ requestId: 'fsr_1', op: 'read', payload: { path: '/tmp/a', offset: 1 } }),
+      { requestId: 'fsr_1', op: 'read', path: '/tmp/a', offset: 1 },
+    )
+    assert.deepEqual(
+      contracts.chunkFrame({ requestId: 'req_1', seq: 3, type: 'stdout', data: 'aGk=' }),
+      { requestId: 'req_1', seq: 3, type: 'stdout', data: 'aGk=' },
+    )
+    assert.deepEqual(
+      contracts.resultFrame({ requestId: 'req_1' }),
+      { requestId: 'req_1', ok: false, exitCode: null, signal: null, stdout: '', stderr: '', durationMs: 0, truncated: false, timedOut: false, error: null },
+    )
+    assert.equal(contracts.pingFrame(42).t, 42)
+  })
+
+  await check('contracts: guards accept real shapes and reject garbage', async () => {
+    assert.equal(contracts.isHello({ computerId: 'cmp_1' }), true)
+    assert.equal(contracts.isHello({}), false)
+    assert.equal(contracts.isExecRequest({ requestId: 'r', command: 'c' }), true)
+    assert.equal(contracts.isExecRequest({ requestId: 'r' }), false)
+    assert.equal(contracts.isChunkFrame({ requestId: 'r', seq: 0, type: 'stdout', data: 'x' }), true)
+    assert.equal(contracts.isChunkFrame({ requestId: 'r', type: 'heartbeat', data: '' }), true)
+    assert.equal(contracts.isChunkFrame({ requestId: 'r', seq: 0, stdout: 'a', stderr: '' }), true)
+    assert.equal(contracts.isChunkFrame({ requestId: 'r', seq: 0, type: 'nope' }), false)
+    assert.equal(contracts.isChunkFrame({ requestId: 42 }), false)
+    assert.equal(contracts.isResultFrame({ requestId: 'r' }), true)
+    assert.equal(contracts.isFsResult({ requestId: 'fsr' }), true)
+    assert.equal(contracts.isFsRequest({ requestId: 'fsr', op: 'read' }), true)
+    assert.equal(contracts.isFsRequest({ requestId: 'fsr' }), false)
+    assert.equal(contracts.isCapability('pty'), true)
+    assert.equal(contracts.isCapability('bogus'), false)
+    assert.equal(contracts.isPlainObject([]), false)
+  })
+
+  await check('contracts: metadata header round trip and drift tolerance', async () => {
+    const metadata = contracts.connectMetadata({
+      agentVersion: '1.5.0',
+      hostname: 'mac',
+      os: 'darwin',
+      arch: 'arm64',
+      capabilities: ['exec', 'fs'],
+      workspaceBase: '/Users/x',
+      mode: 'embedded',
+      caps: { exec: true, fs: true },
+    })
+    assert.equal(metadata.version, 1)
+    assert.equal(metadata.mode, 'embedded')
+    assert.deepEqual(metadata.caps, { exec: true, fs: true })
+    const header = contracts.encodeMetadataHeader(metadata)
+    assert.deepEqual(contracts.decodeMetadataHeader(header), metadata)
+    assert.equal(contracts.decodeMetadataHeader('not-base64-json'), null)
+    assert.equal(contracts.decodeMetadataHeader(''), null)
+    assert.deepEqual(contracts.decodeMetadataHeader(['eyJ4IjoxfQ']), { x: 1 })
+    // optional(object schema): unknown/absent fields are dropped, never fatal.
+    const parser = contracts.optional({
+      mode: (value) => (value === 'embedded' || value === 'service' ? value : undefined),
+      workspaceBase: (value) => (typeof value === 'string' ? value : undefined),
+    })
+    assert.deepEqual(parser({ mode: 'service', workspaceBase: '/w', extra: 'ignored' }), { mode: 'service', workspaceBase: '/w' })
+    assert.deepEqual(parser({ mode: 'bogus' }), {})
+    assert.equal(parser(null), null)
+    assert.deepEqual(contracts.pickKnown({ a: 1, b: 2, c: undefined }, ['a', 'c', 'd']), { a: 1 })
+    const optString = contracts.optional((value) => (typeof value === 'string' ? value.trim() : undefined), 'fallback')
+    assert.equal(optString(undefined), 'fallback')
+    assert.equal(optString('  x '), 'x')
+    assert.equal(optString(42), 'fallback')
+  })
+
+  await check('contracts: browser payload constructors match the served shapes', async () => {
+    const state = contracts.statePayload({
+      role: 'both',
+      serverUrl: 'http://127.0.0.1:1',
+      serverUrls: [],
+      loopbackOnly: true,
+      listener: { host: '127.0.0.1', port: 1, loopback: true },
+      tunnel: { enabled: false, configured: false, url: '', targetPort: null, error: null },
+      heartbeatMs: 20000,
+      computers: [],
+      pendingKey: null,
+    })
+    assert.deepEqual(Object.keys(state), ['version', 'role', 'serverUrl', 'serverUrls', 'loopbackOnly', 'listener', 'tunnel', 'heartbeatMs', 'computers', 'pendingKey'])
+    assert.equal(state.version, 2)
+    const keys = contracts.keysPayload({
+      key: 'k', os: 'macos', expiresAt: 'e', serverUrl: 'u', serverUrls: [], loopbackOnly: true,
+      listener: {}, command: 'c', windowsCommand: 'w', installUrl: 'i',
+    })
+    assert.deepEqual(Object.keys(keys), ['key', 'os', 'expiresAt', 'serverUrl', 'serverUrls', 'loopbackOnly', 'listener', 'command', 'windowsCommand', 'installUrl'])
+    assert.deepEqual(contracts.keyStatusPayload({ status: 'waiting' }), { status: 'waiting', computer: null })
+    assert.deepEqual(contracts.emptyStateDocument(), { version: 1, computers: [], pendingKeys: [] })
+    assert.deepEqual(contracts.errorEnvelope('bad-request', 'nope'), { error: 'bad-request', message: 'nope' })
+    assert.deepEqual(contracts.errorEnvelope('bad-request', 'nope', 'ctx'), { error: 'bad-request', message: 'nope', detail: 'ctx' })
+    assert.equal(contracts.runtimeStatusPayload({ configured: false, enabled: false, connected: false, serverUrl: '', computerId: '', name: '', since: null, lastError: null }).configured, false)
+    assert.deepEqual(contracts.enrollRequest({ key: 'k', agentVersion: '1', capabilities: ['exec'], metadata: {}, machine: {} }), { key: 'k', agentVersion: '1', capabilities: ['exec'], metadata: {}, machine: {} })
+    assert.deepEqual(contracts.heartbeatBody({ meta: { agentVersion: '1' }, extra: { capabilities: ['exec'], bogus: 1 } }), { meta: { agentVersion: '1' }, capabilities: ['exec'] })
+    assert.equal(contracts.AGENT_PATHS.CHUNK, '/agent/results/chunk')
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Phase N — R2: caps-derived policy (lib/policy.js)
+// ---------------------------------------------------------------------------
+
+async function phaseN(root) {
+  await check('policy: legacy caps derivation and normalization', async () => {
+    assert.deepEqual(legacyCaps({ capabilities: ['exec', 'fs'] }), { exec: true, fs: true, jobs: true, pty: false, tunnel: false })
+    assert.deepEqual(legacyCaps({}), { exec: true, fs: false, jobs: true, pty: false, tunnel: false })
+    // Legacy derivation keeps pty/tunnel off even if a stale capability list mentions pty.
+    assert.deepEqual(legacyCaps({ capabilities: ['exec', 'fs', 'pty'] }), { exec: true, fs: true, jobs: true, pty: false, tunnel: false })
+    assert.equal(normalizeCaps('nope'), null)
+    assert.equal(normalizeCaps(null), null)
+    assert.deepEqual(normalizeCaps({ fs: true }), { exec: true, fs: true, jobs: false, pty: false, tunnel: false })
+    assert.deepEqual(normalizeCaps({ exec: false, tunnel: true }), { exec: false, fs: false, jobs: false, pty: false, tunnel: true })
+  })
+
+  await check('policy: supports() is the single feature predicate', async () => {
+    assert.equal(supports({ caps: { exec: true, fs: true, jobs: true, pty: false, tunnel: false } }, 'fs'), true)
+    assert.equal(supports({ caps: { fs: true } }, 'jobs'), false, 'absent flag hides the feature')
+    assert.equal(supports({ capabilities: ['exec', 'fs'] }, 'fs'), true, 'legacy derivation still answers')
+    assert.equal(supports({ capabilities: [] }, 'pty'), false)
+    assert.equal(supports({}, 'bogus'), false)
+    assert.deepEqual(capsOf({ caps: { fs: true } }), { exec: true, fs: true, jobs: false, pty: false, tunnel: false })
+    assert.deepEqual(capsOf({ capabilities: ['exec'] }), legacyCaps({ capabilities: ['exec'] }))
+  })
+
+  // R2: the version gate is an operator kill-switch only; with no minAgentVersion
+  // an old agent is not blocked, and its reported/derived caps decide features.
+  const dir = join(root, 'n')
+  const token = mintSecret()
+  const computerId = newComputerId()
+  seedState(dir, {
+    version: 1,
+    computers: [
+      seedComputer(computerId, 'Legacy Box', {
+        tokenHash: sha256Hex(token),
+        capabilities: ['exec'],
+        agentVersion: '1.0.0',
+      }),
+    ],
+    pendingKeys: [],
+  })
+  const app = await mount({ ...FAST_CONFIG, stateDir: dir })
+  try {
+    const origin = app.origin
+    const sse = await openSse(origin, `${API}/agent/events`, { authorization: `Bearer ${token}` })
+    try {
+      await sse.nextEvent('hello', 2000)
+      await check('policy: version gate is opt-in; caps decide features', async () => {
+        const execTool = app.fake.tools.get('computer_exec')
+        const pending = execTool.execute({ computer: 'Legacy Box', command: 'echo legacy' }, { agent: { id: 'sess_n' } })
+          .then((value) => ({ value }), (error) => ({ error }))
+        const event = await sse.nextEvent('exec', 3000)
+        assert.equal(event.data.command, 'echo legacy', 'an old agent is not version-blocked when no minimum is configured')
+        await raw(origin, `${API}/agent/results`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+          body: JSON.stringify({
+            requestId: event.data.requestId, ok: true, exitCode: 0, signal: null,
+            stdout: 'legacy\n', stderr: '', durationMs: 1, truncated: false, timedOut: false, error: null,
+          }),
+        })
+        const settled = await pending
+        assert.ok(settled.value, settled.error && settled.error.message)
+        assert.equal(settled.value.stdout, 'legacy\n')
+        const listTool = app.fake.tools.get('computer_list')
+        const value = await listTool.execute({}, { agent: { id: 'sess_n' } })
+        assert.deepEqual(value.computers[0].caps, { exec: true, fs: false, jobs: true, pty: false, tunnel: false })
+        assert.equal(value.computers[0].agentVersion, '1.0.0')
+        assert.equal(value.computers[0].updateRequired, false, 'no forced upgrade without minAgentVersion')
+        assert.equal(value.computers[0].caps.pty, false)
+        assert.equal(settled.value.ok, true, 'pty:false hides nothing that worked before')
+      })
+
+      await check('policy: a capability absent from caps is refused and named', async () => {
+        const readTool = app.fake.tools.get('computer_read')
+        const settled = await readTool.execute({ computer: 'Legacy Box', path: '/tmp/x' }, { agent: { id: 'sess_n' } })
+          .then((value) => ({ value }), (error) => ({ error }))
+        assert.ok(settled.error)
+        assert.match(settled.error.message, /'fs' capability is missing/)
+        assert.match(settled.error.message, /"fs":false/)
+        assert.match(settled.error.message, /does not support remote file access/)
+      })
+    } finally {
+      sse.close()
+    }
+  } finally {
+    await app.close()
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Phase O — R3: typed terminal states + honest cancellation
+// ---------------------------------------------------------------------------
+
+async function phaseO(root) {
+  const dir = join(root, 'o')
+  const computerId = newComputerId()
+  const token = mintSecret()
+  seedState(dir, {
+    version: 1,
+    computers: [seedComputer(computerId, 'R3 Box', {
+      tokenHash: sha256Hex(token),
+      capabilities: ['exec', 'jobs'],
+      caps: { exec: true, fs: false, jobs: true, pty: false, tunnel: false },
+      agentVersion: PLUGIN_VERSION,
+    })],
+    pendingKeys: [],
+  })
+  const app = await mount({ ...FAST_CONFIG, stateDir: dir, execTimeoutMs: 400, promoteOnTimeout: true })
+  const jobs = createFakeJobs()
+  app.fake.setService('jobs', jobs)
+  const sseClients = []
+  const session = { id: 'sess_o', session: { id: 'sess_o' } }
+  try {
+    const origin = app.origin
+    const sse = await openSse(origin, `${API}/agent/events`, { authorization: `Bearer ${token}` })
+    sseClients.push(sse)
+    await sse.nextEvent('hello', 2000)
+    const execTool = app.fake.tools.get('computer_exec')
+    const postResult = (body) => raw(origin, `${API}/agent/results`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+    const finalResult = (requestId, result) => postResult({
+      requestId, ok: true, exitCode: 0, signal: null, stdout: '', stderr: '',
+      durationMs: 5, truncated: false, timedOut: false, error: null, ...result,
+    })
+    const runForeground = async (command) => {
+      const pending = execTool.execute({ computer: 'R3 Box', command }, { agent: session })
+        .then((value) => ({ value }), (error) => ({ error }))
+      const event = await sse.nextEvent('exec', 3000)
+      return { pending, event }
+    }
+
+    await check('terminal: a successful execution is completed/reusable and renders byte-identically', async () => {
+      const { pending, event } = await runForeground('ok')
+      await finalResult(event.data.requestId, { stdout: 'done\n' })
+      const settled = await pending
+      assert.ok(settled.value, settled.error && settled.error.message)
+      assert.deepEqual(settled.value.terminal, {
+        status: contracts.EXECUTION_STATUS.COMPLETED,
+        disposition: contracts.DISPOSITION.REUSABLE,
+        confirmed: true,
+        exitCode: 0,
+        signal: null,
+        error: null,
+      })
+      // No extra status line for a clean success: the render is unchanged.
+      assert.equal(execTool.output.render({}, settled.value)[0].text, '$ ok\nexit 0 · 5ms · R3 Box\n\ndone')
+    })
+
+    await check('terminal: a failing command is failed/reusable', async () => {
+      const { pending, event } = await runForeground('fail')
+      await finalResult(event.data.requestId, { ok: false, exitCode: 2, error: 'boom', stdout: '', stderr: 'boom\n' })
+      const settled = await pending
+      assert.ok(settled.value, settled.error && settled.error.message)
+      assert.equal(settled.value.terminal.status, contracts.EXECUTION_STATUS.FAILED)
+      assert.equal(settled.value.terminal.disposition, contracts.DISPOSITION.REUSABLE)
+      assert.equal(settled.value.terminal.confirmed, true)
+      assert.equal(settled.value.terminal.exitCode, 2)
+      assert.match(execTool.output.render({}, settled.value)[0].text, /status: failed/)
+    })
+
+    await check('terminal: an agent-reported timeout is timeout/reusable', async () => {
+      const { pending, event } = await runForeground('slow')
+      await finalResult(event.data.requestId, { ok: false, exitCode: null, signal: 'SIGKILL', timedOut: true })
+      const settled = await pending
+      assert.ok(settled.value, settled.error && settled.error.message)
+      assert.equal(settled.value.terminal.status, contracts.EXECUTION_STATUS.TIMEOUT)
+      assert.equal(settled.value.terminal.disposition, contracts.DISPOSITION.REUSABLE)
+      const text = execTool.output.render({}, settled.value)[0].text
+      assert.match(text, /status: timeout · confirmed/)
+    })
+
+    await check('terminal: a cancelled background job that reports back is confirmed', async () => {
+      const background = await execTool.execute({ computer: 'R3 Box', command: 'kill-confirmed', run_in_background: true }, { agent: session })
+      const record = jobs.records.get(background.jobId)
+      assert.ok(record)
+      const event = await sse.nextEvent('exec', 3000)
+      assert.equal(jobs.kill(background.jobId), 'requested')
+      await sse.nextEvent('cancel', 3000)
+      // The agent acknowledges within the grace window with a final result.
+      await finalResult(event.data.requestId, { ok: false, exitCode: null, signal: 'SIGTERM' })
+      const done = await record.hooks.done
+      assert.equal(done.status, contracts.JOB_STATUS.KILLED)
+      assert.equal(done.result.status, contracts.EXECUTION_STATUS.CANCELLED)
+      assert.equal(done.result.confirmed, true, 'a final result after cancel is a confirmed stop')
+      assert.equal(done.result.disposition, contracts.DISPOSITION.REUSABLE)
+      assert.equal(done.result.signal, 'SIGTERM')
+      assert.match(done.detail, /confirmed/)
+    })
+
+    await check('terminal: a cancelled job that never reports back is broken, not "cancelled"', async () => {
+      const background = await execTool.execute({ computer: 'R3 Box', command: 'kill-silent', run_in_background: true }, { agent: session })
+      const record = jobs.records.get(background.jobId)
+      const event = await sse.nextEvent('exec', 3000)
+      assert.equal(jobs.kill(background.jobId), 'requested')
+      await sse.nextEvent('cancel', 3000)
+      // Grace expires (~5 s) with no final result from the agent.
+      const done = await record.hooks.done
+      assert.equal(done.status, contracts.JOB_STATUS.KILLED)
+      assert.equal(done.result.status, contracts.EXECUTION_STATUS.CANCELLED)
+      assert.equal(done.result.confirmed, false, 'never claim a stop we did not confirm')
+      assert.equal(done.result.disposition, contracts.DISPOSITION.BROKEN)
+      assert.match(done.result.error, /may still be running/)
+      assert.match(done.detail, /NOT confirmed/)
+      assert.equal(event.data.command, 'kill-silent')
+    })
+
+    await check('terminal: a stream drop mid-command is failed/broken', async () => {
+      const background = await execTool.execute({ computer: 'R3 Box', command: 'drop-me', run_in_background: true }, { agent: session })
+      const record = jobs.records.get(background.jobId)
+      await sse.nextEvent('exec', 3000)
+      sse.close()
+      const done = await record.hooks.done
+      assert.equal(done.status, contracts.JOB_STATUS.FAILED)
+      assert.equal(done.result.status, contracts.EXECUTION_STATUS.FAILED)
+      assert.equal(done.result.disposition, contracts.DISPOSITION.BROKEN)
+      assert.match(done.result.error, /offline|lost/)
+      assert.match(done.detail, /broken/)
+      // Too late to cancel: the job is already finished.
+      assert.equal(jobs.kill(background.jobId), 'already-finished')
+    })
+
+    await check('terminal: render names broken state and what may still be running', async () => {
+      const value = {
+        computer: { id: computerId, name: 'R3 Box' },
+        command: 'orphan',
+        exitCode: null,
+        stdout: '',
+        stderr: '',
+        durationMs: 12,
+        ok: false,
+        timedOut: false,
+        truncated: false,
+        terminal: {
+          status: contracts.EXECUTION_STATUS.CANCELLED,
+          disposition: contracts.DISPOSITION.BROKEN,
+          confirmed: false,
+          exitCode: null,
+          signal: null,
+          error: 'cancellation not confirmed',
+        },
+      }
+      const text = execTool.output.render({}, value)[0].text
+      assert.match(text, /status: cancelled · NOT confirmed · broken — the command may still be running on the machine/)
+    })
+  } finally {
+    for (const client of sseClients) client.close()
+    await app.close()
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -3562,6 +3973,9 @@ try {
   await phaseJ(root)
   await phaseK(root)
   await phaseL(root)
+  await phaseM()
+  await phaseN(root)
+  await phaseO(root)
 } finally {
   rmSync(root, { recursive: true, force: true })
   clearTimeout(watchdog)

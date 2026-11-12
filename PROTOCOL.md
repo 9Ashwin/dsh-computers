@@ -315,11 +315,45 @@ Registered with `ctx.tools.register(...)` in `apply`, `inject = ['tools', 'webSe
   substring match; ambiguity → error listing candidates.
 - Dispatch through the hub, respect `exec.signal` (send `cancel` on abort, reject with a
   clear "aborted" message).
-- value: `{ computer: {id,name}, command, exitCode, stdout, stderr, durationMs, ok, timedOut, truncated }`
+- value: `{ computer: {id,name}, command, exitCode, stdout, stderr, durationMs, ok, timedOut, truncated, terminal? }`
+  (`terminal` is the typed terminal state below; v1.4.1)
 - `render` → one text block: a `$ command` line, `exit <code> · <ms>ms · <name>`, then
   stdout, then stderr under a `stderr:` label. Cap the rendered text at ~20 000 chars.
 - Failures (unknown computer, offline, timeout) throw an `Error` with a message the model
   can act on ("computer 'x' is offline; run computer_list").
+
+#### Terminal states (v1.4.1)
+
+Every execution (foreground, promoted, background job) settles with one typed object:
+
+```ts
+terminal: {
+  status: 'completed' | 'failed' | 'cancelled' | 'timeout'
+  disposition: 'reusable' | 'broken'
+  confirmed: boolean            // false when a stop was requested but never acknowledged
+  exitCode: number | null
+  signal: string | null
+  error: string | null
+}
+```
+
+| status | when | disposition | confirmed |
+|---|---|---|---|
+| `completed` | final result with `ok: true` | `reusable` | `true` |
+| `failed` | final result with `ok: false` (non-zero exit, spawn error) | `reusable` | `true` |
+| `timeout` | final result carried `timedOut: true` (the agent enforced its own deadline) | `reusable` | `true` |
+| `timeout` | the host's silence deadline expired and a `cancel` was sent with no final result | `broken` | `false` |
+| `cancelled` | `cancel` was requested **and** the agent reported a final result | `reusable` | `true` |
+| `cancelled` | `cancel` was requested, the grace period expired with no final result | `broken` | `false` |
+
+`broken` means the machine's state is unknown — the command **may still be running**.
+A host must never report a plain "cancelled" for the unconfirmed case; it reports
+`cancelled` with `confirmed: false` and `disposition: 'broken'` instead. A stream drop
+or a host-side abort has the same shape (`failed`/`broken`, or `cancelled`/`broken` when a
+cancel had been requested).
+
+The tool render adds a `status: …` line only when the terminal state is not a clean
+`completed`/`reusable` one, so successful executions keep their byte-identical output.
 
 ### 5.3 System prompt section
 
@@ -603,6 +637,11 @@ stores the last reported set and `capabilitiesUpdatedAt`. Rules:
   unchanged. Killing the job sends `cancel` to the agent and settles the job.
 - A foreground call still returns the complete result (v1 shape) but the host keeps the
   tail in the job ring for the conversation's progress view.
+- Job terminal mapping (v1.4.1): the job's `done` result carries the same `terminal`
+  object. `completed`→`completed`; `failed`/`timeout`→`failed`; `cancelled` (confirmed)
+  →`killed`; `cancelled` (unconfirmed, `broken`)→`killed` with a detail that says the
+  command may still be running. `job_output`/`job_kill` therefore surface the honest
+  state instead of the old "killed = stopped" assumption.
 
 ### 11.3 Remote file access
 
