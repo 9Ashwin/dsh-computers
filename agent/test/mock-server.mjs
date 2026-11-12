@@ -60,6 +60,10 @@ export class MockComputerServer {
     this.fsResults = []
     /** SSE requests with headers, for handshake-metadata assertions. */
     this.eventsRequests = []
+    /** Heartbeat round trips (successful and failed attempts). */
+    this.heartbeatAttempts = 0
+    /** How many leading heartbeat POSTs to answer 503 (liveness-miss tests). */
+    this.heartbeatFailuresRemaining = options.heartbeatFailures ?? 0
 
     /** key -> { key, expiresAt, usedAt, replace, computerId } */
     this.keys = new Map()
@@ -284,6 +288,16 @@ export class MockComputerServer {
       }
       tick()
     })
+  }
+
+  /** Make the next `count` heartbeat POSTs fail with 503 (default: forever). */
+  failHeartbeats(count = Number.POSITIVE_INFINITY) {
+    this.heartbeatFailuresRemaining = count
+  }
+
+  /** Let heartbeats succeed again. */
+  allowHeartbeats() {
+    this.heartbeatFailuresRemaining = 0
   }
 
   waitForHeartbeat({ timeoutMs = 20_000 } = {}) {
@@ -637,6 +651,11 @@ export class MockComputerServer {
   }
 
   async handleHeartbeat(req, res) {
+    this.heartbeatAttempts += 1
+    if (this.heartbeatFailuresRemaining > 0) {
+      this.heartbeatFailuresRemaining -= 1
+      return this.sendJson(res, 503, { error: 'unavailable', message: 'heartbeat sink temporarily unavailable' })
+    }
     const computer = this.authenticate(req)
     if (!computer) return this.sendJson(res, 401, { error: 'invalid-token', message: 'invalid or missing agent token' })
     let body = {}

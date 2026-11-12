@@ -13,7 +13,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { AGENT_VERSION } from '../dsh-computers-agent.mjs'
+import { AGENT_VERSION, LIVENESS } from '../dsh-computers-agent.mjs'
 import { MockComputerServer } from './mock-server.mjs'
 import {
   agentPath,
@@ -1139,3 +1139,125 @@ test(
     assert.equal(uninstallAgain.stderr, '')
   },
 )
+
+// ---------------------------------------------------------------------------
+// R5a: application-level liveness (heartbeat misses) and reconnect backoff
+// ---------------------------------------------------------------------------
+
+test('liveness: the policy stays inside the host lease with margin', async () => {
+  // Contract check, no sleeping: the host refreshes presence only on validated
+  // inbound frames with a 45 s lease, so the agent must prove liveness far more
+  // often than that, and must give up on a stream well before the lease expires.
+  assert.equal(LIVENESS.heartbeatMs, 10_000)
+  assert.equal(LIVENESS.missLimit, 2)
+  assert.ok(LIVENESS.heartbeatMs < LIVENESS.hostLeaseMs / 2, 'heartbeat must be much faster than the lease')
+  assert.ok(
+    LIVENESS.missLimit * LIVENESS.heartbeatMs < LIVENESS.hostLeaseMs,
+    'two missed heartbeats must be declared dead before the host lease expires',
+  )
+  assert.equal(LIVENESS.reconnectBaseMs, 1_500)
+  assert.equal(LIVENESS.reconnectMaxMs, 30_000)
+  assert.equal(LIVENESS.reconnectJitter, 0.2)
+  assert.ok(Object.isFrozen(LIVENESS))
+})
+
+test('liveness: one missed heartbeat keeps the stream, two tear it down', async (t) => {
+  // A short interval keeps the test fast; the agent never goes slower than
+  // hello.heartbeatMs, so this only lowers it.
+  const { mock, home } = await setup(t, { heartbeatMs: 250 })
+  await enrollAgent(mock, home)
+  const agent = startAgent({ home })
+  t.after(() => agent.stop())
+  await mock.waitForStream()
+  await agent.waitForOutput(/已连接/)
+  const streamsBefore = mock.eventsRequests.length
+
+  // One unanswered round trip is a miss, not a death: the next good one resets.
+  mock.failHeartbeats(1)
+  await waitUntil(() => mock.heartbeatAttempts >= 2, { timeoutMs: 10_000, label: 'two heartbeat attempts' })
+  await waitUntil(() => mock.heartbeats.length >= 1, { timeoutMs: 10_000, label: 'a successful heartbeat' })
+  assert.equal(agent.state.exited, false)
+  assert.equal(mock.eventsRequests.length, streamsBefore, 'a single miss must not reconnect')
+
+  // Two consecutive misses are a death: the half-dead stream is abandoned.
+  mock.failHeartbeats(Number.POSITIVE_INFINITY)
+  await waitUntil(() => mock.eventsRequests.length > streamsBefore, {
+    timeoutMs: 15_000,
+    label: 'a reconnect after two misses',
+  })
+  const log = agent.output + (await readLog(home))
+  assert.match(log, /declared dead by heartbeat misses/)
+  assert.match(log, /连续 2 次心跳无响应/)
+  assert.equal(agent.state.exited, false, 'the runtime keeps running; only the stream died')
+})
+
+test('liveness: reconnect backoff doubles to the ceiling with ±20% jitter', async (t) => {
+  // Test-only curve override so the whole 1.5 s → 30 s shape runs in ~2 s.
+  const base = 400
+  const max = 800
+  const { mock, home } = await setup(t)
+  await enrollAgent(mock, home)
+  // Empty 200 streams: the agent reads EOF without a hello, which is a plain
+  // disconnect (not a throttled transient-server warning), so every attempt logs.
+  mock.setEventsFence(
+    Array.from({ length: 6 }, () => ({ status: 200, body: '', contentType: 'text/event-stream; charset=utf-8' })),
+  )
+  const agent = startAgent({
+    home,
+    env: { DSH_COMPUTERS_RECONNECT_BASE_MS: String(base), DSH_COMPUTERS_RECONNECT_MAX_MS: String(max) },
+  })
+  t.after(() => agent.stop())
+  // Fenced responses never become real streams, so count connect attempts.
+  await waitUntil(() => mock.eventsRequests.length >= 7, { timeoutMs: 20_000, label: 'seven connect attempts' })
+
+  // Nominal steps: 400, 800, then the ceiling holds at 800.
+  const log = agent.output + (await readLog(home))
+  const nominal = [...log.matchAll(/标称 (\d+)ms/g)].map((match) => Number(match[1]))
+  assert.deepEqual(nominal.slice(0, 4), [base, max, max, max], `nominal steps were ${nominal.join(',')}`)
+
+  // Measured gaps sit inside the ±20% jitter band. A successful attempt opens a
+  // probe and then the stream, so its two requests are only tens of ms apart;
+  // reconnect gaps are the ones above the smallest jittered delay.
+  const attempts = mock.eventsRequests.map((entry) => entry.at)
+  const gaps = attempts.slice(1).map((at, index) => at - attempts[index])
+  const reconnectGaps = gaps.filter((gap) => gap > base * 0.5)
+  assert.ok(reconnectGaps.length >= 3, `expected reconnect gaps, saw ${gaps.join(',')}`)
+  const slack = 80
+  reconnectGaps.slice(0, 3).forEach((gap, index) => {
+    const nominalGap = Math.min(base * 2 ** index, max)
+    assert.ok(
+      gap >= nominalGap * 0.8 - slack && gap <= nominalGap * 1.2 + slack,
+      `gap ${index} was ${gap}ms, expected ~${nominalGap}ms ±20% (all gaps: ${gaps.join(',')})`,
+    )
+  })
+})
+
+test('liveness: a stable stream resets the backoff attempt counter', async (t) => {
+  const { mock, home } = await setup(t)
+  await enrollAgent(mock, home)
+  mock.setEventsFence([
+    { status: 200, body: '', contentType: 'text/event-stream; charset=utf-8' },
+    { status: 200, body: '', contentType: 'text/event-stream; charset=utf-8' },
+  ])
+  const agent = startAgent({
+    home,
+    env: {
+      DSH_COMPUTERS_RECONNECT_BASE_MS: '20',
+      DSH_COMPUTERS_RECONNECT_MAX_MS: '320',
+      // Any hello-proving session counts as stable, so the reset is observable fast.
+      DSH_COMPUTERS_STABLE_RESET_MS: '0',
+    },
+  })
+  t.after(() => agent.stop())
+  await waitUntil(() => mock.eventsRequests.length >= 3, { timeoutMs: 20_000, label: 'three connect attempts' })
+  await agent.waitForOutput(/已连接/)
+
+  // End the healthy session, then fail once: a reset counter means base again.
+  mock.closeStreams()
+  mock.setEventsFence([{ status: 200, body: '', contentType: 'text/event-stream; charset=utf-8' }])
+  await waitUntil(() => mock.eventsRequests.length >= 4, { timeoutMs: 20_000, label: 'a fourth connect attempt' })
+
+  const log = agent.output + (await readLog(home))
+  const nominal = [...log.matchAll(/标称 (\d+)ms/g)].map((match) => Number(match[1]))
+  assert.deepEqual(nominal.slice(0, 3), [20, 40, 20], `nominal steps were ${nominal.join(',')}`)
+})

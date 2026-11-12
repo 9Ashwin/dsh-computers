@@ -39,8 +39,70 @@ const MAX_EXEC_TIMEOUT_MS = 24 * 60 * 60 * 1000
 const MAX_OUTPUT_BYTES = 1024 * 1024
 const TRUNCATION_MARKER = '\n[output truncated]'
 const LOG_ROTATE_BYTES = 5 * 1024 * 1024
-const MIN_BACKOFF_MS = 1000
-const MAX_BACKOFF_MS = 30_000
+// R5a liveness + reconnect policy (agent side).
+// Heartbeat every 10 s (never slower, even if `hello.heartbeatMs` asks for more)
+// keeps the host's 45 s lease satisfied with margin: two misses at 10 s and 20 s
+// are declared dead ~21 s after the last good round trip, well inside the lease.
+const LIVENESS_HEARTBEAT_MS = 10_000
+const HEARTBEAT_MISS_LIMIT = 2
+const HEARTBEAT_DEAD_REASON = 'declared dead by heartbeat misses'
+const RECONNECT_BASE_MS = 1500
+const RECONNECT_MAX_MS = 30_000
+const RECONNECT_JITTER = 0.2
+const DEFAULT_RECONNECT_STABLE_RESET_MS = 30_000
+
+/**
+ * Read a positive-integer env override, clamped to `[min, max]`.
+ * @param {string} name environment variable name
+ * @param {number} fallback value used when the variable is absent or invalid
+ * @param {number} min smallest accepted value
+ * @param {number} max largest accepted value
+ */
+function envMs(name, fallback, min, max) {
+  const raw = Number(process.env[name])
+  if (!Number.isFinite(raw) || raw < 0) return fallback
+  return Math.min(Math.max(Math.floor(raw), min), max)
+}
+
+/**
+ * Reconnect policy, exposed for documentation and tests.
+ * The heartbeat is never slower than {@link LIVENESS.heartbeatMs} even when
+ * `hello.heartbeatMs` asks for more, because the host's 45 s application lease
+ * is refreshed only by validated inbound frames.
+ */
+export const LIVENESS = Object.freeze({
+  heartbeatMs: LIVENESS_HEARTBEAT_MS,
+  missLimit: HEARTBEAT_MISS_LIMIT,
+  deadReason: HEARTBEAT_DEAD_REASON,
+  reconnectBaseMs: RECONNECT_BASE_MS,
+  reconnectMaxMs: RECONNECT_MAX_MS,
+  reconnectJitter: RECONNECT_JITTER,
+  /** Host-side application lease this policy has to stay inside (PROTOCOL §11.7). */
+  hostLeaseMs: 45_000,
+})
+
+/**
+ * Test/diagnostic override for the backoff curve (default 1500 ms). The env var
+ * exists so a test can walk the whole 1.5 s → 30 s curve without sleeping.
+ */
+const RECONNECT_BASE_OVERRIDE_MS = envMs('DSH_COMPUTERS_RECONNECT_BASE_MS', RECONNECT_BASE_MS, 1, 60_000)
+/**
+ * Test/diagnostic override for the backoff ceiling (default 30 s).
+ */
+const RECONNECT_MAX_OVERRIDE_MS = envMs('DSH_COMPUTERS_RECONNECT_MAX_MS', RECONNECT_MAX_MS, 1, 600_000)
+
+/**
+ * How long a stream must survive before the reconnect attempt counter resets.
+ * Test/diagnostic override only (default 30 s); the env var exists so tests can
+ * exercise the reset without sleeping for 30 s.
+ */
+function resolveReconnectStableResetMs() {
+  const override = Number(process.env.DSH_COMPUTERS_STABLE_RESET_MS)
+  if (Number.isFinite(override) && override >= 0) return Math.min(Math.floor(override), 600_000)
+  return DEFAULT_RECONNECT_STABLE_RESET_MS
+}
+
+const RECONNECT_STABLE_RESET_MS = resolveReconnectStableResetMs()
 const HEARTBEAT_LOG_INTERVAL_MS = 60_000
 const TRANSIENT_SERVER_WARN_INTERVAL_MS = 60_000
 const DEFAULT_HEARTBEAT_MS = 20_000
@@ -860,6 +922,13 @@ async function postResult(runtime, payload) {
   return false
 }
 
+/**
+ * One heartbeat round trip. Returns true only when the server answered 200 —
+ * that validated inbound response is the liveness proof (an OS-suspended socket
+ * can stay OPEN without delivering anything). Any failure (network, timeout,
+ * non-2xx, invalid-token) is a miss; 401 invalid-token additionally logs the
+ * re-enroll hint and will be classified fatally on the next SSE connect.
+ */
 async function sendHeartbeat(runtime) {
   const config = runtime.config
   const state = runtime.state
@@ -885,11 +954,11 @@ async function sendHeartbeat(runtime) {
       } else {
         logHeartbeatError(runtime, `HTTP 401${response.text ? ` ${abbreviate(response.text, 60)}` : ''}（服务器可能正在重启）`)
       }
-      return
+      return false
     }
     if (!response.ok) {
       logHeartbeatError(runtime, `HTTP ${response.status}`)
-      return
+      return false
     }
     const name = response.json && typeof response.json.name === 'string' ? response.json.name : ''
     if (name && name !== state.name) {
@@ -898,8 +967,10 @@ async function sendHeartbeat(runtime) {
       emitRuntimeState(runtime)
       runtimeLog(runtime, 'info', `服务器把电脑名称更新为 ${name}`)
     }
+    return true
   } catch (error) {
     logHeartbeatError(runtime, describeError(error))
+    return false
   }
 }
 
@@ -1727,6 +1798,8 @@ function createRuntime(options) {
       lastConnectedAt: null,
       lastError: null,
       attempts: 0,
+      consecutiveFailures: 0,
+      heartbeatMisses: 0,
       exitCode: null,
       lastPingLogAt: 0,
       lastHeartbeatErrorAt: 0,
@@ -1800,6 +1873,8 @@ function runtimeStatus(runtime) {
     lastConnectedAt: state.lastConnectedAt,
     lastError: state.lastError,
     attempts: state.attempts,
+    consecutiveFailures: state.consecutiveFailures,
+    heartbeatMisses: state.heartbeatMisses,
     exitCode: state.exitCode,
   }
 }
@@ -1880,9 +1955,14 @@ async function stopRuntime(runtime) {
   }
 }
 
-function jitteredDelay(base) {
-  const factor = 0.75 + Math.random() * 0.5
-  return Math.max(MIN_BACKOFF_MS, Math.min(MAX_BACKOFF_MS, Math.round(base * factor)))
+/**
+ * Reconnect delay: base = min(1500 * 2^attempt, 30_000), then ±20 % jitter.
+ * Returns { base, delay } so logs can name the nominal step.
+ */
+function reconnectDelay(attempt) {
+  const base = Math.min(RECONNECT_BASE_OVERRIDE_MS * 2 ** attempt, RECONNECT_MAX_OVERRIDE_MS)
+  const factor = 1 + (Math.random() * 2 - 1) * RECONNECT_JITTER
+  return { base, delay: Math.max(1, Math.round(base * factor)) }
 }
 
 /**
@@ -1893,7 +1973,7 @@ async function runRuntimeLoop(runtime) {
   const config = runtime.config
   runtimeLog(runtime, 'info', `dsh-computers-agent ${AGENT_VERSION} 启动 · ${config.serverUrl} · computer=${config.computerId}`)
 
-  let backoff = MIN_BACKOFF_MS
+  let failures = 0
   let lastTransientWarnAt = 0
   while (!runtime.controller.signal.aborted) {
     const attemptStartedAt = Date.now()
@@ -1924,10 +2004,22 @@ async function runRuntimeLoop(runtime) {
     runtime.state.lastError = outcome.reason || 'unknown'
     emitRuntimeState(runtime)
 
-    const healthy = outcome.gotHello && Date.now() - attemptStartedAt > 60_000
-    if (healthy) backoff = MIN_BACKOFF_MS
-    const delay = jitteredDelay(backoff)
-    if (outcome.transientServer) {
+    // Attempt counter resets only after a stream proved stable for 30 s (R5a).
+    const stable = outcome.gotHello && Date.now() - attemptStartedAt >= RECONNECT_STABLE_RESET_MS
+    if (stable) failures = 0
+    runtime.state.consecutiveFailures = failures + 1
+    const { base, delay } = reconnectDelay(failures)
+    failures += 1
+
+    if (outcome.heartbeatDead) {
+      // Not an HTTP error: the socket stayed "open" but stopped proving
+      // liveness, so the diagnostic must say exactly what happened.
+      runtimeLog(
+        runtime,
+        'warn',
+        `⚠ 连接已判定死亡（declared dead by heartbeat misses：连续 ${HEARTBEAT_MISS_LIMIT} 次心跳无响应），约 ${Math.round(delay / 1000)} 秒后重连（标称 ${base}ms）`,
+      )
+    } else if (outcome.transientServer) {
       // Plugin reload / server restart / generic /api fence: the token is not
       // the problem. Warn at most once a minute (not once per attempt) and keep
       // retrying forever.
@@ -1941,10 +2033,9 @@ async function runRuntimeLoop(runtime) {
         )
       }
     } else {
-      runtimeLog(runtime, 'warn', `连接断开（${outcome.reason || '未知原因'}），${Math.round(delay / 1000)} 秒后重连`)
+      runtimeLog(runtime, 'warn', `连接断开（${outcome.reason || '未知原因'}），约 ${Math.round(delay / 1000)} 秒后重连（第 ${failures} 次，标称 ${base}ms）`)
     }
     await sleep(delay, runtime.controller.signal)
-    backoff = Math.min(backoff * 2, MAX_BACKOFF_MS)
   }
   runtimeLog(runtime, 'info', '已退出')
   return 0
@@ -1958,9 +2049,21 @@ async function runRuntimeLoop(runtime) {
  */
 async function runOneSession(runtime, signal) {
   const config = runtime.config
+
+  // Session-scoped abort: heartbeat liveness can tear THIS stream down without
+  // touching the runtime-wide controller (which means "stop()"). It is created
+  // before the fetch because it must own the fetch's signal — aborting a
+  // controller that no request listens to would leave a half-dead socket open
+  // forever (the exact failure this liveness policy exists to prevent).
+  const sessionController = new AbortController()
+  const onRuntimeAbort = () => sessionController.abort(signal.reason)
+  if (signal.aborted) sessionController.abort(signal.reason)
+  else signal.addEventListener('abort', onRuntimeAbort, { once: true })
+  const sessionSignal = sessionController.signal
+
   const response = await fetch(eventsUrl(config.serverUrl), {
     headers: sseHeaders(config.token, handshakeMetadata(config.workspaceBase, config.mode, config.caps)),
-    signal,
+    signal: sessionSignal,
   })
   if (response.status === 401) {
     const body = await readErrorBody(response)
@@ -1987,19 +2090,54 @@ async function runOneSession(runtime, signal) {
 
   const state = runtime.state
   let gotHello = false
-  let heartbeatTimer
+  let heartbeatTimer = null
+  let heartbeatMisses = 0
+  let heartbeatInFlight = false
+  let heartbeatDead = false
+
+  const declareDead = () => {
+    if (heartbeatDead) return
+    heartbeatDead = true
+    state.heartbeatMisses = heartbeatMisses
+    // Aborting the fetch is what actually tears down the half-dead stream.
+    sessionController.abort(new Error(HEARTBEAT_DEAD_REASON))
+  }
 
   const startHeartbeatTimer = () => {
     if (heartbeatTimer) return
-    const intervalMs = Math.max(2000, Math.min(state.heartbeatMs || DEFAULT_HEARTBEAT_MS, 300_000))
+    // Never slower than 10 s: the host's 45 s lease / 10 s sweep depends on it.
+    const intervalMs = Math.max(250, Math.min(state.heartbeatMs || LIVENESS_HEARTBEAT_MS, LIVENESS_HEARTBEAT_MS))
     heartbeatTimer = setInterval(() => {
+      if (heartbeatDead || runtime.stopping) return
+      if (heartbeatInFlight) {
+        // A round trip that did not finish within a whole interval is a miss.
+        heartbeatMisses += 1
+        state.heartbeatMisses = heartbeatMisses
+        if (heartbeatMisses >= HEARTBEAT_MISS_LIMIT) declareDead()
+        return
+      }
+      heartbeatInFlight = true
       void sendHeartbeat(runtime)
+        .then((ok) => {
+          if (heartbeatDead) return
+          if (ok) {
+            heartbeatMisses = 0
+            state.heartbeatMisses = 0
+          } else {
+            heartbeatMisses += 1
+            state.heartbeatMisses = heartbeatMisses
+            if (heartbeatMisses >= HEARTBEAT_MISS_LIMIT) declareDead()
+          }
+        })
+        .finally(() => {
+          heartbeatInFlight = false
+        })
     }, intervalMs)
     heartbeatTimer.unref?.()
   }
 
   try {
-    for await (const event of sseEvents(response.body, signal)) {
+    for await (const event of sseEvents(response.body, sessionSignal)) {
       switch (event.event) {
         case 'hello': {
           const hello = parseJsonSafe(event.data) || {}
@@ -2051,8 +2189,16 @@ async function runOneSession(runtime, signal) {
       }
     }
     return { kind: 'closed', reason: '服务器关闭了事件流', gotHello }
+  } catch (error) {
+    if (heartbeatDead) {
+      // Diagnostic for the host/status: declared dead by misses, NOT an HTTP error.
+      return { kind: 'closed', reason: HEARTBEAT_DEAD_REASON, gotHello, heartbeatDead: true }
+    }
+    throw error
   } finally {
     if (heartbeatTimer) clearInterval(heartbeatTimer)
+    signal.removeEventListener('abort', onRuntimeAbort)
+    state.heartbeatMisses = heartbeatMisses
   }
 }
 
