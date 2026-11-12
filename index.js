@@ -197,6 +197,11 @@ export function resolveConfig(raw) {
  */
 export function apply(ctx, config) {
   const resolved = resolveConfig(config)
+  // Test seam: the smoke harness injects a clock and a short presence lease so
+  // the 45 s expiry is assertable without sleeping. Production never sets it.
+  const hubDeps = ctx !== null && typeof ctx === 'object' && ctx.hubDeps !== null && typeof ctx.hubDeps === 'object'
+    ? ctx.hubDeps
+    : {}
   const onWarn = (message) => {
     try {
       // The host's logger is not part of the injected contract; a warning on
@@ -230,6 +235,7 @@ export function apply(ctx, config) {
       heartbeatMs: resolved.heartbeatMs,
       maxOutputBytes: resolved.maxOutputBytes,
       onWarn,
+      ...hubDeps,
     })
     const fsOps = createFsOps({ hub, onWarn })
 

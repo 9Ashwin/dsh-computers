@@ -222,9 +222,11 @@ async function startListener(fake) {
 }
 
 /** Mount the plugin against a fresh fake context and a real listener. */
-async function mount(config, { addressDeps, webServerHost, tunnelExec } = {}) {
+async function mount(config, { addressDeps, webServerHost, tunnelExec, hubDeps } = {}) {
   const fake = createFakeContext()
   if (addressDeps !== undefined) fake.ctx.addressDeps = addressDeps
+  // R5b test seam: an injected clock + short lease for the presence sweep.
+  if (hubDeps !== undefined) fake.ctx.hubDeps = hubDeps
   if (typeof webServerHost === 'string' && webServerHost !== '') fake.setHost(webServerHost)
   if (typeof tunnelExec === 'function') fake.ctx.tunnelExec = tunnelExec
   apply(fake.ctx, config)
@@ -4197,6 +4199,140 @@ const watchdog = setTimeout(() => {
   console.error('FAIL host-smoke: global timeout (60s)')
   process.exit(1)
 }, 60_000)
+
+/**
+ * Phase Q — R5b: presence is an application lease, not "the socket is open".
+ *
+ * The hub is built with an injected clock and a 45 s lease, so the sweep can be
+ * advanced by moving the clock instead of sleeping.
+ */
+async function phaseQ(root) {
+  const dir = join(root, 'q')
+  const computerId = newComputerId()
+  const token = mintSecret()
+  seedState(dir, {
+    version: 1,
+    computers: [seedComputer(computerId, 'Lease Box', {
+      tokenHash: sha256Hex(token),
+      capabilities: ['exec'],
+      caps: { exec: true, fs: false, jobs: false, pty: false, tunnel: false },
+      agentVersion: PLUGIN_VERSION,
+    })],
+    pendingKeys: [],
+  })
+  let clock = Date.now()
+  const app = await mount(
+    { ...FAST_CONFIG, stateDir: dir },
+    { hubDeps: { now: () => clock, leaseMs: 45_000, leaseCheckMs: 0 } },
+  )
+  const sseClients = []
+  const session = { id: 'sess_q', session: { id: 'sess_q' } }
+  const heartbeat = (body) => raw(app.origin, `${API}/agent/heartbeat`, {
+    method: 'POST',
+    headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+    body: JSON.stringify(body ?? {}),
+  })
+  const listOnline = async () => {
+    const state = await call(app.origin, `${API}/state`)
+    const entry = state.data.computers.find((computer) => computer.id === computerId)
+    return entry
+  }
+  try {
+    await check('lease: a silent but open stream goes offline once the lease runs out', async () => {
+      const sse = await openSse(app.origin, `${API}/agent/events`, { authorization: `Bearer ${token}` })
+      sseClients.push(sse)
+      await sse.nextEvent('hello', 2000)
+      const fresh = await listOnline()
+      assert.equal(fresh.online, true)
+      assert.equal(typeof fresh.leaseExpiresAt, 'number')
+      assert.equal(fresh.leaseExpiresAt, clock + 45_000)
+
+      // No validated frame for longer than the lease: still connected, not online.
+      clock += 45_001
+      const state = await call(app.origin, `${API}/state`)
+      const entry = state.data.computers.find((computer) => computer.id === computerId)
+      assert.equal(entry.online, false, 'a silent stream must not count as presence')
+      assert.equal(entry.leaseExpiresAt, null)
+      // The sweep retires the stream on the next read attempt; presence is what
+      // matters and it is already false above.
+    })
+
+    await check('lease: a heartbeat keeps the computer online', async () => {
+      const sse = await openSse(app.origin, `${API}/agent/events`, { authorization: `Bearer ${token}` })
+      sseClients.push(sse)
+      await sse.nextEvent('hello', 2000)
+      // 40 s of silence would be fine, then a heartbeat pushes the deadline out.
+      clock += 40_000
+      const beat = await heartbeat({})
+      assert.equal(beat.status, 200)
+      const entry = await listOnline()
+      assert.equal(entry.online, true)
+      assert.equal(entry.leaseExpiresAt, clock + 45_000)
+    })
+
+    await check('lease: a chunk POST alone refreshes presence', async () => {
+      // Chunks are validated inbound frames too, so a long streaming command
+      // keeps the machine online without any heartbeat.
+      clock += 40_000
+      const event = await (async () => {
+        const execTool = app.fake.tools.get('computer_exec')
+        void execTool.execute({ computer: 'Lease Box', command: 'echo lease' }, { agent: session }).catch(() => {})
+        return await sseClients.at(-1).nextEvent('exec', 3000)
+      })()
+      const chunk = await raw(app.origin, `${API}/agent/results/chunk`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ requestId: event.data.requestId, seq: 0, type: 'stdout', data: Buffer.from('lease\n').toString('base64') }),
+      })
+      assert.equal(chunk.status, 200)
+      const entry = await listOnline()
+      assert.equal(entry.online, true)
+      assert.equal(entry.leaseExpiresAt, clock + 45_000)
+      // Let the foreground execution settle so the next case starts clean.
+      await raw(app.origin, `${API}/agent/results`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          requestId: event.data.requestId, ok: true, exitCode: 0, signal: null,
+          stdout: 'lease\n', stderr: '', durationMs: 3, truncated: false, timedOut: false, error: null,
+        }),
+      })
+    })
+
+    await check('lease: a late heartbeat after expiry re-registers with a fresh lease', async () => {
+      clock += 46_000
+      assert.equal((await listOnline()).online, false)
+      const sse = await openSse(app.origin, `${API}/agent/events`, { authorization: `Bearer ${token}` })
+      sseClients.push(sse)
+      await sse.nextEvent('hello', 2000)
+      const entry = await listOnline()
+      assert.equal(entry.online, true)
+      assert.equal(entry.leaseExpiresAt, clock + 45_000)
+      const beat = await heartbeat({})
+      assert.equal(beat.status, 200)
+      assert.equal((await listOnline()).online, true)
+    })
+
+    await check('lease: an offline computer is refused by the exec tool', async () => {
+      clock += 46_000
+      const execTool = app.fake.tools.get('computer_exec')
+      const settled = await execTool.execute({ computer: 'Lease Box', command: 'echo nope' }, { agent: session })
+        .then((value) => ({ value }), (error) => ({ error }))
+      assert.ok(settled.error, 'an expired lease must refuse execution')
+      assert.match(settled.error.message, /offline/i)
+    })
+  } finally {
+    for (const sse of sseClients) {
+      try {
+        sse.close()
+      } catch {
+        // already gone
+      }
+    }
+    await app.close()
+  }
+}
+
 watchdog.unref()
 
 const root = mkdtempSync(join(tmpdir(), 'dshc-smoke-'))
@@ -4218,6 +4354,7 @@ try {
   await phaseN(root)
   await phaseO(root)
   await phaseP(root)
+  await phaseQ(root)
 } finally {
   rmSync(root, { recursive: true, force: true })
   clearTimeout(watchdog)
