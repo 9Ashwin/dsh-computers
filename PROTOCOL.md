@@ -852,8 +852,8 @@ v1.7.1 起 `url` 也能在界面里配置（`/state.relay.urlSource: 'ui' | 'con
 
 ```
 <advertisedBase>#join=<fleetToken>
-例：https://dsh.nextai.show#join=dshf_<32 hex>
-    https://dsh-relay.nextai.show/r/hub_xxx#join=dshf_<32 hex>
+例：https://dsh.example.com#join=dshf_<32 hex>
+    https://relay.example.com/r/hub_xxx#join=dshf_<32 hex>
 ```
 
 `#` 之后是 fragment：**浏览器与代理都不会把它发到服务器**，token 不会进访问日志。
@@ -877,3 +877,43 @@ v1.7.2 起 `joinUrl` **永远不是回环地址**：它要粘到另一台机器�
 - 一次性密钥路径完全保留（15 分钟、一次一用），适合"用完即废"的场景
 - 老 agent（不认 `#join=`）不受影响：它们只会用 `--key`
 - `role` 仍可配置，但 `both` 是默认值，日常无需写配置
+
+
+> `relay.example.com` 是占位示例。中继跑在你自己机器上，域名和端口由你决定（配置文件或界面里填），项目不绑定任何域名。
+
+## 14 账号中心（v1.8.0）
+
+同一个账号下的机器自动出现在彼此的列表里，不需要逐台配对。
+
+### 14.1 中继侧（账号中心 + 设备目录）
+
+| 方法 | 路径 | 鉴权 | 返回 |
+| --- | --- | --- | --- |
+| `POST` | `/api/fleet/accounts` | `x-admin-key`（中继配置了的话；否则仅首次引导） | `201 { accountId, secret, name }` |
+| `POST` | `/api/fleet/accounts/<id>/devices` | body `secret` 或 `x-fleet-secret` | `200 { ok, deviceId }`（按 `machineId` upsert） |
+| `GET` | `/api/fleet/accounts/<id>/devices` | `x-fleet-secret` | `200 { devices: [{ machineId, name, platform, hubId, entryUrl, online, lastSeenAt }] }` |
+| `DELETE` | `/api/fleet/accounts/<id>/devices/<machineId>` | `x-fleet-secret` | `200 { ok:true }` |
+| `GET` | `/health` | 无 | `{ ok, hubs, accounts }`（只给数量） |
+
+- 账号 `acct_<16hex>`，密钥 `dshf_<32hex>`；**服务端只存 sha256**，用 `timingSafeEqual` 比较
+- `online` 在读取时计算（120 秒内有心跳），不落盘
+- 上限：每账号 200 台设备、请求体 8 KiB、创建账号按 IP 限流
+
+### 14.2 插件侧
+
+| 路由 | 语义 |
+| --- | --- |
+| `GET /api/dsh-computers/account` | `{ loggedIn, relayUrl, accountId, name, machineId, devices, lastError, registeredAt }`（**不含密钥**） |
+| `POST /api/dsh-computers/account/create` | 在中继上创建账号，持久化并注册本机；**响应里返回一次 `secret`**（只此一次） |
+| `POST /api/dsh-computers/account/login` | 用 `accountId + secret` 登录，校验通过后持久化并注册 |
+| `POST /api/dsh-computers/account/logout` | 清除凭据、停止心跳（`machineId` 保留） |
+| `GET /api/dsh-computers/account/discover` | 探测本机是否有中继在跑，给出可直接使用的候选地址 |
+
+- 凭据存 `${stateDir}/account.json`（0600），`machineId` 存 `${stateDir}/machine.json`，两者分离——换账号/登出不会让中继里的设备记录变成孤儿
+- 每 60 秒注册一次；`entryUrl` 优先用中继入口（`https://<relay>/r/<hubId>`），否则用对外可达地址
+- `/state` 增加 `account`（缓存值，不额外打中继）
+
+### 14.3 会话目标电脑的持久化（v1.8.1）
+
+`selections.json` 现在记录 `{ computerId, name, updatedAt }`。被选中的电脑之后被删除时：
+报错会**点名那台机器**（「你之前选定的电脑『X』已被删除或断开」），而不是含糊的"没有选择电脑"。

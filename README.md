@@ -53,7 +53,7 @@ dsh plugin install dsh-computers@1.7.1
 
 - 用**同一个 spec** 再装一次只会得到 `already-installed`（这就是「再安装没法更新」的原因）；
 - 装 **tag** 会被冻住，市场永远检测不到更新；装**分支**（不带 `#`）才能被市场「检查更新」发现新提交；
-- 手动升级到某个版本要**换 spec**：`dsh plugin install github:9Ashwin/dsh-computers#v1.7.1`。
+- 手动升级到某个版本要**换 spec**：`dsh plugin install github:9Ashwin/dsh-computers#v1.8.0`。
 
 > 更新完记得重启 Host 并刷新页面，具体见 [docs/deploy.md](./docs/deploy.md)。
 
@@ -131,12 +131,29 @@ tail -f ~/.dsh-computers/agent.log
 - **超时转后台**：前台命令超时默认不杀（`promoteOnTimeout: true`），而是转入后台任务并返回 jobId，之后用内置的 `job_output` / `job_kill` 接管。
 - **激活时机**：新电脑要等 agent 首次建流后才出现在列表（从生成密钥到真正连上之间，弹窗会一直显示"等待电脑连接…"）。
 
+## 2.9 账号中心（v1.8.0）
+
+同一个账号下的机器**自动互相可见**，不需要逐台配对：
+
+```
+中继机器：设置 → 电脑 → 高级 → 账号中心 → 创建账号中心
+         → 得到 账号 ID + 密码（只显示这一次）
+
+其他机器：设置 → 电脑 → 接入 → 登录账号 → 填 账号 ID + 密码
+         → 自动注册，出现在同一账号的设备列表里
+```
+
+- 账号中心跑在**中继**上（`relay/main.mjs`，同一进程，无需额外服务）
+- 密钥在服务端只存 sha256；插件的 `/account` 与 `/state` 永不返回它
+- 中继地址不用手写：`/account/discover` 会探测本机的中继并预填
+- 旧的一次性密钥 / 接入地址方式全部保留
+
 ## 3.0 接入：填一个地址（v1.7.0）
 
 主控那台 设置 → 电脑 → **复制接入地址**，得到一串：
 
 ```
-https://dsh.nextai.show#join=dshf_…
+https://dsh.example.com#join=dshf_…
 ```
 
 在另一台机器 设置 → 电脑 → **接入地址** 里粘贴 → 连接，完成。不需要生成密钥、不需要记 15 分钟有效期。
@@ -169,11 +186,11 @@ https://dsh.nextai.show#join=dshf_…
 ```yaml
 relay:
   enabled: true
-  url: wss://dsh-relay.nextai.show
+  url: wss://relay.example.com
 ```
 
 - 自动生成并持久化 `hubId` 到 `<stateDir>/relay.json`（0600）——重置电脑列表不会让别人的收藏地址失效
-- 设置 → 电脑 → 本机地址 出现一行 **中继**：`https://dsh-relay.nextai.show/r/hub_xxx`，连接成功时是推荐地址
+- 设置 → 电脑 → 本机地址 出现一行 **中继**：`https://relay.example.com/r/hub_xxx`，连接成功时是推荐地址
 - 别的电脑把「服务器地址」填成这个 URL + 加入密钥即可接入；手机浏览器直接打开它就是完整 UI（含 WebSocket）
 - **全部在界面里配**（v1.7.1）：高级 → 中继 → 填地址 → 启用，现场拨号/换址；`cordis.patch.yml` 可以完全留空
 - 中继断开时该行标「未监听」并回落推荐，不会给你连不上的地址
@@ -256,3 +273,6 @@ npm run test:relay # relay S0/S1（47 项）
 ```
 
 > Node 24 把裸目录参数当作模块说明符，所以 relay 测试用显式 glob（脚本里已带引号）。
+
+
+> `relay.example.com` 是占位示例。中继跑在你自己机器上，域名和端口由你决定（配置文件或界面里填），项目不绑定任何域名。

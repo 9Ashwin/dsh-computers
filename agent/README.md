@@ -49,7 +49,7 @@ Since v1.7.0 joining needs **one string**. On the hub, Settings → 电脑 →
 已连接的电脑 → **复制接入地址** copies a capability URL like:
 
 ```
-https://dsh-relay.nextai.show/r/hub_xxx#join=dshf_…
+https://relay.example.com/r/hub_xxx#join=dshf_…
 ```
 
 Paste that whole string as the server — no `--key`:
@@ -57,8 +57,8 @@ Paste that whole string as the server — no `--key`:
 ```sh
 mkdir -p ~/.dsh-computers
 # the agent is served by the same server — the address without its #join= part
-curl -fsSL 'https://dsh-relay.nextai.show/r/hub_xxx/api/dsh-computers/agent.mjs' -o ~/.dsh-computers/agent.mjs
-node ~/.dsh-computers/agent.mjs enroll --server 'https://dsh-relay.nextai.show/r/hub_xxx#join=dshf_…'
+curl -fsSL 'https://relay.example.com/r/hub_xxx/api/dsh-computers/agent.mjs' -o ~/.dsh-computers/agent.mjs
+node ~/.dsh-computers/agent.mjs enroll --server 'https://relay.example.com/r/hub_xxx#join=dshf_…'
 node ~/.dsh-computers/agent.mjs service install
 node ~/.dsh-computers/agent.mjs service start
 ```

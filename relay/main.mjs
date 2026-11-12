@@ -1,14 +1,21 @@
 /**
  * Standalone relay server (docs/relay-design.md §6.2, §7, S1/S2).
  *
- * One `node:http` server carries three ingress shapes:
+ * One `node:http` server carries four ingress shapes:
  *
  * ```
- * GET /health                       → {ok:true, hubs:[hubId…]}
+ * GET /health                       → {ok:true, hubs:[hubId…], accounts:<n>}
  * GET /ws?hub=<id>&role=hub         → WebSocket upgrade (hub dial-in)
  * GET /r/<hubId>/<rest>             → generic HTTP tunnel to that hub
  * WS  /r/<hubId>/<rest>             → WebSocket tunnel to that hub (S2)
+ * /api/fleet/accounts/…             → account center + device directory (v1.8)
  * ```
+ *
+ * The account center (task-40) is the only stateful surface: it lives in
+ * `lib/relay/accounts.js` (`${dataDir:-./.relay}/accounts.json`) and lets
+ * machines that share an account discover each other without per-machine
+ * pairing. It never touches the tunnel: `/r/` and `/ws` behave exactly as
+ * before, and a missing/corrupt accounts document cannot affect them.
  *
  * The relay is deliberately a dumb pipe: it forwards a browser or agent HTTP
  * request (or a WebSocket upgrade) through the hub's wire socket, streams the
@@ -39,6 +46,13 @@
 
 import { createServer } from 'node:http'
 
+import {
+  ACCOUNT_LIMITS,
+  DEFAULT_DATA_DIR,
+  MACHINE_ID_RE,
+  constantTimeEqual,
+  createAccountStore,
+} from '../lib/relay/accounts.js'
 import { MAX_META_BYTES, MAX_PAYLOAD_BYTES } from '../lib/relay/wire.js'
 import {
   createLinkChannel,
@@ -67,10 +81,22 @@ export const RELAY_LIMITS = Object.freeze({
   requestTimeoutMs: 30000,
   /** Per-IP token bucket for new tunnel streams. */
   rateLimit: Object.freeze({ capacity: 60, refillPerSec: 30 }),
+  /**
+   * Per-IP token bucket for account creation. Tighter than the tunnel bucket:
+   * a bootstrap create is unauthenticated on a fresh relay, so a script must
+   * not be able to fill `accounts.json` (and the account id space) in a loop.
+   */
+  accountRateLimit: Object.freeze({ capacity: 30, refillPerSec: 1 }),
 })
 
 /** Hub ids are `hub_…` in the design; accept the broader safe alphabet too. */
 const HUB_ID_RE = /^[A-Za-z0-9._-]{1,128}$/
+
+/** Account collection route. */
+const ACCOUNTS_PATH = '/api/fleet/accounts'
+
+/** `/api/fleet/accounts/<id>/devices` and `/…/devices/<machineId>`. */
+const ACCOUNT_DEVICES_RE = /^\/api\/fleet\/accounts\/([^/]+)\/devices(?:\/([^/]+))?$/
 
 /** HTTP status text for the few responses written on a raw upgrade socket. */
 const STATUS_TEXT = Object.freeze({
@@ -307,8 +333,16 @@ async function writeRequestBody(stream, body) {
  * @param {number} [options.maxWsMessageBytes] - WebSocket message cap (8 MiB).
  * @param {number} [options.requestTimeoutMs] - first-byte timeout (30 s).
  * @param {{capacity: number, refillPerSec: number}} [options.rateLimit] - per-IP bucket.
+ * @param {string} [options.dataDir] - directory for `accounts.json` (`./.relay`).
+ * @param {string | null} [options.adminKey] - when set, `POST /api/fleet/accounts`
+ *   always requires `x-admin-key` (otherwise only the first-run bootstrap is open).
+ * @param {() => number} [options.now] - clock, injectable for the online window.
+ * @param {number} [options.onlineWindowMs] - device online window (120 s).
+ * @param {number} [options.maxDevicesPerAccount] - device cap per account (200).
+ * @param {{capacity: number, refillPerSec: number}} [options.accountRateLimit] -
+ *   per-IP bucket for account creation.
  * @returns {object} relay with `listen`, `close`, `address`, `hubIds`,
- *   `disconnectHub`, `stats` and the underlying `server`.
+ *   `disconnectHub`, `stats`, `accounts` and the underlying `server`.
  */
 export function createRelay(options = {}) {
   const {
@@ -321,6 +355,12 @@ export function createRelay(options = {}) {
     maxWsMessageBytes = RELAY_LIMITS.maxWsMessageBytes,
     requestTimeoutMs = RELAY_LIMITS.requestTimeoutMs,
     rateLimit = RELAY_LIMITS.rateLimit,
+    dataDir = DEFAULT_DATA_DIR,
+    adminKey = null,
+    now = Date.now,
+    onlineWindowMs = ACCOUNT_LIMITS.onlineWindowMs,
+    maxDevicesPerAccount = ACCOUNT_LIMITS.maxDevicesPerAccount,
+    accountRateLimit = RELAY_LIMITS.accountRateLimit,
   } = options
 
   if (!Number.isSafeInteger(maxRequestBodyBytes) || maxRequestBodyBytes < 1) {
@@ -340,11 +380,36 @@ export function createRelay(options = {}) {
   if (!Number.isFinite(bucketCapacity) || bucketCapacity < 1 || !Number.isFinite(bucketRefill) || bucketRefill < 0) {
     throw new TypeError('rateLimit must be {capacity: >=1, refillPerSec: >=0}')
   }
+  const accountBucketCapacity = accountRateLimit?.capacity
+  const accountBucketRefill = accountRateLimit?.refillPerSec
+  if (
+    !Number.isFinite(accountBucketCapacity) || accountBucketCapacity < 1
+    || !Number.isFinite(accountBucketRefill) || accountBucketRefill < 0
+  ) {
+    throw new TypeError('accountRateLimit must be {capacity: >=1, refillPerSec: >=0}')
+  }
+  if (typeof dataDir !== 'string' || dataDir.trim() === '') {
+    throw new TypeError('dataDir must be a non-empty string')
+  }
+  if (adminKey !== null && adminKey !== undefined && (typeof adminKey !== 'string' || adminKey === '')) {
+    throw new TypeError('adminKey must be a non-empty string or null')
+  }
+  if (typeof now !== 'function') throw new TypeError('now must be a function')
+  if (!Number.isSafeInteger(onlineWindowMs) || onlineWindowMs < 1) {
+    throw new TypeError('onlineWindowMs must be a positive integer')
+  }
+  if (!Number.isSafeInteger(maxDevicesPerAccount) || maxDevicesPerAccount < 1) {
+    throw new TypeError('maxDevicesPerAccount must be a positive integer')
+  }
+  /** Normalised admin key: `null` disables the requirement (bootstrap only). */
+  const adminKeyValue = typeof adminKey === 'string' && adminKey !== '' ? adminKey : null
 
   /** @type {Map<string, object>} live hub sockets, one per hub id. */
   const hubs = new Map()
-  /** @type {Map<string, {tokens: number, last: number}>} per-IP token buckets. */
+  /** @type {Map<string, {tokens: number, last: number}>} per-IP tunnel buckets. */
   const buckets = new Map()
+  /** @type {Map<string, {tokens: number, last: number}>} per-IP account-create buckets. */
+  const accountBuckets = new Map()
   const counters = {
     forwarded: 0,
     rejected: 0,
@@ -366,22 +431,53 @@ export function createRelay(options = {}) {
     }
   }
 
+  /**
+   * Account center + device directory (v1.8.0). Constructed eagerly because it
+   * only reads one small JSON document, and a corrupt document is moved aside
+   * by the store instead of failing the relay.
+   */
+  const accountStore = createAccountStore({
+    dataDir,
+    now,
+    onlineWindowMs,
+    maxDevicesPerAccount,
+    log: (message) => logLine('warn', message),
+  })
+
   /** Consume one token for a new stream from `ip`; false = rate limited. */
   function takeToken(ip) {
-    const now = Date.now()
-    let bucket = buckets.get(ip)
+    return takeTokenFrom(buckets, ip, bucketCapacity, bucketRefill)
+  }
+
+  /** Consume one account-creation token from `ip`; false = rate limited. */
+  function takeAccountToken(ip) {
+    return takeTokenFrom(accountBuckets, ip, accountBucketCapacity, accountBucketRefill)
+  }
+
+  /**
+   * Shared token-bucket implementation: `capacity` tokens, refilled at
+   * `refillPerSec`. The table is bounded so a spray of source addresses cannot
+   * grow it without limit.
+   * @param {Map<string, {tokens: number, last: number}>} map - bucket table.
+   * @param {string} ip - normalized client address.
+   * @param {number} capacity - bucket size.
+   * @param {number} refillPerSec - refill rate.
+   * @returns {boolean} whether a token was available.
+   */
+  function takeTokenFrom(map, ip, capacity, refillPerSec) {
+    const at = Date.now()
+    let bucket = map.get(ip)
     if (bucket === undefined) {
-      // Bound the bucket table: evict the oldest entry when it grows too far.
-      if (buckets.size >= 10000) {
-        const oldest = buckets.keys().next().value
-        buckets.delete(oldest)
+      if (map.size >= 10000) {
+        const oldest = map.keys().next().value
+        map.delete(oldest)
       }
-      bucket = { tokens: bucketCapacity, last: now }
-      buckets.set(ip, bucket)
+      bucket = { tokens: capacity, last: at }
+      map.set(ip, bucket)
     } else {
-      const elapsedSeconds = Math.max(0, now - bucket.last) / 1000
-      bucket.tokens = Math.min(bucketCapacity, bucket.tokens + elapsedSeconds * bucketRefill)
-      bucket.last = now
+      const elapsedSeconds = Math.max(0, at - bucket.last) / 1000
+      bucket.tokens = Math.min(capacity, bucket.tokens + elapsedSeconds * refillPerSec)
+      bucket.last = at
     }
     if (bucket.tokens >= 1) {
       bucket.tokens -= 1
@@ -638,6 +734,254 @@ export function createRelay(options = {}) {
     await writeRequestBody(stream, body)
   }
 
+  // -------------------------------------------------------------------------
+  // account center + device directory (v1.8.0)
+  // -------------------------------------------------------------------------
+
+  /** Read one header as a single string (duplicate headers are not trusted). */
+  function headerValue(value) {
+    return typeof value === 'string' ? value : null
+  }
+
+  /**
+   * Read one JSON object body for an account route.
+   * @param {import('node:http').IncomingMessage} req - request.
+   * @returns {Promise<{ok: true, value: object}
+   *   | {ok: false, status: number, code: string, message: string, hard?: boolean}>}
+   *   parsed body, or a typed failure for the route to write.
+   */
+  async function readAccountJson(req) {
+    let buffer
+    try {
+      buffer = await readBody(req, ACCOUNT_LIMITS.maxBodyBytes, ACCOUNT_LIMITS.maxDrainedBodyBytes)
+    } catch (error) {
+      if (error?.code === 'payload_too_large') {
+        return {
+          ok: false,
+          status: 413,
+          code: 'payload_too_large',
+          message: `request body exceeds ${ACCOUNT_LIMITS.maxBodyBytes} B`,
+          hard: error.hard === true,
+        }
+      }
+      return { ok: false, status: 400, code: 'bad_request', message: error?.message ?? 'request failed' }
+    }
+    if (buffer.length === 0) return { ok: true, value: {} }
+    let value
+    try {
+      value = JSON.parse(buffer.toString('utf8'))
+    } catch {
+      return { ok: false, status: 400, code: 'bad_request', message: 'body must be valid JSON' }
+    }
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      return { ok: false, status: 400, code: 'bad_request', message: 'body must be a JSON object' }
+    }
+    return { ok: true, value }
+  }
+
+  /** Write one account-route failure exactly once. */
+  function sendAccountError(req, res, failure) {
+    counters.rejected += 1
+    if (failure.status === 413) res.setHeader('connection', 'close')
+    sendJson(res, failure.status, { error: failure.code, message: failure.message })
+    // Past the drain cap the client cannot read the 413 answer any more.
+    if (failure.status === 413 && failure.hard === true) req.destroy()
+  }
+
+  /** Map a store failure code to an HTTP status. */
+  function accountFailureStatus(code) {
+    if (code === 'unknown_account') return 404
+    if (code === 'invalid_secret') return 401
+    if (code === 'too_many_devices') return 409
+    return 400
+  }
+
+  /** The wire error code for a store failure (`invalid_secret` → `invalid-secret`). */
+  function accountErrorCode(code) {
+    return code === 'invalid_secret' ? 'invalid-secret' : code
+  }
+
+  /**
+   * `POST /api/fleet/accounts` — create an account.
+   *
+   * Authorisation is deliberately two-mode:
+   * - `--admin-key` / `DSH_RELAY_ADMIN_KEY` set → `x-admin-key` is mandatory,
+   *   so a public relay can host accounts for its operator only;
+   * - no admin key → creation is open ONLY while no account exists (the
+   *   first-run bootstrap on a fresh relay). Once one exists, the endpoint
+   *   answers 403 `admin-key-required`, which closes the account-takeover path.
+   */
+  async function createAccountRoute(req, res) {
+    if (req.method !== 'POST') {
+      res.setHeader('allow', 'POST')
+      sendJson(res, 405, { error: 'method_not_allowed', message: 'use POST' })
+      return
+    }
+    const ip = normalizeAddress(req.socket?.remoteAddress)
+    if (!takeAccountToken(ip)) {
+      counters.rateLimited += 1
+      sendJson(res, 429, {
+        error: 'rate_limited',
+        message: 'too many account creations from this address; retry shortly',
+      })
+      return
+    }
+    const body = await readAccountJson(req)
+    if (!body.ok) {
+      sendAccountError(req, res, body)
+      return
+    }
+
+    if (adminKeyValue !== null) {
+      const presented = headerValue(req.headers['x-admin-key'])
+      if (presented === null || presented === '') {
+        counters.rejected += 1
+        sendJson(res, 403, {
+          error: 'admin-key-required',
+          message: 'this relay requires x-admin-key to create accounts',
+        })
+        return
+      }
+      if (!constantTimeEqual(presented, adminKeyValue)) {
+        counters.rejected += 1
+        sendJson(res, 403, { error: 'invalid-admin-key', message: 'x-admin-key is wrong' })
+        return
+      }
+    } else if (accountStore.count() > 0) {
+      counters.rejected += 1
+      sendJson(res, 403, {
+        error: 'admin-key-required',
+        message: 'an account already exists; this relay requires x-admin-key to create more',
+      })
+      return
+    }
+
+    const created = accountStore.createAccount({ name: body.value.name })
+    if (!created.ok) {
+      sendAccountError(req, res, { status: 400, code: created.code, message: created.message })
+      return
+    }
+    sendJson(res, 201, { accountId: created.accountId, secret: created.secret, name: created.name })
+  }
+
+  /**
+   * Authenticate a device route: the secret may travel in the body (POST) or in
+   * `x-fleet-secret` (GET/DELETE). Both are checked with a constant-time
+   * digest comparison inside the store.
+   */
+  function authenticateAccount(req, accountId, bodySecret) {
+    const secret = typeof bodySecret === 'string' && bodySecret !== ''
+      ? bodySecret
+      : headerValue(req.headers['x-fleet-secret'])
+    return accountStore.authenticate(accountId, secret)
+  }
+
+  /** Write the 401/404 for a failed account authentication. */
+  function sendAuthFailure(req, res, auth) {
+    sendAccountError(req, res, {
+      status: accountFailureStatus(auth.code),
+      code: accountErrorCode(auth.code),
+      message: auth.message,
+    })
+  }
+
+  /** `POST /api/fleet/accounts/<id>/devices` — upsert by `machineId`. */
+  async function registerDeviceRoute(req, res, accountId) {
+    const body = await readAccountJson(req)
+    if (!body.ok) {
+      sendAccountError(req, res, body)
+      return
+    }
+    const auth = authenticateAccount(req, accountId, body.value.secret)
+    if (!auth.ok) {
+      sendAuthFailure(req, res, auth)
+      return
+    }
+    const registered = accountStore.upsertDevice(accountId, body.value.device)
+    if (!registered.ok) {
+      sendAccountError(req, res, {
+        status: accountFailureStatus(registered.code),
+        code: registered.code,
+        message: registered.message,
+      })
+      return
+    }
+    sendJson(res, 200, { ok: true, deviceId: registered.deviceId })
+  }
+
+  /** `GET /api/fleet/accounts/<id>/devices` — list, `online` computed now. */
+  function listDevicesRoute(req, res, accountId) {
+    const auth = authenticateAccount(req, accountId, null)
+    if (!auth.ok) {
+      sendAuthFailure(req, res, auth)
+      return
+    }
+    sendJson(res, 200, { devices: accountStore.listDevices(accountId) ?? [] })
+  }
+
+  /** `DELETE /api/fleet/accounts/<id>/devices/<machineId>` — idempotent. */
+  function deleteDeviceRoute(req, res, accountId, machineId) {
+    const auth = authenticateAccount(req, accountId, null)
+    if (!auth.ok) {
+      sendAuthFailure(req, res, auth)
+      return
+    }
+    if (!MACHINE_ID_RE.test(machineId)) {
+      sendAccountError(req, res, {
+        status: 400,
+        code: 'invalid_machine_id',
+        message: 'machineId must match /^[A-Za-z0-9._-]{1,128}$/',
+      })
+      return
+    }
+    accountStore.removeDevice(accountId, machineId)
+    sendJson(res, 200, { ok: true })
+  }
+
+  /** Route the account-center surface (`/api/fleet/accounts…`). */
+  async function handleAccounts(req, res, pathname) {
+    if (pathname === ACCOUNTS_PATH) {
+      await createAccountRoute(req, res)
+      return
+    }
+    const match = ACCOUNT_DEVICES_RE.exec(pathname)
+    if (match === null) {
+      sendJson(res, 404, {
+        error: 'not_found',
+        message: 'routes are /api/fleet/accounts and /api/fleet/accounts/<id>/devices[/<machineId>]',
+      })
+      return
+    }
+    let accountId
+    let machineId = null
+    try {
+      accountId = decodeURIComponent(match[1])
+      if (match[2] !== undefined) machineId = decodeURIComponent(match[2])
+    } catch {
+      sendJson(res, 400, { error: 'bad_request', message: 'invalid path encoding' })
+      return
+    }
+    if (machineId === null) {
+      if (req.method === 'POST') {
+        await registerDeviceRoute(req, res, accountId)
+        return
+      }
+      if (req.method === 'GET') {
+        listDevicesRoute(req, res, accountId)
+        return
+      }
+      res.setHeader('allow', 'GET, POST')
+      sendJson(res, 405, { error: 'method_not_allowed', message: 'use GET or POST' })
+      return
+    }
+    if (req.method !== 'DELETE') {
+      res.setHeader('allow', 'DELETE')
+      sendJson(res, 405, { error: 'method_not_allowed', message: 'use DELETE' })
+      return
+    }
+    deleteDeviceRoute(req, res, accountId, machineId)
+  }
+
   /** Main HTTP request router. */
   async function handleRequest(req, res) {
     const rawUrl = typeof req.url === 'string' && req.url !== '' ? req.url : '/'
@@ -649,7 +993,16 @@ export function createRelay(options = {}) {
         sendJson(res, 405, { error: 'method_not_allowed', message: 'use GET' })
         return
       }
-      sendJson(res, 200, { ok: true, hubs: [...hubs.keys()] }, req.method === 'HEAD')
+      sendJson(
+        res,
+        200,
+        { ok: true, hubs: [...hubs.keys()], accounts: accountStore.count() },
+        req.method === 'HEAD',
+      )
+      return
+    }
+    if (pathname === ACCOUNTS_PATH || pathname.startsWith(`${ACCOUNTS_PATH}/`)) {
+      await handleAccounts(req, res, pathname)
       return
     }
     if (pathname === '/ws') {
@@ -1197,6 +1550,12 @@ export function createRelay(options = {}) {
   return {
     /** The underlying `node:http` server (escape hatch for tests/embedding). */
     server,
+
+    /**
+     * The account-center store (escape hatch for tests/embedding). Reading
+     * `listDevices`/`accounts` never exposes a secret.
+     */
+    accounts: accountStore,
 
     /**
      * Start listening.

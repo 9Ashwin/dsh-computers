@@ -25,7 +25,7 @@
         # 不需要公网 IP 或开放端口。详见 docs/relay-deploy.md
         relay:
           enabled: false
-          url: ''                 # 例如 wss://dsh-relay.nextai.show
+          url: ''                 # 例如 wss://relay.example.com（你自己的中继）
           publicUrl: ''           # 留空自动生成 https://<relay>/r/<hubId>
           accessKey: ''
           hubId: ''               # 留空自动生成并持久化到 <stateDir>/relay.json

@@ -60,6 +60,14 @@ window.__ModuleLoader__.load({
        * answers with the fresh `state.relay` payload, so the card can
        * reconcile without waiting for the next 5 s poll. */
       relayEnable: 'api/dsh-computers/relay/enable',
+      /* Account center (PROTOCOL account): one account on the relay; machines
+       * sign into it instead of pairing with each other one by one. The host
+       * may not have these routes yet — every call below degrades quietly. */
+      account: 'api/dsh-computers/account',
+      accountCreate: 'api/dsh-computers/account/create',
+      accountLogin: 'api/dsh-computers/account/login',
+      accountLogout: 'api/dsh-computers/account/logout',
+      accountDiscover: 'api/dsh-computers/account/discover',
       /* Per-session target computer for the composer chip (task-9 host side). */
       selection: 'api/dsh-computers/selection',
       /* Access rules (task-11 host side): which computers a session may use,
@@ -149,15 +157,61 @@ window.__ModuleLoader__.load({
       /* v1.7.0 one-field join: the 接入 card is the whole page up top. */
       'join.title': '接入',
       'join.addressLabel': '接入地址',
-      'join.addressPlaceholder': 'https://dsh-relay.nextai.show/r/hub_…',
+      'join.addressPlaceholder': 'https://relay.example.com/r/hub_…',
       'join.hint': '在另一台电脑的 设置 → 电脑 → 已连接的电脑 里点「复制接入地址」，把整串粘贴到这里。',
       'join.keyToggle': '用加入密钥',
       'join.addressToggle': '用接入地址',
       'join.connected': '已连接',
       'join.invalid': '这不像一个接入地址：它应该形如 https://…/r/hub_…#join=…',
       'advanced.title': '高级',
-      'advanced.summary': '本机地址与中继状态',
+      'advanced.summary': '中继与账号中心',
       'fleet.copy': '复制接入地址',
+
+      /* Account center (PROTOCOL account): one account on the relay, so
+       * machines signed into it find each other with no per-machine pairing. */
+      'account.modesLabel': '接入方式',
+      'account.mode.account': '登录账号',
+      'account.mode.address': '接入地址',
+      'account.login.hint': '用同一个账号登录的电脑会自动出现在彼此的列表里，不需要逐台配对。',
+      'account.login.accountId': '账号 ID',
+      'account.login.accountIdPlaceholder': 'acct_…',
+      'account.login.secret': '密码',
+      'account.login.secretPlaceholder': 'dshf_…',
+      'account.login.relay': '中继地址',
+      'account.login.relayPlaceholder': 'wss://relay.example.com',
+      'account.login.relayHint': '账号中心所在的中继地址',
+      'account.login.submit': '登录',
+      'account.login.submitting': '登录中…',
+      'account.login.failed': '登录失败：{message}',
+      'account.loggedIn': '已登录',
+      'account.loggingOut': '退出中…',
+      'account.logout': '退出登录',
+      'account.logoutFailed': '退出登录失败：{message}',
+      'account.loggedIn.notice': '已登录账号 {accountId}',
+      'account.loggedOut.notice': '已退出账号',
+      'account.devices.title': '账号里的电脑',
+      'account.devices.count': '{count} 台电脑',
+      'account.devices.empty': '这个账号还没有其他电脑',
+      'account.devices.thisMachine': '本机',
+      'account.devices.unknown': '未知设备',
+      'account.platform.unknown': '未知系统',
+      'account.center.title': '账号中心',
+      'account.center.hint': '在这台机器上创建账号中心，其他电脑用账号 ID 和密码登录，就能互相看到并连过来。',
+      'account.center.create': '创建账号中心',
+      'account.center.creating': '创建中…',
+      'account.center.adminKey': '管理员密钥（可选）',
+      'account.center.adminKeyPlaceholder': 'relay --admin-key',
+      'account.center.name': '名称（可选）',
+      'account.center.namePlaceholder': '例如：我的账号中心',
+      'account.center.submit': '创建',
+      'account.center.cancel': '取消',
+      'account.center.failed': '创建账号中心失败：{message}',
+      'account.center.created': '账号中心已创建',
+      'account.center.createdHint': '其他电脑在 设置 → 电脑 → 接入 → 登录账号 里填这个账号 ID 和密码。',
+      'account.center.warning': '密码只显示这一次，也是其他电脑登录这个账号的唯一方式，请立刻保存。',
+      'account.center.accountId': '账号 ID',
+      'account.center.password': '密码',
+      'account.center.loggedIn': '这台机器已登录账号',
       'runtime.hint': '加入密钥来自服务器「连接电脑」弹窗，只能用一次，15 分钟内有效。',
       'runtime.serverLabel': '服务器地址',
       'runtime.serverPlaceholder': 'https://dsh.example.com',
@@ -224,14 +278,9 @@ window.__ModuleLoader__.load({
       'drift.embedded.cliLabel': '或者在命令行里安装',
       'mode.embedded': '插件运行时',
       'mode.service': '系统服务',
-      'addr.title': '本机地址',
-      'addr.hint': '别的电脑用这个地址 + 一个加入密钥即可连到这台电脑',
-      'addr.recommended': '建议',
+      /* Only the address-kind labels survive: the connect modal's combobox
+       * still names each candidate. The 本机地址 block is gone. */
       'addr.unreachable': '未监听',
-      'addr.loopbackOnly': '只有本机地址可用：其他电脑连不上。独立部署的 dsh web 可以绑 Tailscale/局域网地址（dsh web --host <ip>）；桌面端不要改 webserver.host（窗口会连不上），应在前面加一层 tailscale serve 并把它写进 publicUrl。',
-      'addr.loopbackHint': '443 可能已被占用，换一个端口即可。',
-      'addr.example': '例如',
-
       'addr.loopbackOnlyShort': '只有本机地址可用，其他电脑连不上',
       'addr.kind.public': '公网',
       'addr.kind.forwarded': '代理',
@@ -242,12 +291,9 @@ window.__ModuleLoader__.load({
       'addr.kind.loopback': '本机',
       'addr.kind.tunnel': 'Tailscale Serve',
       'addr.kind.relay': '中继',
-      'addr.tunnelPending': '正在配置 Tailscale Serve…',
-      'addr.tunnelError': 'Tailscale Serve 配置失败：{message}',
       'addr.kind.other': '地址',
       'addr.listLabel': '可用的服务器地址',
-      'addr.listening': '本机监听：{address}',
-      'relay.title': '中继',
+            'relay.title': '中继',
       'relay.hubLabel': '中继 ID',
       'relay.urlLabel': '公网地址',
       'relay.status.connected': '已连接',
@@ -264,7 +310,7 @@ window.__ModuleLoader__.load({
       'relay.enableAction': '启用',
       /* The 中继 card sets itself up here: no config file, no restart. */
       'relay.urlField': '中继地址',
-      'relay.urlPlaceholder': 'wss://dsh-relay.nextai.show',
+      'relay.urlPlaceholder': 'wss://relay.example.com',
       'relay.edit': '修改',
       'relay.save': '保存',
       'relay.cancel': '取消',
@@ -353,15 +399,61 @@ window.__ModuleLoader__.load({
       /* v1.7.0 one-field join: the Join card is the whole page up top. */
       'join.title': 'Join',
       'join.addressLabel': 'Join address',
-      'join.addressPlaceholder': 'https://dsh-relay.nextai.show/r/hub_…',
+      'join.addressPlaceholder': 'https://relay.example.com/r/hub_…',
       'join.hint': 'On the other computer open Settings → Computers → Connected computers and click “Copy join address”, then paste the whole string here.',
       'join.keyToggle': 'Use a join key',
       'join.addressToggle': 'Use a join address',
       'join.connected': 'Connected to',
       'join.invalid': 'That does not look like a join address; it should look like https://…/r/hub_…#join=…',
       'advanced.title': 'Advanced',
-      'advanced.summary': 'This machine’s addresses and relay status',
+      'advanced.summary': 'Relay and account center',
       'fleet.copy': 'Copy join address',
+
+      /* Account center (PROTOCOL account): one account on the relay, so
+       * machines signed into it find each other with no per-machine pairing. */
+      'account.modesLabel': 'Join method',
+      'account.mode.account': 'Sign in',
+      'account.mode.address': 'Join address',
+      'account.login.hint': 'Computers signed into the same account show up in each other’s list automatically — no per-machine pairing.',
+      'account.login.accountId': 'Account ID',
+      'account.login.accountIdPlaceholder': 'acct_…',
+      'account.login.secret': 'Password',
+      'account.login.secretPlaceholder': 'dshf_…',
+      'account.login.relay': 'Relay address',
+      'account.login.relayPlaceholder': 'wss://relay.example.com',
+      'account.login.relayHint': 'Relay address of the account center',
+      'account.login.submit': 'Sign in',
+      'account.login.submitting': 'Signing in…',
+      'account.login.failed': 'Sign-in failed: {message}',
+      'account.loggedIn': 'Signed in as',
+      'account.loggingOut': 'Signing out…',
+      'account.logout': 'Sign out',
+      'account.logoutFailed': 'Sign-out failed: {message}',
+      'account.loggedIn.notice': 'Signed in as {accountId}',
+      'account.loggedOut.notice': 'Signed out',
+      'account.devices.title': 'Computers in this account',
+      'account.devices.count': '{count} computers',
+      'account.devices.empty': 'No other computers in this account yet',
+      'account.devices.thisMachine': 'This machine',
+      'account.devices.unknown': 'Unknown device',
+      'account.platform.unknown': 'Unknown system',
+      'account.center.title': 'Account center',
+      'account.center.hint': 'Create the account center on this machine; other computers sign in with the account ID and password and can then see and reach each other.',
+      'account.center.create': 'Create account center',
+      'account.center.creating': 'Creating…',
+      'account.center.adminKey': 'Admin key (optional)',
+      'account.center.adminKeyPlaceholder': 'relay --admin-key',
+      'account.center.name': 'Name (optional)',
+      'account.center.namePlaceholder': 'e.g. My account center',
+      'account.center.submit': 'Create',
+      'account.center.cancel': 'Cancel',
+      'account.center.failed': 'Could not create the account center: {message}',
+      'account.center.created': 'Account center created',
+      'account.center.createdHint': 'On another computer, open Settings → Computers → Join → Sign in and enter this account ID and password.',
+      'account.center.warning': 'This password is shown only once and is the only way to sign other computers into this account — save it now.',
+      'account.center.accountId': 'Account ID',
+      'account.center.password': 'Password',
+      'account.center.loggedIn': 'This machine is signed in as',
       'runtime.hint': 'The join key comes from the server’s “Connect computer” dialog; single use, valid for 15 minutes.',
       'runtime.serverLabel': 'Server URL',
       'runtime.serverPlaceholder': 'https://dsh.example.com',
@@ -428,14 +520,9 @@ window.__ModuleLoader__.load({
       'drift.embedded.cliLabel': 'Or install it from the command line',
       'mode.embedded': 'Plugin runtime',
       'mode.service': 'System service',
-      'addr.title': 'This machine’s addresses',
-      'addr.hint': 'Another computer joins this one with this address plus an enrollment key',
-      'addr.recommended': 'Suggested',
+      /* Only the address-kind labels survive: the connect modal's combobox
+       * still names each candidate. The 本机地址 block is gone. */
       'addr.unreachable': 'Not listening',
-      'addr.loopbackOnly': 'Only a local address is available, so other computers cannot connect. A standalone dsh web can bind a Tailscale/LAN address (dsh web --host <ip>); in the desktop app do NOT change webserver.host (the window stops connecting) — put tailscale serve in front and set publicUrl instead.',
-      'addr.loopbackHint': '443 may already be taken; another port is fine.',
-      'addr.example': 'e.g.',
-
       'addr.loopbackOnlyShort': 'Only a loopback address is available; other computers cannot connect',
       'addr.kind.public': 'Public',
       'addr.kind.forwarded': 'Proxy',
@@ -446,12 +533,9 @@ window.__ModuleLoader__.load({
       'addr.kind.loopback': 'Loopback',
       'addr.kind.tunnel': 'Tailscale Serve',
       'addr.kind.relay': 'Relay',
-      'addr.tunnelPending': 'Configuring Tailscale Serve…',
-      'addr.tunnelError': 'Tailscale Serve failed: {message}',
-      'addr.kind.other': 'Address',
+                  'addr.kind.other': 'Address',
       'addr.listLabel': 'Available server addresses',
-      'addr.listening': 'Listening on {address}',
-      'relay.title': 'Relay',
+            'relay.title': 'Relay',
       'relay.hubLabel': 'Relay ID',
       'relay.urlLabel': 'Public address',
       'relay.status.connected': 'Connected',
@@ -466,7 +550,7 @@ window.__ModuleLoader__.load({
       'relay.enableAction': 'Enable',
       /* The relay card sets itself up here: no config file, no restart. */
       'relay.urlField': 'Relay address',
-      'relay.urlPlaceholder': 'wss://dsh-relay.nextai.show',
+      'relay.urlPlaceholder': 'wss://relay.example.com',
       'relay.edit': 'Change',
       'relay.save': 'Save',
       'relay.cancel': 'Cancel',
@@ -1159,6 +1243,144 @@ window.__ModuleLoader__.load({
 }
 .dshc-advancedBody { margin-top: 10px; }
 
+/* Account center (PROTOCOL account): the 接入 card's two modes, the signed-in
+ * line and its read-only device list, plus the 高级 create form. */
+.dshc-accountModes { margin-bottom: 11px; }
+.dshc-accountHint { margin: 9px 0 0; }
+.dshc-accountForm .dshc-field { flex: 1 1 150px; }
+.dshc-accountForm .dshc-accountRelayField { flex: 1 1 220px; }
+.dshc-accountRelayHint { margin: 7px 0 0; }
+.dshc-accountLine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.dshc-accountText {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+}
+.dshc-accountId {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12.5px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.dshc-accountCount {
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+}
+.dshc-accountLogout { margin-left: auto; }
+.dshc-deviceList {
+  display: flex;
+  flex-direction: column;
+  margin-top: 11px;
+  border-top: 1px solid var(--dsw-alias-border-l1);
+}
+.dshc-deviceListHead {
+  padding: 9px 2px 3px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  line-height: 16px;
+  font-weight: 500;
+}
+.dshc-deviceRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 7px 2px;
+}
+.dshc-deviceRow + .dshc-deviceRow { border-top: 1px solid var(--dsw-alias-border-l1); }
+.dshc-deviceDot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--dsw-alias-state-idle-primary);
+}
+.dshc-deviceDot[data-online="true"] { background: var(--dsw-alias-state-success-primary); }
+.dshc-deviceName {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 19px;
+}
+.dshc-devicePlatform,
+.dshc-deviceState {
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  line-height: 16px;
+}
+.dshc-deviceRow[data-online="true"] .dshc-deviceState { color: var(--dsw-alias-state-success-primary); }
+.dshc-deviceThis {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 5px;
+  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
+  color: var(--dsw-alias-label-secondary);
+  font-size: 10.5px;
+  line-height: 15px;
+  font-weight: 500;
+}
+.dshc-accountCenterHint { margin: 9px 0 0; }
+.dshc-accountCreateBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 32px;
+  margin-top: 10px;
+  padding: 0 13px;
+  border: none;
+  border-radius: 999px;
+  background: var(--dsw-alias-button-primary-fill, var(--dsw-alias-brand-primary));
+  color: var(--dsw-alias-label-primary-foreground, var(--dsw-alias-brand-primary-invert, #fff));
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 18px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .dshc-accountCreateBtn:hover {
+    background: var(--dsw-alias-button-primary-hover, var(--dsw-alias-brand-primary));
+  }
+}
+.dshc-accountCreateBtn:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
+.dshc-accountCreateCancel { margin-top: 9px; }
+.dshc-accountCreated {
+  margin: 0 0 2px;
+  color: var(--dsw-alias-state-success-primary);
+  font-size: 13px;
+  line-height: 19px;
+  font-weight: 500;
+}
+.dshc-accountCredentials .dshc-copyStack { margin-top: 9px; }
+.dshc-accountWarning {
+  margin: 11px 0 0;
+  padding: 9px 11px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 10px;
+  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-1));
+  color: var(--dsw-alias-state-warn-primary);
+  font-size: 12px;
+  line-height: 18px;
+}
+.dshc-accountCreatedHint { margin: 9px 0 0; }
+.dshc-accountCenter { margin-top: 12px; }
+
 .dshc-dot[data-state="running"] { background: var(--dsw-alias-state-success-primary); }
 .dshc-dot[data-state="connecting"] { background: var(--dsw-alias-state-warn-primary); }
 .dshc-dot[data-state="failed"] { background: var(--dsw-alias-state-error-primary); }
@@ -1524,21 +1746,8 @@ window.__ModuleLoader__.load({
   line-height: 16px;
 }
 
-/* Address candidates (本机地址) + the connect-modal combobox (task-18). */
-.dshc-addrList {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin-top: 10px;
-}
-.dshc-addrRow {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  padding: 5px 2px;
-}
-.dshc-addrRow[data-muted="true"] { opacity: 0.72; }
+/* The connect-modal combobox (task-18). The 本机地址 rows are gone; only the
+ * picker's kind labels and dropdown remain. */
 .dshc-addrDot {
   flex: none;
   width: 6px;
@@ -1555,7 +1764,6 @@ window.__ModuleLoader__.load({
   line-height: 16px;
   white-space: nowrap;
 }
-.dshc-addrUrl,
 .dshc-addrComboUrl {
   min-width: 0;
   overflow: hidden;
@@ -1565,9 +1773,9 @@ window.__ModuleLoader__.load({
   font-size: 12px;
   line-height: 17px;
   color: var(--dsw-alias-label-primary);
+  flex: 1 1 auto;
+  text-align: left;
 }
-.dshc-addrUrl { flex: 1 1 auto; }
-.dshc-addrComboUrl { flex: 1 1 auto; text-align: left; }
 .dshc-addrBadge {
   flex: none;
   padding: 0 5px;
@@ -1591,26 +1799,6 @@ window.__ModuleLoader__.load({
   .dshc-addrOption[disabled]:hover { background: transparent; }
 }
 .dshc-addrCombo[aria-expanded="true"] { background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2)); }
-.dshc-addrListen {
-  margin: 8px 0 0;
-  color: var(--dsw-alias-label-secondary);
-  font-size: 11px;
-  line-height: 15px;
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-}
-.dshc-addrWarn {
-  margin-top: 10px;
-  padding: 9px 11px;
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 10px;
-  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-1));
-}
-.dshc-addrWarnText {
-  margin: 0;
-  color: var(--dsw-alias-state-warn-primary);
-  font-size: 12px;
-  line-height: 18px;
-}
 .dshc-addrInlineWarn {
   margin: 6px 0 0;
   color: var(--dsw-alias-state-warn-primary);
@@ -1674,9 +1862,9 @@ window.__ModuleLoader__.load({
 .dshc-addrOption[aria-selected="true"] { background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2)); }
 .dshc-addrOption .dshc-addrKind { min-width: 40px; }
 
-/* Relay link (中继): the status line under the 本机地址 rows and the small
- * card that explains the public address. Muted while the link comes up,
- * amber when it failed (the line then carries the actionable hint). */
+/* Relay link (中继): the status line on the 中继 card and the small card that
+ * explains the public address. Muted while the link comes up, amber when it
+ * failed (the line then carries the actionable hint). */
 .dshc-relayLine {
   margin: 6px 0 0;
   font-size: 11.5px;
@@ -2100,6 +2288,8 @@ window.__ModuleLoader__.load({
   .dshc-joinText { flex: 1 1 100%; }
   .dshc-joinDisconnect { margin-left: 0; }
   .dshc-groupHead { flex-wrap: wrap; }
+  .dshc-accountLine { align-items: flex-start; }
+  .dshc-accountLogout { margin-left: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
   .dshc-detailsSummary::after { transition: none; }
@@ -2234,6 +2424,21 @@ window.__ModuleLoader__.load({
         body: payload,
         signal,
       }),
+      /* Account center (PROTOCOL account). The GET is the source of truth; the
+       * POSTs answer with the same shape so the UI reconciles without a poll. */
+      readAccount: (signal) => requestJson(API.account, { signal }),
+      createAccount: (payload, signal) => requestJson(API.accountCreate, {
+        method: 'POST',
+        body: payload,
+        signal,
+      }),
+      loginAccount: (payload, signal) => requestJson(API.accountLogin, {
+        method: 'POST',
+        body: payload,
+        signal,
+      }),
+      logoutAccount: (signal) => requestJson(API.accountLogout, { method: 'POST', body: {}, signal }),
+      discoverAccount: (signal) => requestJson(API.accountDiscover, { signal }),
       readSelection: (sessionId, signal) => requestJson(
         `${API.selection}?sessionId=${encodeURIComponent(sessionId)}`,
         { signal },
@@ -2328,23 +2533,6 @@ window.__ModuleLoader__.load({
       if (usable !== undefined) return usable.url;
       if (reachable.length > 0) return reachable[0].url;
       return ordered.length > 0 ? ordered[0].url : '';
-    }
-
-    /**
-     * The TCP port behind the first candidate, for the tailscale example.
-     * (Regex only: the browser URL global is not worth trusting in every host.)
-     * @param {Array} urls - serverUrls.
-     * @returns {string} port or ''.
-     */
-    function addressPort(urls) {
-      for (const entry of urls) {
-        if (entry === null || typeof entry !== 'object' || typeof entry.url !== 'string') continue;
-        const explicit = /^[a-z][a-z0-9+.-]*:\/\/(?:[^/?#@]*@)?(?:\[[^\]]+\]|[^/?#:]*):(\d+)/i.exec(entry.url);
-        if (explicit !== null) return explicit[1];
-        if (/^https:/i.test(entry.url)) return '443';
-        if (/^http:/i.test(entry.url)) return '80';
-      }
-      return '';
     }
 
     /* Relay link states the host reports in `state.relay.state` (PROTOCOL
@@ -2835,11 +3023,10 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 「高级」 disclosure at the bottom of the page: every power-user surface
-     * (本机地址 candidates, the relay card, the listener line, the loopback
-     * banner and the Tailscale/LAN examples) lives inside it, collapsed by
-     * default behind one muted summary line.
-     * @param {object} props - `children` (the existing components, untouched).
+     * 「高级」 disclosure at the bottom of the page: exactly the two hub-side
+     * surfaces live inside it — the 中继 card and the 账号中心 card — collapsed
+     * by default behind one muted summary line.
+     * @param {object} props - `children` (the relay + account cards).
      * @returns {object} disclosure element.
      */
     function AdvancedSection(props) {
@@ -3223,8 +3410,8 @@ window.__ModuleLoader__.load({
 
       /* /keys carries the candidates it minted against; the live /state may
        * already know a relay candidate the key does not (the link can come up
-       * after the key). Merge that in so the dropdown always matches the
-       * 本机地址 block and the relay stays selectable. */
+       * after the key). Merge that in so the dropdown always matches /state
+       * and the relay stays selectable. */
       const stateCandidates = Array.isArray(props.serverUrls) ? props.serverUrls : [];
       const mintedCandidates = Array.isArray(keyInfo && keyInfo.serverUrls)
         ? keyInfo.serverUrls.slice()
@@ -3431,14 +3618,58 @@ window.__ModuleLoader__.load({
       return fragment.startsWith('join=') && fragment.slice('join='.length).trim() !== '';
     }
 
+    /** Human label for a device platform id (the relay stores os ids). */
+    function platformLabelOf(platform) {
+      const value = typeof platform === 'string' ? platform.trim() : '';
+      if (value === '') return t('account.platform.unknown');
+      const id = value.toLowerCase();
+      if (id === 'darwin' || id === 'macos' || id === 'mac') return 'macOS';
+      if (id === 'win32' || id === 'windows') return 'Windows';
+      if (id === 'linux') return 'Linux';
+      return value;
+    }
+
     /**
-     * 「接入」 card (PROTOCOL §10.6, simplified v1.7.0): the whole join flow.
+     * One read-only device row in the account's device list.
+     * @param {object} props - `device` (`account.devices[]`), `thisMachineId`.
+     * @returns {object} row element.
+     */
+    function DeviceRow(props) {
+      const device = props.device !== null && typeof props.device === 'object' ? props.device : {};
+      const machineId = typeof device.machineId === 'string' ? device.machineId : '';
+      const name = typeof device.name === 'string' && device.name !== ''
+        ? device.name
+        : t('account.devices.unknown');
+      const online = device.online === true;
+      const isThisMachine = props.thisMachineId !== '' && machineId === props.thisMachineId;
+      return h('div', { className: 'dshc-deviceRow', 'data-online': online ? 'true' : 'false' },
+        h('span', {
+          className: 'dshc-deviceDot',
+          'data-online': online ? 'true' : 'false',
+          'aria-hidden': 'true',
+        }),
+        h('span', { className: 'dshc-deviceName', title: name }, name),
+        h('span', { className: 'dshc-devicePlatform' }, platformLabelOf(device.platform)),
+        h('span', { className: 'dshc-deviceState' }, online ? t('online') : t('offline')),
+        isThisMachine
+          ? h('span', { className: 'dshc-deviceThis' }, t('account.devices.thisMachine'))
+          : null);
+    }
+
+    /**
+     * 「接入」 card (PROTOCOL §10.6 + account): two ways in.
      *
-     * Not joined: ONE 接入地址 field + 连接. Pasting the address the hub copied
-     * and pressing 连接 is the whole flow; the old 服务器地址 + 加入密钥 pair is
-     * one small 「用加入密钥」 link away for people holding a one-time key.
-     * Joined: one line — 已连接 <address> + the status dot + 断开 — nothing else.
-     * @param {object} props - `view` (runtime request state), `onStatus`, `onRetry`.
+     * 「登录账号」 (primary): sign into the relay's account center with an
+     * account ID + password. Every machine signed into the same account sees
+     * the others in the account's device directory, so there is no per-machine
+     * pairing. 「接入地址」 keeps the v1.7.0 one-address flow unchanged (the
+     * demoted 服务器地址 + 加入密钥 form included).
+     *
+     * Logged in: one line — 已登录 <accountId> + the device count + 退出登录 —
+     * followed by the account's device list (read-only in this version).
+     * @param {object} props - `view` (runtime request state), `account`
+     *   (`{phase, data}`), `discover` (`{candidates, configuredRelayUrl}`),
+     *   `onStatus`, `onRetry`, `onNeedAccount`, `onNeedDiscover`, `onAccount`.
      * @returns {object} card element.
      */
     function JoinCard(props) {
@@ -3446,10 +3677,28 @@ window.__ModuleLoader__.load({
       const status = view.data;
       const phase = runtimePhaseOf(status);
       const configured = Boolean(status && status.configured === true);
-      const [mode, setMode] = React.useState('address');
+      const accountView = props.account !== null && typeof props.account === 'object' ? props.account : null;
+      const account = accountView !== null && accountView.data !== null && typeof accountView.data === 'object'
+        ? accountView.data
+        : null;
+      const loggedIn = account !== null && account.loggedIn === true;
+      const devices = account !== null && Array.isArray(account.devices) ? account.devices : [];
+      const thisMachineId = account !== null && typeof account.machineId === 'string' ? account.machineId : '';
+      const discover = props.discover !== null && typeof props.discover === 'object' ? props.discover : null;
+      /* The relay running on this machine is the suggested account center. It
+       * is only a pre-fill: the field stays editable. */
+      const prefill = discover !== null && Array.isArray(discover.candidates) && discover.candidates.length > 0
+        ? (typeof discover.candidates[0].url === 'string' ? discover.candidates[0].url : '')
+        : (discover !== null && typeof discover.configuredRelayUrl === 'string' ? discover.configuredRelayUrl : '');
+      const [tab, setTab] = React.useState(null);
       const [address, setAddress] = React.useState('');
       const [serverUrl, setServerUrl] = React.useState('');
       const [key, setKey] = React.useState('');
+      const [keyMode, setKeyMode] = React.useState(false);
+      const [accountId, setAccountId] = React.useState('');
+      const [secret, setSecret] = React.useState('');
+      const [relayUrl, setRelayUrl] = React.useState('');
+      const relayTouched = React.useRef(false);
       const [busy, setBusy] = React.useState(false);
       const [failure, setFailure] = React.useState(null);
       const [confirming, setConfirming] = React.useState(false);
@@ -3460,19 +3709,55 @@ window.__ModuleLoader__.load({
         alive.current = false;
         scope.current.abortAll();
       }, []);
+      /* Ask the page for the account status and the local relay suggestion
+       * once; both are optional (an older host has neither route). */
+      React.useEffect(() => {
+        if (typeof props.onNeedAccount === 'function') props.onNeedAccount();
+        if (typeof props.onNeedDiscover === 'function') props.onNeedDiscover();
+      }, []);
+      /* Pre-fill 中继地址 while the user has not touched it yet. */
+      React.useEffect(() => {
+        if (relayTouched.current || relayUrl !== '' || prefill === '') return;
+        setRelayUrl(prefill);
+      }, [prefill]);
 
-      /* Address mode needs a non-empty field; the `#join=` shape is checked on
-       * submit so a pasted plain URL gets an explanation instead of a disabled
-       * button nobody can diagnose. Key mode needs both fields. */
-      const canSubmit = mode === 'address'
-        ? address.trim() !== ''
-        : (serverUrl.trim() !== '' && key.trim() !== '');
+      /* The account tab leads; an already-joined machine keeps showing its
+       * 接入地址 line first, so upgrading never hides the working state. */
+      const effectiveTab = tab !== null ? tab : (loggedIn || !configured ? 'account' : 'address');
+      const canSubmitLogin = accountId.trim() !== '' && secret.trim() !== '' && relayUrl.trim() !== '';
+      const canSubmitAddress = keyMode
+        ? (serverUrl.trim() !== '' && key.trim() !== '')
+        : address.trim() !== '';
 
-      const submit = async () => {
-        if (busy || !canSubmit) return;
+      const submitLogin = async () => {
+        if (busy || !canSubmitLogin) return;
+        const payload = { relayUrl: relayUrl.trim(), accountId: accountId.trim(), secret: secret.trim() };
+        setBusy(true);
+        setFailure(null);
+        try {
+          const next = await scope.current.run((signal) => api.loginAccount(payload, signal));
+          if (!alive.current) return;
+          setSecret('');
+          const id = next !== null && typeof next === 'object' && typeof next.accountId === 'string'
+            ? next.accountId
+            : payload.accountId;
+          if (typeof props.onAccount === 'function') {
+            props.onAccount(next, t('account.loggedIn.notice', { accountId: id }));
+          }
+        } catch (error) {
+          if (!alive.current) return;
+          if (error && error.name === 'AbortError') return;
+          setFailure(t('account.login.failed', { message: messageOf(error) }));
+        } finally {
+          if (alive.current) setBusy(false);
+        }
+      };
+
+      const submitAddress = async () => {
+        if (busy || !canSubmitAddress) return;
         let payload;
         let server;
-        if (mode === 'address') {
+        if (!keyMode) {
           const raw = address.trim();
           if (!hasJoinFragment(raw)) {
             setFailure(t('join.invalid'));
@@ -3503,107 +3788,247 @@ window.__ModuleLoader__.load({
         }
       };
 
-      const enterSubmits = (event) => {
+      const submitLogout = async () => {
+        if (busy) return;
+        setBusy(true);
+        setFailure(null);
+        try {
+          const next = await scope.current.run((signal) => api.logoutAccount(signal));
+          if (!alive.current) return;
+          if (typeof props.onAccount === 'function') {
+            props.onAccount(next, t('account.loggedOut.notice'));
+          }
+        } catch (error) {
+          if (!alive.current) return;
+          if (error && error.name === 'AbortError') return;
+          setFailure(t('account.logoutFailed', { message: messageOf(error) }));
+        } finally {
+          if (alive.current) setBusy(false);
+        }
+      };
+
+      const enterSubmits = (submit) => (event) => {
         if (event.key === 'Enter') {
           event.preventDefault();
           void submit();
         }
       };
-
-      const toggleMode = () => {
+      const toggleKeyMode = () => {
         setFailure(null);
-        setMode((current) => (current === 'address' ? 'key' : 'address'));
+        setKeyMode((current) => !current);
+      };
+      const selectTab = (next) => {
+        setFailure(null);
+        setTab(next);
+      };
+      const markRelayTouched = (value) => {
+        relayTouched.current = true;
+        setRelayUrl(value);
       };
 
       let body;
-      if (status === null && (view.phase === 'loading' || view.phase === 'idle')) {
-        body = h('div', { className: 'dshc-runtimeMeta' }, h(Spinner), h('span', null, t('runtime.loading')));
-      } else if (status === null) {
-        body = h('div', { className: 'dshc-errorCard', role: 'alert' },
-          h('span', { className: 'dshc-errorText' },
-            t('error.loadDetail', { title: t('runtime.loadFailed'), message: view.error ? messageOf(view.error) : '' })),
-          h('button', { type: 'button', className: 'dshc-ghost', onClick: props.onRetry }, t('retry')));
-      } else if (!configured) {
-        const fields = mode === 'address'
-          ? h('label', { className: 'dshc-field dshc-joinField' },
-            h('span', { className: 'dshc-fieldLabel' }, t('join.addressLabel')),
-            h('input', {
-              className: 'dshc-input',
-              type: 'url',
-              inputMode: 'url',
-              autoComplete: 'off',
-              spellCheck: false,
-              value: address,
-              placeholder: t('join.addressPlaceholder'),
+      if (loggedIn) {
+        body = h('div', null,
+          h('div', { className: 'dshc-accountLine' },
+            h('span', { className: 'dshc-accountText' },
+              h('span', null, t('account.loggedIn')),
+              h('code', {
+                className: 'dshc-accountId',
+                title: typeof account.accountId === 'string' ? account.accountId : '',
+              }, typeof account.accountId === 'string' && account.accountId !== '' ? account.accountId : '—')),
+            h('span', { className: 'dshc-accountCount' },
+              t('account.devices.count', { count: devices.length })),
+            h('button', {
+              type: 'button',
+              className: 'dshc-textBtn dshc-accountLogout',
               disabled: busy,
-              onChange: (event) => setAddress(event.target.value),
-              onKeyDown: enterSubmits,
-            }))
-          : [
-            h('label', { key: 'server', className: 'dshc-field' },
-              h('span', { className: 'dshc-fieldLabel' }, t('runtime.serverLabel')),
+              onClick: () => { void submitLogout(); },
+            }, busy ? t('account.loggingOut') : t('account.logout'))),
+          devices.length > 0
+            ? h('div', { className: 'dshc-deviceList' },
+              h('div', { className: 'dshc-deviceListHead' }, t('account.devices.title')),
+              devices.map((device, index) => h(DeviceRow, {
+                key: (device && typeof device.machineId === 'string' && device.machineId !== '')
+                  ? device.machineId
+                  : `device-${index}`,
+                device,
+                thisMachineId,
+              })))
+            : h('p', { className: 'dshc-hint dshc-accountEmpty' }, t('account.devices.empty')));
+      } else if (effectiveTab === 'account') {
+        body = h('div', null,
+          h('p', { className: 'dshc-hint dshc-accountHint' }, t('account.login.hint')),
+          h('div', { className: 'dshc-formRow dshc-joinForm dshc-accountForm' },
+            h('label', { className: 'dshc-field' },
+              h('span', { className: 'dshc-fieldLabel' }, t('account.login.accountId')),
               h('input', {
-                className: 'dshc-input',
+                className: 'dshc-input dshc-accountIdInput',
+                type: 'text',
+                autoComplete: 'off',
+                spellCheck: false,
+                value: accountId,
+                placeholder: t('account.login.accountIdPlaceholder'),
+                disabled: busy,
+                onChange: (event) => setAccountId(event.target.value),
+                onKeyDown: enterSubmits(submitLogin),
+              })),
+            h('label', { className: 'dshc-field' },
+              h('span', { className: 'dshc-fieldLabel' }, t('account.login.secret')),
+              h('input', {
+                className: 'dshc-input dshc-accountSecretInput',
+                type: 'password',
+                autoComplete: 'off',
+                spellCheck: false,
+                value: secret,
+                placeholder: t('account.login.secretPlaceholder'),
+                disabled: busy,
+                onChange: (event) => setSecret(event.target.value),
+                onKeyDown: enterSubmits(submitLogin),
+              })),
+            h('label', { className: 'dshc-field dshc-accountRelayField' },
+              h('span', { className: 'dshc-fieldLabel' }, t('account.login.relay')),
+              h('input', {
+                className: 'dshc-input dshc-accountRelayInput',
                 type: 'url',
                 inputMode: 'url',
                 autoComplete: 'off',
                 spellCheck: false,
-                value: serverUrl,
-                placeholder: t('runtime.serverPlaceholder'),
+                value: relayUrl,
+                placeholder: t('account.login.relayPlaceholder'),
                 disabled: busy,
-                onChange: (event) => setServerUrl(event.target.value),
-                onKeyDown: enterSubmits,
+                onChange: (event) => markRelayTouched(event.target.value),
+                onKeyDown: enterSubmits(submitLogin),
               })),
-            h('label', { key: 'key', className: 'dshc-field' },
-              h('span', { className: 'dshc-fieldLabel' }, t('runtime.keyLabel')),
-              h('input', {
-                className: 'dshc-input',
-                type: 'text',
-                autoComplete: 'off',
-                spellCheck: false,
-                value: key,
-                placeholder: t('runtime.keyPlaceholder'),
-                disabled: busy,
-                onChange: (event) => setKey(event.target.value),
-                onKeyDown: enterSubmits,
-              })),
-          ];
-        body = h('div', null,
-          h('p', { className: 'dshc-hint dshc-joinHint' },
-            mode === 'address' ? t('join.hint') : t('runtime.hint')),
-          h('div', { className: 'dshc-formRow dshc-joinForm' },
-            fields,
             h('button', {
               type: 'button',
-              className: 'dshc-primary dshc-formSubmit',
-              disabled: busy || !canSubmit,
-              onClick: () => { void submit(); },
-            }, busy ? t('runtime.connecting') : t('runtime.connect'))),
-          h('button', {
-            type: 'button',
-            className: 'dshc-joinToggle dshc-joinModeToggle',
-            onClick: toggleMode,
-          }, mode === 'address' ? t('join.keyToggle') : t('join.addressToggle')));
+              className: 'dshc-primary dshc-formSubmit dshc-accountLogin',
+              disabled: busy || !canSubmitLogin,
+              onClick: () => { void submitLogin(); },
+            }, busy ? t('account.login.submitting') : t('account.login.submit'))),
+          h('p', { className: 'dshc-hint dshc-accountRelayHint' }, t('account.login.relayHint')));
       } else {
-        const server = typeof status.serverUrl === 'string' ? status.serverUrl : '';
-        body = h('div', { className: 'dshc-joinLine' },
-          h('span', { className: 'dshc-joinText' },
-            h('span', null, t('join.connected')),
-            h('code', { className: 'dshc-joinAddress', title: server }, server)),
-          h('span', { className: 'dshc-status', 'data-state': phase },
-            h('span', { className: 'dshc-dot', 'data-state': phase, 'aria-hidden': 'true' }),
-            t(`runtime.status.${phase}`)),
-          h('button', {
-            type: 'button',
-            className: 'dshc-textBtn dshc-joinDisconnect',
-            disabled: busy,
-            onClick: () => setConfirming(true),
-          }, t('runtime.disconnect')));
+        let addressBody;
+        if (status === null && (view.phase === 'loading' || view.phase === 'idle')) {
+          addressBody = h('div', { className: 'dshc-runtimeMeta' }, h(Spinner), h('span', null, t('runtime.loading')));
+        } else if (status === null) {
+          addressBody = h('div', { className: 'dshc-errorCard', role: 'alert' },
+            h('span', { className: 'dshc-errorText' },
+              t('error.loadDetail', { title: t('runtime.loadFailed'), message: view.error ? messageOf(view.error) : '' })),
+            h('button', { type: 'button', className: 'dshc-ghost', onClick: props.onRetry }, t('retry')));
+        } else if (!configured) {
+          const fields = keyMode
+            ? [
+              h('label', { key: 'server', className: 'dshc-field' },
+                h('span', { className: 'dshc-fieldLabel' }, t('runtime.serverLabel')),
+                h('input', {
+                  className: 'dshc-input',
+                  type: 'url',
+                  inputMode: 'url',
+                  autoComplete: 'off',
+                  spellCheck: false,
+                  value: serverUrl,
+                  placeholder: t('runtime.serverPlaceholder'),
+                  disabled: busy,
+                  onChange: (event) => setServerUrl(event.target.value),
+                  onKeyDown: enterSubmits(submitAddress),
+                })),
+              h('label', { key: 'key', className: 'dshc-field' },
+                h('span', { className: 'dshc-fieldLabel' }, t('runtime.keyLabel')),
+                h('input', {
+                  className: 'dshc-input',
+                  type: 'text',
+                  autoComplete: 'off',
+                  spellCheck: false,
+                  value: key,
+                  placeholder: t('runtime.keyPlaceholder'),
+                  disabled: busy,
+                  onChange: (event) => setKey(event.target.value),
+                  onKeyDown: enterSubmits(submitAddress),
+                })),
+            ]
+            : h('label', { className: 'dshc-field dshc-joinField' },
+              h('span', { className: 'dshc-fieldLabel' }, t('join.addressLabel')),
+              h('input', {
+                className: 'dshc-input dshc-joinAddressInput',
+                type: 'url',
+                inputMode: 'url',
+                autoComplete: 'off',
+                spellCheck: false,
+                value: address,
+                placeholder: t('join.addressPlaceholder'),
+                disabled: busy,
+                onChange: (event) => setAddress(event.target.value),
+                onKeyDown: enterSubmits(submitAddress),
+              }));
+          addressBody = h('div', null,
+            h('p', { className: 'dshc-hint dshc-joinHint' },
+              keyMode ? t('runtime.hint') : t('join.hint')),
+            h('div', { className: 'dshc-formRow dshc-joinForm' },
+              fields,
+              h('button', {
+                type: 'button',
+                className: 'dshc-primary dshc-formSubmit dshc-joinSubmit',
+                disabled: busy || !canSubmitAddress,
+                onClick: () => { void submitAddress(); },
+              }, busy ? t('runtime.connecting') : t('runtime.connect'))),
+            h('button', {
+              type: 'button',
+              className: 'dshc-joinToggle dshc-joinModeToggle',
+              onClick: toggleKeyMode,
+            }, keyMode ? t('join.addressToggle') : t('join.keyToggle')));
+        } else {
+          const server = typeof status.serverUrl === 'string' ? status.serverUrl : '';
+          addressBody = h('div', { className: 'dshc-joinLine' },
+            h('span', { className: 'dshc-joinText' },
+              h('span', null, t('join.connected')),
+              h('code', { className: 'dshc-joinAddress', title: server }, server)),
+            h('span', { className: 'dshc-status', 'data-state': phase },
+              h('span', { className: 'dshc-dot', 'data-state': phase, 'aria-hidden': 'true' }),
+              t(`runtime.status.${phase}`)),
+            h('button', {
+              type: 'button',
+              className: 'dshc-textBtn dshc-joinDisconnect',
+              disabled: busy,
+              onClick: () => setConfirming(true),
+            }, t('runtime.disconnect')));
+        }
+        body = addressBody;
       }
+
+      const tabBar = loggedIn
+        ? null
+        : h('div', {
+          className: 'dshc-seg dshc-accountModes',
+          role: 'tablist',
+          'aria-label': t('account.modesLabel'),
+        },
+        h('button', {
+          key: 'account',
+          type: 'button',
+          role: 'tab',
+          className: 'dshc-segBtn dshc-accountModeBtn',
+          'data-mode': 'account',
+          'data-active': effectiveTab === 'account' ? 'true' : 'false',
+          'aria-selected': effectiveTab === 'account' ? 'true' : 'false',
+          disabled: busy,
+          onClick: () => selectTab('account'),
+        }, t('account.mode.account')),
+        h('button', {
+          key: 'address',
+          type: 'button',
+          role: 'tab',
+          className: 'dshc-segBtn dshc-accountModeBtn',
+          'data-mode': 'address',
+          'data-active': effectiveTab === 'address' ? 'true' : 'false',
+          'aria-selected': effectiveTab === 'address' ? 'true' : 'false',
+          disabled: busy,
+          onClick: () => selectTab('address'),
+        }, t('account.mode.address')));
 
       return h('div', { className: 'dshc-card2 dshc-joinCard' },
         h('div', { className: 'dshc-card2Head' },
           h('span', { className: 'dshc-card2Title' }, t('join.title'))),
+        tabBar,
         body,
         failure !== null ? h('p', { className: 'dshc-formError', role: 'alert' }, failure) : null,
         confirming
@@ -3671,6 +4096,215 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * 「账号中心」 card in 高级 — for the machine that hosts the relay.
+     *
+     * Signed out it is one quiet line + 创建账号中心; the form (relay address
+     * pre-filled from the local discovery, optional admin key and name) only
+     * appears on request, so 高级 stays quiet by default. On success the host
+     * answers with the account ID and the password — the password is the only
+     * way to sign other machines in and is shown exactly once, so it gets copy
+     * buttons and a warning. Signed in it shows the account and 退出登录.
+     * @param {object} props - `account` (`{phase, data}`), `discover`,
+     *   `created` (`{accountId, secret}` or null), `onNeedAccount`,
+     *   `onNeedDiscover`, `onCreated(created, status)`, `onAccount(status, message)`.
+     * @returns {object} card element.
+     */
+    function AccountCenterCard(props) {
+      const accountView = props.account !== null && typeof props.account === 'object' ? props.account : null;
+      const account = accountView !== null && accountView.data !== null && typeof accountView.data === 'object'
+        ? accountView.data
+        : null;
+      const loggedIn = account !== null && account.loggedIn === true;
+      const created = props.created !== null && typeof props.created === 'object' ? props.created : null;
+      const discover = props.discover !== null && typeof props.discover === 'object' ? props.discover : null;
+      const prefill = discover !== null && Array.isArray(discover.candidates) && discover.candidates.length > 0
+        ? (typeof discover.candidates[0].url === 'string' ? discover.candidates[0].url : '')
+        : (discover !== null && typeof discover.configuredRelayUrl === 'string' ? discover.configuredRelayUrl : '');
+      const [form, setForm] = React.useState(false);
+      const [relayUrl, setRelayUrl] = React.useState('');
+      const [adminKey, setAdminKey] = React.useState('');
+      const [name, setName] = React.useState('');
+      const relayTouched = React.useRef(false);
+      const [busy, setBusy] = React.useState(false);
+      const [failure, setFailure] = React.useState(null);
+      const alive = React.useRef(true);
+      const scope = React.useRef(null);
+      if (scope.current === null) scope.current = createScope();
+      React.useEffect(() => () => {
+        alive.current = false;
+        scope.current.abortAll();
+      }, []);
+      React.useEffect(() => {
+        if (typeof props.onNeedAccount === 'function') props.onNeedAccount();
+        if (typeof props.onNeedDiscover === 'function') props.onNeedDiscover();
+      }, []);
+      React.useEffect(() => {
+        if (relayTouched.current || relayUrl !== '' || prefill === '') return;
+        setRelayUrl(prefill);
+      }, [prefill]);
+
+      const canCreate = relayUrl.trim() !== '';
+      const submitCreate = async () => {
+        if (busy || !canCreate) return;
+        const body = { relayUrl: relayUrl.trim() };
+        if (adminKey.trim() !== '') body.adminKey = adminKey.trim();
+        if (name.trim() !== '') body.name = name.trim();
+        setBusy(true);
+        setFailure(null);
+        try {
+          const next = await scope.current.run((signal) => api.createAccount(body, signal));
+          if (!alive.current) return;
+          const accountId = next !== null && typeof next === 'object' && typeof next.accountId === 'string'
+            ? next.accountId
+            : '';
+          const secret = next !== null && typeof next === 'object' && typeof next.secret === 'string'
+            ? next.secret
+            : '';
+          if (typeof props.onCreated === 'function') props.onCreated({ accountId, secret }, next);
+          setForm(false);
+          setAdminKey('');
+          setName('');
+        } catch (error) {
+          if (!alive.current) return;
+          if (error && error.name === 'AbortError') return;
+          setFailure(t('account.center.failed', { message: messageOf(error) }));
+        } finally {
+          if (alive.current) setBusy(false);
+        }
+      };
+
+      const submitLogout = async () => {
+        if (busy) return;
+        setBusy(true);
+        setFailure(null);
+        try {
+          const next = await scope.current.run((signal) => api.logoutAccount(signal));
+          if (!alive.current) return;
+          if (typeof props.onAccount === 'function') props.onAccount(next, t('account.loggedOut.notice'));
+        } catch (error) {
+          if (!alive.current) return;
+          if (error && error.name === 'AbortError') return;
+          setFailure(t('account.logoutFailed', { message: messageOf(error) }));
+        } finally {
+          if (alive.current) setBusy(false);
+        }
+      };
+
+      let body;
+      if (created !== null) {
+        const accountId = typeof created.accountId === 'string' ? created.accountId : '';
+        const secret = typeof created.secret === 'string' ? created.secret : '';
+        body = h('div', { className: 'dshc-accountCredentials' },
+          h('p', { className: 'dshc-accountCreated' }, t('account.center.created')),
+          h('div', { className: 'dshc-copyStack' },
+            h(CopyRow, {
+              key: 'accountId',
+              label: t('account.center.accountId'),
+              value: accountId,
+              stacked: true,
+            }),
+            h(CopyRow, {
+              key: 'secret',
+              label: t('account.center.password'),
+              value: secret,
+              stacked: true,
+            })),
+          h('p', { className: 'dshc-accountWarning', role: 'alert' }, t('account.center.warning')),
+          h('p', { className: 'dshc-hint dshc-accountCreatedHint' }, t('account.center.createdHint')));
+      } else if (loggedIn) {
+        body = h('div', null,
+          h('div', { className: 'dshc-accountLine' },
+            h('span', { className: 'dshc-accountText' },
+              h('span', null, t('account.center.loggedIn')),
+              h('code', {
+                className: 'dshc-accountId',
+                title: typeof account.accountId === 'string' ? account.accountId : '',
+              }, typeof account.accountId === 'string' && account.accountId !== '' ? account.accountId : '—')),
+            h('button', {
+              type: 'button',
+              className: 'dshc-textBtn dshc-accountCenterLogout',
+              disabled: busy,
+              onClick: () => { void submitLogout(); },
+            }, busy ? t('account.loggingOut') : t('account.logout'))));
+      } else if (form) {
+        body = h('div', null,
+          h('div', { className: 'dshc-formRow dshc-accountForm' },
+            h('label', { className: 'dshc-field dshc-accountRelayField' },
+              h('span', { className: 'dshc-fieldLabel' }, t('account.login.relay')),
+              h('input', {
+                className: 'dshc-input dshc-centerRelayInput',
+                type: 'url',
+                inputMode: 'url',
+                autoComplete: 'off',
+                spellCheck: false,
+                value: relayUrl,
+                placeholder: t('account.login.relayPlaceholder'),
+                disabled: busy,
+                onChange: (event) => {
+                  relayTouched.current = true;
+                  setRelayUrl(event.target.value);
+                },
+              })),
+            h('label', { className: 'dshc-field' },
+              h('span', { className: 'dshc-fieldLabel' }, t('account.center.adminKey')),
+              h('input', {
+                className: 'dshc-input dshc-centerAdminInput',
+                type: 'password',
+                autoComplete: 'off',
+                spellCheck: false,
+                value: adminKey,
+                placeholder: t('account.center.adminKeyPlaceholder'),
+                disabled: busy,
+                onChange: (event) => setAdminKey(event.target.value),
+              })),
+            h('label', { className: 'dshc-field' },
+              h('span', { className: 'dshc-fieldLabel' }, t('account.center.name')),
+              h('input', {
+                className: 'dshc-input dshc-centerNameInput',
+                type: 'text',
+                autoComplete: 'off',
+                spellCheck: false,
+                value: name,
+                placeholder: t('account.center.namePlaceholder'),
+                disabled: busy,
+                onChange: (event) => setName(event.target.value),
+              })),
+            h('button', {
+              type: 'button',
+              className: 'dshc-primary dshc-accountCreateSubmit',
+              disabled: busy || !canCreate,
+              onClick: () => { void submitCreate(); },
+            }, busy ? t('account.center.creating') : t('account.center.submit'))),
+          h('button', {
+            type: 'button',
+            className: 'dshc-textBtn dshc-accountCreateCancel',
+            disabled: busy,
+            onClick: () => {
+              setForm(false);
+              setFailure(null);
+            },
+          }, t('account.center.cancel')));
+      } else {
+        body = h('div', null,
+          h('p', { className: 'dshc-hint dshc-accountCenterHint' }, t('account.center.hint')),
+          h('button', {
+            type: 'button',
+            className: 'dshc-accountCreateBtn',
+            onClick: () => {
+              setFailure(null);
+              setForm(true);
+            },
+          }, t('account.center.create')));
+      }
+
+      return h('div', { className: 'dshc-card2 dshc-accountCenter' },
+        h('div', { className: 'dshc-card2Head' },
+          h('span', { className: 'dshc-card2Title' }, t('account.center.title'))),
+        body,
+        failure !== null ? h('p', { className: 'dshc-formError', role: 'alert' }, failure) : null);
+    }
+
+    /**
      * The page body: the 接入 card, the 已连接的电脑 list and the collapsed
      * 高级 block, plus their states.
      * @returns {object} the 电脑 page.
@@ -3692,14 +4326,67 @@ window.__ModuleLoader__.load({
       const relayEpoch = React.useRef(0);
       const [dialog, setDialog] = React.useState(null);
       const [notice, setNotice] = React.useState(null);
+      /* Account center (PROTOCOL account): the account this machine is signed
+       * into, the relay discovered on this machine, and the credentials of an
+       * account center created in this page session (shown once). */
+      const [account, setAccount] = React.useState({ phase: 'idle', data: null, error: null });
+      const [discover, setDiscover] = React.useState({ candidates: [], configuredRelayUrl: '' });
+      const [createdAccount, setCreatedAccount] = React.useState(null);
       const alive = React.useRef(true);
       const scope = React.useRef(null);
       const noticeTimer = React.useRef(null);
       const runtimeRequested = React.useRef(false);
+      const accountRequested = React.useRef(false);
+      const discoverRequested = React.useRef(false);
       const accessCounts = React.useRef(new Map());
       const accessRequested = React.useRef(new Set());
       const [, setCountsVersion] = React.useState(0);
       if (scope.current === null) scope.current = createScope();
+
+      /* The account routes are new: a host that predates them answers 404 (or
+       * nothing), which must leave the page on "not signed in" — never an
+       * error banner. */
+      const loadAccount = React.useCallback(async () => {
+        if (accountRequested.current) return;
+        accountRequested.current = true;
+        try {
+          const payload = await scope.current.run((signal) => api.readAccount(signal));
+          if (!alive.current) return;
+          setAccount({
+            phase: 'ready',
+            data: payload !== null && typeof payload === 'object' ? payload : null,
+            error: null,
+          });
+        } catch (error) {
+          if (!alive.current) return;
+          if (error && error.name === 'AbortError') return;
+          setAccount({ phase: 'ready', data: null, error });
+        }
+      }, []);
+
+      const loadDiscover = React.useCallback(async () => {
+        if (discoverRequested.current) return;
+        discoverRequested.current = true;
+        try {
+          const payload = await scope.current.run((signal) => api.discoverAccount(signal));
+          if (!alive.current) return;
+          const candidates = payload !== null && typeof payload === 'object' && Array.isArray(payload.candidates)
+            ? payload.candidates.filter((entry) => entry !== null && typeof entry === 'object'
+              && typeof entry.url === 'string' && entry.url !== '')
+            : [];
+          const configuredRelayUrl = payload !== null && typeof payload === 'object'
+            && payload.configured !== null && typeof payload.configured === 'object'
+            && typeof payload.configured.relayUrl === 'string'
+            ? payload.configured.relayUrl
+            : '';
+          setDiscover({ candidates, configuredRelayUrl });
+        } catch (error) {
+          /* No suggestion is fine: the field stays empty and editable. */
+        }
+      }, []);
+
+      const needAccount = React.useCallback(() => { void loadAccount(); }, [loadAccount]);
+      const needDiscover = React.useCallback(() => { void loadDiscover(); }, [loadDiscover]);
 
       const loadRuntime = React.useCallback(async () => {
         try {
@@ -3748,12 +4435,21 @@ window.__ModuleLoader__.load({
             runtimeRequested.current = true;
             void loadRuntime();
           }
+          /* /state may already carry the account (PROTOCOL account §4); when
+           * it does not, ask the account route once. Runtime-only machines
+           * have no account center at all. */
+          if (next.account !== null && typeof next.account === 'object') {
+            accountRequested.current = true;
+            setAccount({ phase: 'ready', data: next.account, error: null });
+          } else if (roleOf(next) !== 'runtime') {
+            void loadAccount();
+          }
         } catch (error) {
           if (!alive.current) return;
           if (error && error.name === 'AbortError') return;
           setView((current) => ({ phase: current.data === null ? 'error' : 'ready', data: current.data, error }));
         }
-      }, [loadRuntime]);
+      }, [loadRuntime, loadAccount]);
 
       /**
        * Configure the relay (PROTOCOL relay): `{ enabled }` flips the switch,
@@ -3858,16 +4554,31 @@ window.__ModuleLoader__.load({
         if (typeof message === 'string' && message !== '') showNotice('success', message);
       }, [loadRuntime, showNotice]);
 
+      /* The account POSTs answer with the full status, so the card and the
+       * 账号中心 reconcile without waiting for a poll. */
+      const handleAccountStatus = React.useCallback((status, message) => {
+        if (status !== null && typeof status === 'object') {
+          accountRequested.current = true;
+          setAccount({ phase: 'ready', data: status, error: null });
+        }
+        if (typeof message === 'string' && message !== '') showNotice('success', message);
+      }, [showNotice]);
+
+      const handleAccountCreated = React.useCallback((created, status) => {
+        if (created !== null && typeof created === 'object') setCreatedAccount(created);
+        handleAccountStatus(status, null);
+      }, [handleAccountStatus]);
+
       const data = view.data;
       const role = data === null ? null : roleOf(data);
       const computers = data && Array.isArray(data.computers) ? data.computers : null;
       const baseRelay = data !== null && data.relay !== null && typeof data.relay === 'object'
         ? data.relay
         : null;
-      /* Optimistic overlay while a relay POST is in flight: the switch, the
-       * relay address and the 本机地址 line follow the user's intent until a
-       * fresh poll lands. `url` also covers a first-time setup, so the card
-       * leaves its input form as soon as the address is submitted. */
+      /* Optimistic overlay while a relay POST is in flight: the switch and the
+       * relay address follow the user's intent until a fresh poll lands. `url`
+       * also covers a first-time setup, so the card leaves its input form as
+       * soon as the address is submitted. */
       const relayPending = relayAction.pending;
       const pendingEnabled = relayPending !== null && typeof relayPending.enabled === 'boolean'
         ? relayPending.enabled
@@ -4022,13 +4733,19 @@ window.__ModuleLoader__.load({
             h('h2', { className: 'dshc-title' }, t('title')),
             h('p', { className: 'dshc-desc' }, t('description')))),
         notice !== null ? h(Notice, { kind: notice.kind, text: notice.text }) : null,
-        /* PRIMARY (v1.7.0): one address joins this machine. Everything else
-         * about being a hub is secondary and lives in 高级 at the bottom. */
+        /* PRIMARY (v1.7.0, v1.8.0): 登录账号 or one address joins this
+         * machine. Everything else about being a hub is secondary and lives
+         * in 高级 at the bottom. */
         showRuntime
           ? h(JoinCard, {
             view: runtime,
+            account,
+            discover,
             onStatus: handleRuntimeStatus,
             onRetry: () => { void loadRuntime(); },
+            onNeedAccount: needAccount,
+            onNeedDiscover: needDiscover,
+            onAccount: handleAccountStatus,
           })
           : null,
         showComputers
@@ -4038,20 +4755,13 @@ window.__ModuleLoader__.load({
               joinUrl !== '' ? h(CopyJoinButton, { value: joinUrl }) : null),
             body)
           : null,
-        /* ADVANCED (v1.7.0): 本机地址 rows, the relay card + switch, the
-         * listener line, the loopback banner and the Tailscale/LAN examples
-         * keep their components untouched, collapsed behind one line. */
+        /* ADVANCED (v1.7.3, v1.8.0): exactly two cards — the relay setup and
+         * the account center. The 本机地址 rows (relay/public/Tailscale/LAN/
+         * loopback candidates, listener line and the loopback banner) were
+         * removed from the UI on request: the copyable join address and the
+         * blocked hint already say everything a user needs. */
         showComputers && data !== null
           ? h(AdvancedSection, null,
-            h(AddressCard, {
-              key: 'addresses',
-              serverUrls,
-              loopbackOnly,
-              relay,
-              listener: data && data.listener && typeof data.listener === 'object' ? data.listener : null,
-              tunnel: data && data.tunnel && typeof data.tunnel === 'object' ? data.tunnel : null,
-              serverUrl: data && typeof data.serverUrl === 'string' ? data.serverUrl : '',
-            }),
             h(RelayCard, {
               key: 'relay',
               relay,
@@ -4061,6 +4771,16 @@ window.__ModuleLoader__.load({
               onEnable: (url) => submitRelay({ enabled: true, url }),
               onSaveUrl: (url) => submitRelay({ url }),
               onDismissError: () => setRelayAction({ pending: null, error: null }),
+            }),
+            h(AccountCenterCard, {
+              key: 'account',
+              account,
+              discover,
+              created: createdAccount,
+              onNeedDiscover: needDiscover,
+              onNeedAccount: needAccount,
+              onCreated: handleAccountCreated,
+              onAccount: handleAccountStatus,
             }))
           : null,
         layer);
@@ -4315,143 +5035,6 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * One reachable address of this machine (task-17 serverUrls[]).
-     * @param {object} props - `entry` ({url, kind, label, recommended}), `muted`.
-     * @returns {object} row element.
-     */
-    function AddressRow(props) {
-      const entry = props.entry || {};
-      const url = typeof entry.url === 'string' ? entry.url : '';
-      const state = useCopyText(url);
-      /* The relay's host label is already a user-facing name, but it is sent
-       * in the host locale; localize the kind instead so en stays English. */
-      const kind = entry.kind === 'relay'
-        ? addressKindLabel('relay')
-        : (typeof entry.label === 'string' && entry.label !== ''
-          ? entry.label
-          : addressKindLabel(entry.kind));
-      const reachable = isReachableAddress(entry);
-      const preferred = props.preferred === true && reachable;
-      const loopback = entry.kind === 'loopback';
-      const action = t('connect.copyField', { field: url });
-      return h('div', {
-        className: 'dshc-addrRow',
-        'data-recommended': preferred ? 'true' : 'false',
-        'data-muted': loopback || !reachable ? 'true' : 'false',
-        'data-unreachable': reachable ? 'false' : 'true',
-      },
-      h('span', {
-        className: 'dshc-addrDot',
-        'data-recommended': preferred ? 'true' : 'false',
-        'aria-hidden': 'true',
-      }),
-      h('span', { className: 'dshc-addrKind' }, kind),
-      h('code', { className: 'dshc-addrUrl', title: url }, url),
-      !reachable
-        ? h('span', { className: 'dshc-addrBadge dshc-addrUnreachable' }, t('addr.unreachable'))
-        : null,
-      preferred ? h('span', { className: 'dshc-addrBadge' }, t('addr.recommended')) : null,
-      h('button', {
-        type: 'button',
-        className: 'dshc-copyRowBtn',
-        'data-copied': state.copied ? 'true' : 'false',
-        'aria-label': action,
-        title: state.copied ? t('connect.copied') : action,
-        disabled: url === '',
-        onClick: () => { void state.copy(); },
-      }, state.copied ? h(IconCheck, { size: 13 }) : h(IconCopy, { size: 13 })),
-      h('span', { className: 'dshc-sr', role: 'status', 'aria-live': 'polite' },
-        state.copied ? t('connect.copied') : (state.failed ? t('connect.copyFailed') : '')));
-    }
-
-    /**
-     * 「本机地址」 block: every reachable candidate, recommended first, loopback
-     * muted last, with the loopback-only warning when nothing else exists.
-     * When the relay feature is on, its link state also sits under the rows.
-     * @param {object} props - `serverUrls`, `loopbackOnly`, `relay`.
-     * @returns {object|null} card element, or null when the host sends nothing.
-     */
-    function AddressCard(props) {
-      let urls = orderServerUrls(Array.isArray(props.serverUrls) ? props.serverUrls : []);
-      const fallbackUrl = typeof props.serverUrl === 'string' && props.serverUrl !== '' ? props.serverUrl : '';
-      /* No port to advertise: the host sends an empty list. Show the single
-       * serverUrl as a loopback candidate so the warning still explains it. */
-      if (urls.length === 0) {
-        if (fallbackUrl === '') return null;
-        urls = [{ url: fallbackUrl, kind: 'loopback', recommended: true }];
-      }
-      const relay = props.relay && typeof props.relay === 'object' ? props.relay : null;
-      const relayPhase = relayPhaseOf(relay);
-      const relayConnected = relay !== null && relay.enabled === true && relayPhase === 'connected';
-      /* A relay row is informational until its link is up: it must not hide
-       * the loopback-only warning (the other machines still cannot connect).
-       * Only the non-relay candidates decide whether a usable address exists. */
-      const localCandidates = urls.filter((entry) => entry.kind !== 'relay');
-      const loopbackOnly = relayConnected
-        ? false
-        : (props.loopbackOnly === true
-          || (localCandidates.length > 0 && localCandidates.every((entry) => entry.kind === 'loopback')));
-      const preferredUrl = preferredServerUrl(urls);
-      const tunnel = props.tunnel && typeof props.tunnel === 'object' ? props.tunnel : null;
-      let tunnelLine = null;
-      if (tunnel !== null && tunnel.enabled === true) {
-        if (typeof tunnel.error === 'string' && tunnel.error !== '') {
-          tunnelLine = h('p', { className: 'dshc-addrInlineWarn' },
-            t('addr.tunnelError', { message: tunnel.error }));
-        } else if (tunnel.configured !== true) {
-          tunnelLine = h('p', { className: 'dshc-addrListen' }, t('addr.tunnelPending'));
-        }
-      }
-      /* The relay URL is public and usually https on 443; the tailscale
-       * example must keep describing the local listener port instead. */
-      const listenerPort = props.listener && typeof props.listener.port === 'number'
-        ? String(props.listener.port)
-        : addressPort(localCandidates.length > 0 ? localCandidates : urls);
-      const listenerHost = props.listener && typeof props.listener.host === 'string' && props.listener.host !== ''
-        ? props.listener.host
-        : '';
-      const listenerAddress = listenerHost === ''
-        ? ''
-        : `${listenerHost}${listenerPort === '' ? '' : `:${listenerPort}`}`;
-      /* The link's own state sits directly under the rows: muted while it is
-       * coming up, amber (with the fix) when it broke. */
-      let relayLine = null;
-      if (relay !== null && relay.enabled === true) {
-        if (relayPhase === 'failed') {
-          relayLine = h('p', { className: 'dshc-relayLine', 'data-kind': 'failed', role: 'status' },
-            t('relay.failedLine', { message: relayMessageOf(relay) }));
-        } else if (relayPhase === 'connecting' || relayPhase === 'idle') {
-          relayLine = h('p', { className: 'dshc-relayLine', 'data-kind': 'muted', role: 'status' },
-            t('relay.connecting'));
-        }
-      }
-      return h('div', { className: 'dshc-card2' },
-        h('div', { className: 'dshc-card2Head' },
-          h('span', { className: 'dshc-card2Title' }, t('addr.title'))),
-        h('div', { className: 'dshc-addrList' }, urls.map((entry) => h(AddressRow, {
-          key: entry.url,
-          entry,
-          preferred: entry.url === preferredUrl,
-        }))),
-        relayLine,
-        listenerAddress !== ''
-          ? h('p', { className: 'dshc-addrListen' }, t('addr.listening', { address: listenerAddress }))
-          : null,
-        tunnelLine,
-        loopbackOnly
-          ? h('div', { className: 'dshc-addrWarn' },
-            h('p', { className: 'dshc-addrWarnText' }, t('addr.loopbackOnly')),
-            h('div', { className: 'dshc-copyStack' },
-              h(CopyRow, {
-                label: t('addr.example'),
-                value: `tailscale serve --bg --https=8443 http://127.0.0.1:${listenerPort === '' ? '<port>' : listenerPort}`,
-                stacked: true,
-              })),
-            h('p', { className: 'dshc-hint' }, t('addr.loopbackHint')))
-          : h('p', { className: 'dshc-hint' }, t('addr.hint')));
-    }
-
-    /**
      * Which source the effective relay url came from, when the host reports
      * it: `'ui'` is the override this card saved, `'config'` is the file
      * default. Hosts that predate the url override send nothing.
@@ -4480,11 +5063,11 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 「中继」 card under the 本机地址 block: the relay link that makes this
-     * machine reachable from other machines and phones without a public IP or
-     * an open port. The card is self-sufficient — it takes the relay address,
-     * enables it, and changes it, so setting the relay up is one click here
-     * instead of editing a config file.
+     * 「中继」 card in 高级: the relay link that makes this machine reachable
+     * from other machines and phones without a public IP or an open port. The
+     * card is self-sufficient — it takes the relay address, enables it, and
+     * changes it, so setting the relay up is one click here instead of editing
+     * a config file.
      * @param {object} props - `relay` (`state.relay`), `busy`, `error`,
      *   `onToggle(enabled)`, `onEnable(url)`, `onSaveUrl(url)`.
      * @returns {object|null} card element, or null when the host is silent.
@@ -4599,7 +5182,7 @@ window.__ModuleLoader__.load({
             h(CopyRow, { label: t('relay.urlLabel'), value: publicUrl, stacked: true }))
           : null,
         phase === 'failed'
-          ? h('p', { className: 'dshc-relayLine', 'data-kind': 'failed' },
+          ? h('p', { className: 'dshc-relayLine', 'data-kind': 'failed', role: 'status' },
             t('relay.failedLine', { message: relayMessageOf(relay) }))
           : null,
         formMode !== null

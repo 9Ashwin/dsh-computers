@@ -21,6 +21,8 @@ import { createTunnel } from './lib/tunnel.js'
 import { createRelay, normalizeRelayUrl } from './lib/relay-manager.js'
 import { HUB_ID_PATTERN, isHubId, readRelayIdentity, writeRelayIdentity } from './lib/relay-identity.js'
 import { createFleetIdentity } from './lib/fleet-identity.js'
+import { createAccountManager, machineNameOf, preferNonLoopback } from './lib/account.js'
+import { resolveBaseUrl } from './lib/http.js'
 import { createSelectionStore } from './lib/selection.js'
 import { majorMinor } from './lib/version.js'
 import { resolveStateDir, createStore } from './lib/state.js'
@@ -33,7 +35,7 @@ export const name = 'dsh-computers'
 export const inject = ['tools', 'webServer']
 
 /** Version reported by `/api/dsh-computers/health` (and asserted by the smoke harness). */
-export const PLUGIN_VERSION = '1.7.3'
+export const PLUGIN_VERSION = '1.8.0'
 
 /** The machine agent bundle, served at request time (never imported). */
 const AGENT_URL = new URL('./agent/dsh-computers-agent.mjs', import.meta.url)
@@ -187,7 +189,7 @@ export function resolveConfig(raw) {
   // Opt-in only: a deployment that never sets `relay.enabled` behaves exactly
   // as before. `url` is required when enabled — there is deliberately no
   // default relay host, the operator names the service (e.g.
-  // `wss://dsh-relay.nextai.show`). `hubId` is usually minted and persisted by the
+  // `wss://relay.example.com`). `hubId` is usually minted and persisted by the
   // manager; setting it here pins the address explicitly.
   const relay = { ...DEFAULTS.relay }
   if (raw.relay !== undefined && raw.relay !== null) {
@@ -244,7 +246,7 @@ export function resolveConfig(raw) {
     }
   }
   if (relay.enabled && relay.url === '') {
-    throw configError("relay.url is required when relay is enabled (e.g. relay: { enabled: true, url: 'wss://dsh-relay.nextai.show' })")
+    throw configError("relay.url is required when relay is enabled (e.g. relay: { enabled: true, url: 'wss://relay.example.com' })")
   }
 
   return Object.freeze({
@@ -281,6 +283,16 @@ export function apply(ctx, config) {
     if (value !== null && typeof value === 'object' && !Array.isArray(value)) hubDeps = value
   } catch {
     hubDeps = {}
+  }
+  // Account-center seam (v1.8.0): the smoke harness injects a short heartbeat
+  // so the 60 s re-registration is assertable without waiting a minute.
+  // Guarded for the same reason as `ctx.hubDeps` above.
+  let accountDeps = {}
+  try {
+    const value = ctx === null || typeof ctx !== 'object' ? undefined : ctx.accountDeps
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) accountDeps = value
+  } catch {
+    accountDeps = {}
   }
   const onWarn = (message) => {
     try {
@@ -391,6 +403,49 @@ export function apply(ctx, config) {
     // is involved (the state directory comes from the resolved config).
     const fleet = createFleetIdentity({ stateDir, onWarn })
 
+    // v1.8.0: the account center. The relay doubles as an account server: this
+    // machine logs in (or creates an account), registers itself in the
+    // account's device directory, and every machine in the same account can
+    // therefore see the others with no per-machine pairing. The credential
+    // document (`account.json`, 0600) and the stable machineId (`machine.json`)
+    // live beside relay.json/fleet.json; the secret never leaves this host.
+    //
+    // Device facts are resolved lazily on every registration, so a relay that
+    // connects later (or a settings-page address change) is picked up without a
+    // reload: prefer the relay's public entry while the link is enabled, else
+    // the address the browser most recently used, else the advertised origin
+    // with a non-loopback spelling when one exists.
+    const account = createAccountManager({
+      stateDir,
+      heartbeatMs: Number.isSafeInteger(accountDeps.heartbeatMs) && accountDeps.heartbeatMs > 0
+        ? accountDeps.heartbeatMs
+        : undefined,
+      describe: () => {
+        let info = null
+        try {
+          info = relay.status()
+        } catch {
+          info = null
+        }
+        if (info !== null && info.enabled === true && typeof info.publicUrl === 'string' && info.publicUrl !== '') {
+          return {
+            hubId: typeof info.hubId === 'string' ? info.hubId : '',
+            entryUrl: info.publicUrl,
+            name: machineNameOf(resolved.relay.name),
+          }
+        }
+        // No relay: the heartbeat uses the browser-observed advertised address,
+        // falling back to this plugin's own origin resolution.
+        return { hubId: '', entryUrl: '', name: machineNameOf(resolved.relay.name) }
+      },
+      fallbackEntryUrl: () => preferNonLoopback(resolveBaseUrl({ ctx, config: resolved })),
+      onWarn,
+    })
+    ctx.effect(() => {
+      account.start()
+      return () => account.dispose()
+    }, 'dsh-computers: account center heartbeat')
+
     // Routes first (the browser page and the agents can arrive immediately),
     // then the tools and the prompt section.
     createRoutes({
@@ -407,6 +462,7 @@ export function apply(ctx, config) {
       tunnel,
       relay,
       fleet,
+      account,
       onWarn,
     })
     createTools({ ctx, config: resolved, store, hub, selections, access, fsOps, version: PLUGIN_VERSION, onWarn })

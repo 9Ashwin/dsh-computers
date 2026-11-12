@@ -1,5 +1,7 @@
 # 接入：填一个地址
 
+> `relay.example.com` 是占位示例。中继跑在你自己机器上，域名和端口由你决定（配置文件或界面里填），项目不绑定任何域名。
+
 > v1.7.0。目标：**只填一个地址，这台机器就接入舰队**。
 
 ---
@@ -30,7 +32,7 @@ v1.7.1 起，插件的**日常功能全在界面里**，配置文件只需要：
 
 `role: both` 是默认值，不用写。只有这几类"策略"才值得放配置：`execEnabled`（安全开关）、`minAgentVersion`（运维强制升级）、`stateDir`（部署位置）。
 
-中继也是界面配置：设置 → 电脑 → **高级 → 中继** → 填 `wss://dsh-relay.nextai.show` → 启用。地址持久化在 `relay.json`，不用改配置。
+中继也是界面配置：设置 → 电脑 → **高级 → 中继** → 填 `wss://relay.example.com` → 启用。地址持久化在 `relay.json`，不用改配置。
 
 ---
 
@@ -41,13 +43,13 @@ v1.7.1 起，插件的**日常功能全在界面里**，配置文件只需要：
 得到一串：
 
 ```
-https://dsh.nextai.show#join=dshf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+https://dsh.example.com#join=dshf_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
 或者走中继：
 
 ```
-https://dsh-relay.nextai.show/r/hub_xxx#join=dshf_xxxx…
+https://relay.example.com/r/hub_xxx#join=dshf_xxxx…
 ```
 
 > `#` 后面是 fragment，**浏览器/代理都不会把它发到服务器**，所以这串 token 不会出现在访问日志里。
@@ -64,8 +66,8 @@ https://dsh-relay.nextai.show/r/hub_xxx#join=dshf_xxxx…
 没有 DSH 的机器（无头服务器、Linux）用命令行：
 
 ```bash
-curl -fsSL 'https://dsh.nextai.show/api/dsh-computers/agent.mjs' -o ~/.dsh-computers/agent.mjs
-node ~/.dsh-computers/agent.mjs enroll --server 'https://dsh.nextai.show#join=dshf_xxxx'
+curl -fsSL 'https://dsh.example.com/api/dsh-computers/agent.mjs' -o ~/.dsh-computers/agent.mjs
+node ~/.dsh-computers/agent.mjs enroll --server 'https://dsh.example.com#join=dshf_xxxx'
 node ~/.dsh-computers/agent.mjs service install
 ```
 
@@ -77,14 +79,14 @@ node ~/.dsh-computers/agent.mjs service install
 设置 → 电脑
 
 ┌─ 接入 ────────────────────────────────────────────┐
-│ 接入地址  [ https://dsh-relay.nextai.show/r/hub_… ]  │
+│ 接入地址  [ https://relay.example.com/r/hub_… ]  │
 │                                        [ 连接 ]     │
 │ 用加入密钥 ›                                        │
 └───────────────────────────────────────────────────┘
 
 已连接的电脑
-  AshwindeMac-mini.local  执行 文件 后台任务  ● 在线
-  mervyndeMacBook-Air.local  执行 文件 后台任务  ● 在线
+  my-mac-mini.local  执行 文件 后台任务  ● 在线
+  my-macbook-air.local  执行 文件 后台任务  ● 在线
 
 ▸ 高级（本机地址、中继状态、Tailscale、局域网）
 ```

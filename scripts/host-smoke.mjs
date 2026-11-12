@@ -37,6 +37,7 @@
 
 import assert from 'node:assert/strict'
 import { spawnSync } from 'node:child_process'
+import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer, request as httpRequest } from 'node:http'
 import { tmpdir } from 'node:os'
@@ -60,6 +61,10 @@ import {
   FLEET_IDENTITY_VERSION, ensureFleetIdentity, fleetIdentityFile, isJoinToken, mintJoinToken,
   readFleetIdentity, rotateFleetIdentity, writeFleetIdentity,
 } from '../lib/fleet-identity.js'
+import {
+  ACCOUNT_VERSION, MACHINE_ID_PATTERN, accountFile, deriveRelayPorts, discoverRelayCandidates,
+  machineFile, normalizeRelayBase, readAccountIdentity, readMachineId,
+} from '../lib/account.js'
 import * as contracts from '../lib/contracts.js'
 import {
   DENY_CODES, OPERATIONS, OPERATION_REQUIREMENTS, TOOL_OPERATIONS,
@@ -172,6 +177,9 @@ function createFakeContext() {
     // Relay link seam (v1.6.0): declared so the strict proxy allows the read;
     // a phase that wants a fake hub-link assigns it before mount().
     relayDeps: undefined,
+    // Account-center seam (v1.8.0): a short heartbeat so the 60 s registration
+    // loop is assertable without waiting a minute.
+    accountDeps: undefined,
     tools: {
       register(definition) {
         if (tools.has(definition.name)) throw new Error(`duplicate tool ${definition.name}`)
@@ -270,13 +278,15 @@ function withoutHealth(list) {
   return list.map(({ health, ...rest }) => rest)
 }
 
-async function mount(config, { addressDeps, webServerHost, tunnelExec, hubDeps, relayDeps } = {}) {
+async function mount(config, { addressDeps, webServerHost, tunnelExec, hubDeps, relayDeps, accountDeps } = {}) {
   const fake = createFakeContext()
   if (addressDeps !== undefined) fake.ctx.addressDeps = addressDeps
   // R5b test seam: an injected clock + short lease for the presence sweep.
   if (hubDeps !== undefined) fake.ctx.hubDeps = hubDeps
   // v1.6.0 relay seam: a fake hub-link factory, so no relay is dialled.
   if (relayDeps !== undefined) fake.ctx.relayDeps = relayDeps
+  // v1.8.0 account seam: a short heartbeat interval for the smoke run.
+  if (accountDeps !== undefined) fake.ctx.accountDeps = accountDeps
   if (typeof webServerHost === 'string' && webServerHost !== '') fake.setHost(webServerHost)
   if (typeof tunnelExec === 'function') fake.ctx.tunnelExec = tunnelExec
   apply(fake.ctx, config)
@@ -4586,7 +4596,7 @@ const RELAY_OFF = Object.freeze({
 })
 
 /** The relay service this build targets. */
-const RELAY_URL = 'wss://dsh-relay.nextai.show'
+const RELAY_URL = 'wss://relay.example.com'
 
 /** A minted hubId: `hub_` + 32 hex characters (16 random bytes). */
 const HUB_ID_SHAPE = /^hub_[0-9a-f]{32}$/
@@ -4695,18 +4705,18 @@ async function phaseS(root) {
     // default relay host, so the error names the service to use.
     assert.throws(() => resolveConfig({ relay: true }), /relay\.url is required when relay is enabled/)
     assert.throws(() => resolveConfig({ relay: { enabled: true } }), /relay\.url is required when relay is enabled/)
-    assert.throws(() => resolveConfig({ relay: { enabled: true, url: 'ftp://dsh-relay.nextai.show' } }), /relay\.url must be ws:\/\/ or wss:\/\//)
-    assert.throws(() => resolveConfig({ relay: { enabled: true, url: 'dsh-relay.nextai.show' } }), /relay\.url must be an absolute/)
-    assert.throws(() => resolveConfig({ relay: { enabled: true, url: 'wss://dsh-relay.nextai.show/ws' } }), /relay\.url must not carry a path/)
-    const normalized = resolveConfig({ relay: { enabled: true, url: 'https://dsh-relay.nextai.show/' } })
-    assert.equal(normalized.relay.url, 'wss://dsh-relay.nextai.show')
+    assert.throws(() => resolveConfig({ relay: { enabled: true, url: 'ftp://relay.example.com' } }), /relay\.url must be ws:\/\/ or wss:\/\//)
+    assert.throws(() => resolveConfig({ relay: { enabled: true, url: 'relay.example.com' } }), /relay\.url must be an absolute/)
+    assert.throws(() => resolveConfig({ relay: { enabled: true, url: 'wss://relay.example.com/ws' } }), /relay\.url must not carry a path/)
+    const normalized = resolveConfig({ relay: { enabled: true, url: 'https://relay.example.com/' } })
+    assert.equal(normalized.relay.url, 'wss://relay.example.com')
     assert.ok(Object.isFrozen(normalized.relay), 'the relay config is frozen')
     assert.ok(Object.isFrozen(normalized), 'the resolved config is frozen')
     assert.equal(
-      resolveConfig({ relay: { publicUrl: 'https://dsh-relay.nextai.show/r/hub_x/' } }).relay.publicUrl,
-      'https://dsh-relay.nextai.show/r/hub_x',
+      resolveConfig({ relay: { publicUrl: 'https://relay.example.com/r/hub_x/' } }).relay.publicUrl,
+      'https://relay.example.com/r/hub_x',
     )
-    assert.throws(() => resolveConfig({ relay: { publicUrl: 'wss://dsh-relay.nextai.show' } }), /relay\.publicUrl must use http or https/)
+    assert.throws(() => resolveConfig({ relay: { publicUrl: 'wss://relay.example.com' } }), /relay\.publicUrl must use http or https/)
     assert.throws(() => resolveConfig({ relay: { publicUrl: '/r/hub_x' } }), /relay\.publicUrl must be an absolute/)
     assert.equal(resolveConfig({ relay: { accessKey: 'k'.repeat(256) } }).relay.accessKey.length, 256)
     assert.throws(() => resolveConfig({ relay: { accessKey: 'k'.repeat(257) } }), /relay\.accessKey must be at most 256/)
@@ -4727,12 +4737,12 @@ async function phaseS(root) {
   })
 
   await check('relay: url helpers normalise the relay address and derive the entry', async () => {
-    assert.deepEqual(normalizeRelayUrl('https://dsh-relay.nextai.show/'), { url: 'wss://dsh-relay.nextai.show', error: null })
+    assert.deepEqual(normalizeRelayUrl('https://relay.example.com/'), { url: 'wss://relay.example.com', error: null })
     assert.deepEqual(normalizeRelayUrl('http://127.0.0.1:8080'), { url: 'ws://127.0.0.1:8080', error: null })
     assert.equal(normalizeRelayUrl('').url, '')
-    assert.match(normalizeRelayUrl('ftp://dsh-relay.nextai.show').error, /ws:\/\/ or wss:\/\//)
-    assert.match(normalizeRelayUrl('wss://dsh-relay.nextai.show/ws').error, /must not carry a path/)
-    assert.equal(deriveRelayPublicUrl('', RELAY_URL, 'hub_x'), 'https://dsh-relay.nextai.show/r/hub_x')
+    assert.match(normalizeRelayUrl('ftp://relay.example.com').error, /ws:\/\/ or wss:\/\//)
+    assert.match(normalizeRelayUrl('wss://relay.example.com/ws').error, /must not carry a path/)
+    assert.equal(deriveRelayPublicUrl('', RELAY_URL, 'hub_x'), 'https://relay.example.com/r/hub_x')
     assert.equal(deriveRelayPublicUrl('https://edge.example/r/hub_x/', RELAY_URL, 'hub_x'), 'https://edge.example/r/hub_x')
     assert.match(mintHubId(), HUB_ID_SHAPE)
   })
@@ -4772,7 +4782,7 @@ async function phaseS(root) {
       ...FAST_CONFIG,
       stateDir: relayDir,
       publicUrl: 'https://public.example.com',
-      relay: { enabled: true, url: 'https://dsh-relay.nextai.show/' },
+      relay: { enabled: true, url: 'https://relay.example.com/' },
     }, { relayDeps: fakeRelayDeps(link) })
     let hubId
     try {
@@ -4782,7 +4792,7 @@ async function phaseS(root) {
       assert.equal(connecting.configured, true)
       assert.match(connecting.hubId, HUB_ID_SHAPE)
       assert.equal(connecting.url, RELAY_URL)
-      assert.equal(connecting.publicUrl, `https://dsh-relay.nextai.show/r/${connecting.hubId}`)
+      assert.equal(connecting.publicUrl, `https://relay.example.com/r/${connecting.hubId}`)
       assert.equal(connecting.connectedAt, null)
       assert.equal(connecting.lastError, null)
       assert.equal(connecting.streams, 0)
@@ -5608,7 +5618,7 @@ async function phaseV(root) {
 
       // Persist the address only: no dial yet (the relay is off), but the UI
       // can now offer the switch — this is the "no config at all" path.
-      const setUrl = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { url: 'https://dsh-relay.nextai.show/' } })
+      const setUrl = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { url: 'https://relay.example.com/' } })
       assert.equal(setUrl.status, 200)
       assert.equal(setUrl.data.url, RELAY_URL, 'the address is normalised to wss://')
       assert.equal(setUrl.data.urlSource, 'ui')
@@ -5630,7 +5640,7 @@ async function phaseV(root) {
       assert.match(enabled.data.hubId, HUB_ID_SHAPE)
       assert.equal(enabled.data.url, RELAY_URL)
       assert.equal(enabled.data.urlSource, 'ui')
-      assert.equal(enabled.data.publicUrl, `https://dsh-relay.nextai.show/r/${enabled.data.hubId}`)
+      assert.equal(enabled.data.publicUrl, `https://relay.example.com/r/${enabled.data.hubId}`)
       assert.equal(fake.links.length, 1, 'enabling dials the UI address')
       assert.equal(fake.links[0].options.relayUrl, RELAY_URL)
       const doc = readRelayDoc(dir)
@@ -5653,7 +5663,7 @@ async function phaseV(root) {
     let hubId
     try {
       const enabled = await call(firstApp.origin, `${API}/relay/enable`, {
-        method: 'POST', body: { enabled: true, url: 'https://dsh-relay.nextai.show' },
+        method: 'POST', body: { enabled: true, url: 'https://relay.example.com' },
       })
       assert.equal(enabled.status, 200)
       hubId = enabled.data.hubId
@@ -5688,7 +5698,7 @@ async function phaseV(root) {
     const app = await mount({ ...FAST_CONFIG, stateDir: dir, relay: {} }, { relayDeps: fake.deps })
     try {
       const response = await call(app.origin, `${API}/relay/enable`, {
-        method: 'POST', body: { enabled: true, url: 'https://dsh-relay.nextai.show' },
+        method: 'POST', body: { enabled: true, url: 'https://relay.example.com' },
       })
       assert.equal(response.status, 200)
       assert.equal(response.data.enabled, true)
@@ -5722,7 +5732,7 @@ async function phaseV(root) {
       fake.links[0].set({ state: 'open', connectedAt: Date.now() })
       await waitFor(() => relayOf(app.origin), (relay) => relay.state === 'connected', 5000, 'connected relay')
 
-      const nextUrl = 'wss://relay2.nextai.show'
+      const nextUrl = 'wss://relay2.example.com'
       const changed = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { url: nextUrl } })
       assert.equal(changed.status, 200)
       assert.equal(changed.data.url, nextUrl)
@@ -5730,7 +5740,7 @@ async function phaseV(root) {
       assert.equal(changed.data.enabled, true, 'changing the address keeps the relay on')
       assert.equal(changed.data.hubId, hubId, 'the hubId survives an address change')
       assert.equal(changed.data.state, 'connecting', 'the new link is dialling')
-      assert.equal(changed.data.publicUrl, `https://relay2.nextai.show/r/${hubId}`)
+      assert.equal(changed.data.publicUrl, `https://relay2.example.com/r/${hubId}`)
       assert.equal(fake.links.length, 2, 'the change dials a fresh link')
       assert.equal(fake.links[0].stopped >= 1, true, 'the old link is disposed first')
       assert.equal(fake.links[1].options.relayUrl, nextUrl)
@@ -5760,7 +5770,7 @@ async function phaseV(root) {
     try {
       const before = await waitFor(() => relayOf(app.origin), (relay) => relay.state === 'connecting', 4000, 'config relay')
       const hubId = before.hubId
-      const overridden = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { url: 'https://relay2.nextai.show' } })
+      const overridden = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { url: 'https://relay2.example.com' } })
       assert.equal(overridden.status, 200)
       assert.equal(overridden.data.urlSource, 'ui')
       assert.equal(fake.links.length, 2)
@@ -5809,9 +5819,9 @@ async function phaseV(root) {
     const app = await mount({ ...FAST_CONFIG, stateDir: dir, relay: {} }, { relayDeps: fake.deps })
     try {
       const cases = [
-        ['ftp://relay.nextai.show', /ws:\/\/ or wss:\/\//],
-        ['relay.nextai.show', /absolute/],
-        ['wss://relay.nextai.show/ws', /must not carry a path/],
+        ['ftp://relay.example.com', /ws:\/\/ or wss:\/\//],
+        ['relay.example.com', /absolute/],
+        ['wss://relay.example.com/ws', /must not carry a path/],
       ]
       for (const [url, pattern] of cases) {
         const response = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { url } })
@@ -5830,6 +5840,734 @@ async function phaseV(root) {
       assert.equal(fake.links.length, 0, 'a rejected url never dials')
       assert.equal(existsSync(join(dir, 'relay.json')), false, 'a rejected url persists nothing')
       assert.equal((await relayOf(app.origin)).url, '')
+    } finally {
+      await app.close()
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Fake account center (v1.8.0) — a real local HTTP server implementing the
+// relay's account/device contract, so the plugin's outbound calls are exercised
+// over a socket exactly as they are in production.
+// ---------------------------------------------------------------------------
+
+/** Small JSON writer for the fake account center. */
+function accountJson(res, status, payload) {
+  const body = JSON.stringify(payload)
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' })
+  res.end(body)
+}
+
+/** The account-center secret the fake relay mints (`dshf_` + 32 hex). */
+function fakeFleetSecret() {
+  return `dshf_${randomBytes(16).toString('hex')}`
+}
+
+/**
+ * A local fake relay/account center:
+ * `GET /health`, `POST /api/fleet/accounts`, and the account's device directory.
+ * @param {{ adminKey?: string, hangDevices?: boolean }} [options] - behaviour knobs.
+ * @returns {Promise<object>} the relay handle (`origin`, `accounts`, `registrations`, `close()`).
+ */
+async function createFakeAccountCenter({ adminKey = '', hangDevices = false } = {}) {
+  const state = {
+    adminKey,
+    hangDevices,
+    accounts: new Map(),
+    creations: 0,
+    registrations: [],
+    deviceLists: 0,
+    server: null,
+    origin: '',
+  }
+
+  state.server = createServer(async (req, res) => {
+    let url
+    try {
+      url = new URL(typeof req.url === 'string' ? req.url : '/', 'http://relay.invalid')
+    } catch {
+      accountJson(res, 400, { error: 'bad-request' })
+      return
+    }
+    const path = url.pathname
+
+    if (req.method === 'GET' && path === '/health') {
+      accountJson(res, 200, { ok: true, hubs: [], accounts: state.accounts.size })
+      return
+    }
+
+    if (req.method === 'POST' && path === '/api/fleet/accounts') {
+      let body = {}
+      try {
+        body = JSON.parse(await readRequestBody(req)) ?? {}
+      } catch {
+        body = {}
+      }
+      state.creations += 1
+      const presented = req.headers['x-admin-key']
+      // The relay's real rule: an admin key (when configured) is mandatory;
+      // without one, creation is only the first-run bootstrap.
+      if (state.adminKey !== '' && presented !== state.adminKey) {
+        accountJson(res, 403, { error: 'admin-key-required', message: 'an admin key is required' })
+        return
+      }
+      if (state.adminKey === '' && state.accounts.size > 0) {
+        accountJson(res, 403, { error: 'admin-key-required', message: 'this relay already has an account' })
+        return
+      }
+      const accountId = `acct_${randomBytes(8).toString('hex')}`
+      const secret = fakeFleetSecret()
+      const name = typeof body.name === 'string' && body.name.trim() !== '' ? body.name.trim() : 'Smoke Account'
+      state.accounts.set(accountId, { secret, name, devices: new Map() })
+      accountJson(res, 201, { accountId, secret, name })
+      return
+    }
+
+    const match = /^\/api\/fleet\/accounts\/([^/]+)\/devices(?:\/([^/]+))?$/.exec(path)
+    if (match !== null) {
+      const accountId = decodeURIComponent(match[1])
+      const machinePath = match[2] === undefined ? null : decodeURIComponent(match[2])
+      const account = state.accounts.get(accountId)
+      if (account === undefined) {
+        accountJson(res, 404, { error: 'account-not-found', message: 'unknown account' })
+        return
+      }
+      if (req.method === 'POST' && machinePath === null) {
+        let body = {}
+        try {
+          body = JSON.parse(await readRequestBody(req)) ?? {}
+        } catch {
+          body = {}
+        }
+        const presented = typeof body.secret === 'string' ? body.secret : (req.headers['x-fleet-secret'] ?? '')
+        if (presented !== account.secret) {
+          accountJson(res, 401, { error: 'invalid-secret', message: 'wrong account secret' })
+          return
+        }
+        const device = body.device !== null && typeof body.device === 'object' ? body.device : {}
+        if (typeof device.machineId !== 'string' || device.machineId === '') {
+          accountJson(res, 400, { error: 'bad-request', message: 'device.machineId is required' })
+          return
+        }
+        const row = { ...device, lastSeenAt: new Date().toISOString() }
+        account.devices.set(device.machineId, row)
+        state.registrations.push({ accountId, device: { ...device }, lastSeenAt: row.lastSeenAt })
+        accountJson(res, 200, { ok: true, deviceId: device.machineId })
+        return
+      }
+      if (req.method === 'GET' && machinePath === null) {
+        state.deviceLists += 1
+        // A hanging relay: the plugin must give up after its 2 s budget.
+        if (state.hangDevices) return
+        if (req.headers['x-fleet-secret'] !== account.secret) {
+          accountJson(res, 401, { error: 'invalid-secret', message: 'wrong account secret' })
+          return
+        }
+        const nowMs = Date.now()
+        const devices = [...account.devices.values()].map((device) => ({
+          machineId: device.machineId,
+          name: device.name,
+          platform: device.platform,
+          hubId: device.hubId,
+          entryUrl: device.entryUrl,
+          online: nowMs - Date.parse(device.lastSeenAt) <= 120_000,
+          lastSeenAt: device.lastSeenAt,
+        }))
+        accountJson(res, 200, { devices })
+        return
+      }
+      if (req.method === 'DELETE' && machinePath !== null) {
+        if (req.headers['x-fleet-secret'] !== account.secret) {
+          accountJson(res, 401, { error: 'invalid-secret', message: 'wrong account secret' })
+          return
+        }
+        account.devices.delete(machinePath)
+        accountJson(res, 200, { ok: true })
+        return
+      }
+      accountJson(res, 405, { error: 'method-not-allowed' })
+      return
+    }
+
+    accountJson(res, 404, { error: 'not-found' })
+  })
+
+  await new Promise((resolve) => state.server.listen(0, '127.0.0.1', resolve))
+  state.origin = `http://127.0.0.1:${state.server.address().port}`
+  state.close = async () => {
+    await new Promise((resolve) => {
+      state.server.close(() => resolve())
+      state.server.closeAllConnections?.()
+    })
+  }
+  return state
+}
+
+/** Read account.json, asserting it exists and is 0600. */
+function readAccountDoc(dir) {
+  const file = accountFile(dir)
+  assert.ok(existsSync(file), 'account.json must exist')
+  const mode = statSync(file).mode & 0o777
+  assert.equal(mode, 0o600, `account.json must be 0600, got 0${mode.toString(8)}`)
+  return JSON.parse(readFileSync(file, 'utf8'))
+}
+
+/** Read machine.json, asserting it exists and is 0600. */
+function readMachineDoc(dir) {
+  const file = machineFile(dir)
+  assert.ok(existsSync(file), 'machine.json must exist')
+  const mode = statSync(file).mode & 0o777
+  assert.equal(mode, 0o600, `machine.json must be 0600, got 0${mode.toString(8)}`)
+  return JSON.parse(readFileSync(file, 'utf8'))
+}
+
+/** Create an account directly on a fake relay (for the login tests). */
+async function seedRelayAccount(relay, name = 'Seeded Account') {
+  const response = await fetch(`${relay.origin}/api/fleet/accounts`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+  assert.equal(response.status, 201, 'the fake relay must create the account')
+  return await response.json()
+}
+
+/** Whether a TCP port can be bound (i.e. nothing is listening on it). */
+function isPortFree(port) {
+  return new Promise((resolve) => {
+    const probe = createServer()
+    probe.once('error', () => resolve(false))
+    probe.listen(port, '127.0.0.1', () => probe.close(() => resolve(true)))
+  })
+}
+
+/** An advertised-address seam that also reports a LAN IPv4 (for discovery). */
+function lanAddressDeps(extra = {}) {
+  return {
+    probe: async () => ({ ok: true, status: 200, ms: 1, error: null }),
+    probeTailscale: async () => null,
+    interfaces: {
+      lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }],
+      en0: [{ address: '192.168.1.9', family: 'IPv4', internal: false }],
+    },
+    hostname: 'smoke-host.local',
+    ...extra,
+  }
+}
+
+async function phaseW(root) {
+  await check('account: create persists a 0600 login and registers this machine', async () => {
+    const dir = join(root, 'w-create')
+    const relay = await createFakeAccountCenter()
+    const app = await mount({
+      ...FAST_CONFIG,
+      stateDir: dir,
+      publicUrl: 'https://dsh.example.com',
+    }, { accountDeps: { heartbeatMs: 60_000 } })
+    try {
+      const created = await call(app.origin, `${API}/account/create`, {
+        method: 'POST',
+        body: { relayUrl: relay.origin, name: 'Smoke Fleet' },
+      })
+      assert.equal(created.status, 200)
+      assert.equal(created.data.loggedIn, true)
+      assert.match(created.data.accountId, /^acct_[0-9a-f]{16}$/)
+      assert.equal(created.data.name, 'Smoke Fleet')
+      assert.match(created.data.machineId, MACHINE_ID_PATTERN)
+      assert.equal(created.data.devices.length, 1, 'this machine is in the directory right away')
+      assert.equal(created.data.devices[0].machineId, created.data.machineId)
+      assert.equal(created.data.devices[0].entryUrl, 'https://dsh.example.com')
+      assert.equal(created.data.devices[0].online, true)
+      assert.equal(created.data.lastError, null)
+      // The account secret is shown to the user EXACTLY once, on create: it is
+      // the only way to log the other machines in.
+      assert.match(created.data.secret, /^dshf_[0-9a-f]{32}$/, 'create returns the one-time secret')
+      assert.equal(readAccountDoc(dir).secret, created.data.secret)
+
+      // …and never again: neither /account nor /state carries it.
+      const reread = await call(app.origin, `${API}/account`)
+      assert.equal(reread.data.secret, undefined, '/account must not expose the secret')
+      const stateAfterCreate = await call(app.origin, `${API}/state`)
+      assert.equal(
+        JSON.stringify(stateAfterCreate.data).includes(created.data.secret),
+        false,
+        '/state must not expose the secret',
+      )
+
+      // The credential document: schema, 0600, and the machine id it mirrors.
+      const doc = readAccountDoc(dir)
+      assert.equal(doc.version, ACCOUNT_VERSION)
+      assert.equal(doc.relayUrl, relay.origin)
+      assert.equal(doc.accountId, created.data.accountId)
+      assert.equal(doc.machineId, created.data.machineId)
+      assert.equal(doc.name, 'Smoke Fleet')
+      assert.equal(doc.secret, relay.accounts.get(created.data.accountId).secret)
+      assert.equal(readMachineDoc(dir).machineId, created.data.machineId)
+
+      // The secret NEVER appears in a browser payload.
+      const state = await call(app.origin, `${API}/state`)
+      assert.equal(state.status, 200)
+      assert.equal(state.data.account.loggedIn, true)
+      assert.equal(state.data.account.devices.length, 1, '/state carries the cached directory')
+      assert.ok(!state.text.includes(doc.secret), 'the account secret must never leave the host (/state)')
+      const account = await call(app.origin, `${API}/account`)
+      assert.equal(account.status, 200)
+      assert.ok(!account.text.includes(doc.secret), 'the account secret must never leave the host (/account)')
+      assert.ok(!JSON.stringify(account.data).includes('secret'), '/account has no secret field at all')
+
+      // The registration carried the advertised entry + a valid device shape.
+      assert.ok(relay.registrations.length >= 1)
+      const registration = relay.registrations[0]
+      assert.equal(registration.device.machineId, created.data.machineId)
+      assert.match(registration.device.entryUrl, /^https:\/\/dsh\.example\.com\/?$/)
+      assert.equal(typeof registration.device.name, 'string')
+      assert.equal(typeof registration.device.platform, 'string')
+      assert.equal(registration.device.hubId, '', 'no relay link, so no hubId')
+    } finally {
+      await app.close()
+      await relay.close()
+    }
+  })
+
+  await check('account: machineId is stable across reloads and logout/login', async () => {
+    const dir = join(root, 'w-stable')
+    const relay = await createFakeAccountCenter()
+    let app = await mount({ ...FAST_CONFIG, stateDir: dir }, { accountDeps: { heartbeatMs: 60_000 } })
+    try {
+      const created = (await call(app.origin, `${API}/account/create`, {
+        method: 'POST',
+        body: { relayUrl: relay.origin },
+      })).data
+      const machineId = created.machineId
+      assert.match(machineId, MACHINE_ID_PATTERN)
+
+      // A plugin reload (fresh manager) reads the same login and machine id.
+      await app.close()
+      app = await mount({ ...FAST_CONFIG, stateDir: dir }, { accountDeps: { heartbeatMs: 60_000 } })
+      const reloaded = (await call(app.origin, `${API}/account`)).data
+      assert.equal(reloaded.loggedIn, true)
+      assert.equal(reloaded.machineId, machineId, 'the machine id must survive a reload')
+
+      // Logout clears the login but keeps the machine identity (the relay's
+      // device row is keyed by machineId, so a re-login must not duplicate it).
+      const out = await call(app.origin, `${API}/account/logout`, { method: 'POST' })
+      assert.equal(out.status, 200)
+      assert.equal(out.data.loggedIn, false)
+      assert.equal(existsSync(accountFile(dir)), false, 'logout removes account.json')
+      assert.equal(readMachineDoc(dir).machineId, machineId)
+      assert.equal((await call(app.origin, `${API}/state`)).data.account.loggedIn, false)
+
+      const back = await call(app.origin, `${API}/account/login`, {
+        method: 'POST',
+        body: {
+          relayUrl: relay.origin,
+          accountId: created.accountId,
+          secret: relay.accounts.get(created.accountId).secret,
+        },
+      })
+      assert.equal(back.status, 200)
+      assert.equal(back.data.loggedIn, true)
+      assert.equal(back.data.machineId, machineId, 'logging back in keeps the same device identity')
+      assert.equal(back.data.devices.length, 1)
+      assert.equal(back.data.devices[0].machineId, machineId)
+    } finally {
+      await app.close()
+      await relay.close()
+    }
+  })
+
+  await check('account: login verifies the secret and maps relay errors', async () => {
+    const relay = await createFakeAccountCenter()
+    const seeded = await seedRelayAccount(relay)
+    const dir = join(root, 'w-login')
+    const app = await mount({ ...FAST_CONFIG, stateDir: dir }, { accountDeps: { heartbeatMs: 60_000 } })
+    try {
+      const wrong = await call(app.origin, `${API}/account/login`, {
+        method: 'POST',
+        body: { relayUrl: relay.origin, accountId: seeded.accountId, secret: fakeFleetSecret() },
+      })
+      assert.equal(wrong.status, 401)
+      assert.equal(wrong.data.error, 'invalid-secret')
+      assert.equal(existsSync(accountFile(dir)), false, 'a rejected login persists nothing')
+
+      const unknown = await call(app.origin, `${API}/account/login`, {
+        method: 'POST',
+        body: { relayUrl: relay.origin, accountId: 'acct_0000000000000000', secret: seeded.secret },
+      })
+      assert.equal(unknown.status, 404)
+      assert.equal(unknown.data.error, 'account-not-found')
+
+      const missing = await call(app.origin, `${API}/account/login`, {
+        method: 'POST',
+        body: { relayUrl: relay.origin, accountId: seeded.accountId },
+      })
+      assert.equal(missing.status, 400)
+      assert.match(missing.data.message, /secret/)
+
+      const ok = await call(app.origin, `${API}/account/login`, {
+        method: 'POST',
+        body: { relayUrl: relay.origin, accountId: seeded.accountId, secret: seeded.secret },
+      })
+      assert.equal(ok.status, 200)
+      assert.equal(ok.data.loggedIn, true)
+      assert.equal(ok.data.accountId, seeded.accountId)
+      assert.equal(ok.data.devices.length, 1)
+      assert.equal(ok.data.devices[0].machineId, ok.data.machineId)
+      const doc = readAccountDoc(dir)
+      assert.equal(doc.secret, seeded.secret)
+      assert.ok(!JSON.stringify(ok.data).includes(seeded.secret))
+    } finally {
+      await app.close()
+      await relay.close()
+    }
+  })
+
+  await check('account: two machines in one account see each other', async () => {
+    const relay = await createFakeAccountCenter()
+    const dirA = join(root, 'w-fleet-a')
+    const dirB = join(root, 'w-fleet-b')
+    const a = await mount({ ...FAST_CONFIG, stateDir: dirA, publicUrl: 'https://a.example.com' }, { accountDeps: { heartbeatMs: 60_000 } })
+    try {
+      const created = (await call(a.origin, `${API}/account/create`, {
+        method: 'POST',
+        body: { relayUrl: relay.origin, name: 'Team' },
+      })).data
+      const b = await mount({ ...FAST_CONFIG, stateDir: dirB, publicUrl: 'https://b.example.com' }, { accountDeps: { heartbeatMs: 60_000 } })
+      try {
+        const joined = await call(b.origin, `${API}/account/login`, {
+          method: 'POST',
+          body: {
+            relayUrl: relay.origin,
+            accountId: created.accountId,
+            secret: relay.accounts.get(created.accountId).secret,
+          },
+        })
+        assert.equal(joined.status, 200)
+        const machineA = created.machineId
+        const machineB = joined.data.machineId
+        assert.notEqual(machineA, machineB)
+
+        // The whole point: no per-machine pairing — each machine's account view
+        // lists the other one, with the entry URL the relay stored.
+        const listA = (await call(a.origin, `${API}/account`)).data.devices
+        const listB = (await call(b.origin, `${API}/account`)).data.devices
+        assert.equal(listA.length, 2)
+        assert.equal(listB.length, 2)
+        const byIdA = new Map(listA.map((device) => [device.machineId, device]))
+        const byIdB = new Map(listB.map((device) => [device.machineId, device]))
+        assert.ok(byIdA.has(machineB), 'machine A sees machine B')
+        assert.ok(byIdB.has(machineA), 'machine B sees machine A')
+        assert.equal(byIdA.get(machineA).entryUrl, 'https://a.example.com')
+        assert.equal(byIdB.get(machineB).entryUrl, 'https://b.example.com')
+        assert.equal(byIdA.get(machineB).online, true)
+      } finally {
+        await b.close()
+      }
+    } finally {
+      await a.close()
+      await relay.close()
+    }
+  })
+
+  await check('account: the heartbeat re-registers every tick', async () => {
+    const dir = join(root, 'w-heartbeat')
+    const relay = await createFakeAccountCenter()
+    const app = await mount({
+      ...FAST_CONFIG,
+      stateDir: dir,
+      publicUrl: 'https://dsh.example.com',
+    }, { accountDeps: { heartbeatMs: 120 } })
+    try {
+      const created = (await call(app.origin, `${API}/account/create`, {
+        method: 'POST',
+        body: { relayUrl: relay.origin },
+      })).data
+      const machineId = created.machineId
+      const before = relay.registrations.length
+      assert.ok(before >= 1, 'create registers once')
+      await waitFor(
+        async () => relay.registrations.length,
+        (count) => count >= before + 2,
+        4_000,
+        'the heartbeat to re-register twice',
+      )
+      const rows = relay.registrations.filter((entry) => entry.device.machineId === machineId)
+      assert.ok(rows.length >= before + 2)
+      // Every tick reports the same machine id and a valid entry, and the
+      // relay's lastSeenAt advances (that is what keeps the device online).
+      const latest = rows[rows.length - 1]
+      assert.equal(latest.device.entryUrl, 'https://dsh.example.com')
+      const stored = relay.accounts.get(created.accountId).devices.get(machineId)
+      assert.ok(Date.parse(stored.lastSeenAt) >= Date.parse(rows[0].lastSeenAt))
+      const live = (await call(app.origin, `${API}/account`)).data
+      assert.equal(live.devices[0].online, true)
+    } finally {
+      await app.close()
+      await relay.close()
+    }
+  })
+
+  await check('account: registration prefers the relay entry while the link is up', async () => {
+    const dir = join(root, 'w-relay-entry')
+    const relay = await createFakeAccountCenter()
+    const fake = fakeRelayDepsFactory()
+    const app = await mount({
+      ...FAST_CONFIG,
+      stateDir: dir,
+      relay: { enabled: true, url: RELAY_URL },
+    }, { relayDeps: fake.deps, accountDeps: { heartbeatMs: 60_000 } })
+    try {
+      const dialed = await waitFor(() => relayOf(app.origin), (relayInfo) => relayInfo.state === 'connecting', 4_000, 'relay dial')
+      fake.links[0].set({ state: 'open', connectedAt: Date.now() })
+      const connected = await waitFor(() => relayOf(app.origin), (relayInfo) => relayInfo.state === 'connected', 5_000, 'relay connected')
+      assert.equal(connected.hubId, dialed.hubId)
+
+      const created = (await call(app.origin, `${API}/account/create`, {
+        method: 'POST',
+        body: { relayUrl: relay.origin },
+      })).data
+      assert.equal(created.loggedIn, true)
+      // With the relay up, the device is published at the relay entry and
+      // carries the hubId — that is the address other machines dial.
+      const registration = relay.registrations[relay.registrations.length - 1]
+      assert.equal(registration.device.hubId, connected.hubId)
+      assert.equal(registration.device.entryUrl, connected.publicUrl)
+      assert.equal(created.devices.find((device) => device.machineId === created.machineId).entryUrl, connected.publicUrl)
+    } finally {
+      await app.close()
+      await relay.close()
+    }
+  })
+
+  await check('account: a relay failure surfaces lastError without breaking the page', async () => {
+    const dir = join(root, 'w-down')
+    const relay = await createFakeAccountCenter()
+    const app = await mount({
+      ...FAST_CONFIG,
+      stateDir: dir,
+      publicUrl: 'https://dsh.example.com',
+    }, { accountDeps: { heartbeatMs: 60_000 } })
+    try {
+      const created = (await call(app.origin, `${API}/account/create`, {
+        method: 'POST',
+        body: { relayUrl: relay.origin },
+      })).data
+      assert.equal(created.loggedIn, true)
+      await relay.close()
+
+      const account = await call(app.origin, `${API}/account`)
+      assert.equal(account.status, 200, 'a relay outage is not an HTTP failure')
+      assert.equal(account.data.loggedIn, true, 'the local login is still there')
+      assert.deepEqual(account.data.devices, [], 'the protocol says an empty list on failure')
+      assert.match(String(account.data.lastError), /cannot reach the relay|did not answer/)
+
+      // The settings page still loads and shows the outage.
+      const state = await call(app.origin, `${API}/state`)
+      assert.equal(state.status, 200)
+      assert.equal(state.data.account.loggedIn, true)
+      assert.ok(state.data.account.lastError !== null, '/state.account carries the failure')
+      assert.ok(Array.isArray(state.data.computers), 'the rest of the page payload is intact')
+      assert.ok(!state.text.includes(relay.accounts.get(created.accountId).secret))
+    } finally {
+      await app.close()
+      await relay.close()
+    }
+  })
+
+  await check('account: the device list has a 2 s budget', async () => {
+    const dir = join(root, 'w-budget')
+    const relay = await createFakeAccountCenter()
+    const app = await mount({
+      ...FAST_CONFIG,
+      stateDir: dir,
+      publicUrl: 'https://dsh.example.com',
+    }, { accountDeps: { heartbeatMs: 60_000 } })
+    try {
+      await call(app.origin, `${API}/account/create`, { method: 'POST', body: { relayUrl: relay.origin } })
+      relay.hangDevices = true
+      const startedAt = Date.now()
+      const account = await call(app.origin, `${API}/account`)
+      const elapsed = Date.now() - startedAt
+      assert.equal(account.status, 200)
+      assert.ok(elapsed >= 1_800, `the 2 s budget must actually be used (took ${elapsed}ms)`)
+      assert.ok(elapsed < 4_000, `the device list must not hang (took ${elapsed}ms)`)
+      assert.ok(account.data.lastError !== null)
+    } finally {
+      await app.close()
+      await relay.close()
+    }
+  })
+
+  await check('account: corrupt account.json is set aside and the plugin still mounts', async () => {
+    const dir = join(root, 'w-corrupt')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(accountFile(dir), '{ this is not json', { mode: 0o600 })
+    let app = await mount({ ...FAST_CONFIG, stateDir: dir }, { accountDeps: { heartbeatMs: 60_000 } })
+    try {
+      const account = await call(app.origin, `${API}/account`)
+      assert.equal(account.status, 200)
+      assert.equal(account.data.loggedIn, false, 'a corrupt login reads as logged out')
+      assert.equal(readAccountIdentity(dir), null, 'the tolerant reader treats the corrupt document as absent')
+      assert.match(account.data.machineId, MACHINE_ID_PATTERN, 'the machine identity is still minted')
+      assert.equal(readMachineDoc(dir).machineId, account.data.machineId)
+      assert.ok(
+        readdirSync(dir).some((name) => name.startsWith('account.json.corrupt-')),
+        'the corrupt document is moved aside, not silently overwritten',
+      )
+      const state = await call(app.origin, `${API}/state`)
+      assert.equal(state.status, 200)
+      assert.equal(state.data.account.loggedIn, false)
+
+      const machineId = account.data.machineId
+      await app.close()
+      app = await mount({ ...FAST_CONFIG, stateDir: dir }, { accountDeps: { heartbeatMs: 60_000 } })
+      assert.equal((await call(app.origin, `${API}/account`)).data.machineId, machineId, 'the minted id is stable')
+      assert.equal(readMachineId(dir), machineId)
+    } finally {
+      await app.close()
+    }
+  })
+
+  await check('account: browser gate, methods, validation and admin-key mapping', async () => {
+    const dir = join(root, 'w-validate')
+    const relay = await createFakeAccountCenter({ adminKey: 'smoke-admin-key' })
+    const app = await mount({ ...FAST_CONFIG, stateDir: dir }, { accountDeps: { heartbeatMs: 60_000 } })
+    try {
+      // The host request gate runs first on every account route.
+      app.fake.setGate({ requestRejection: (req) => (req.headers['x-smoke-refuse'] === '1' ? 403 : undefined), trustedHosts: [] })
+      for (const [path, method] of [['/account', 'GET'], ['/account/create', 'POST'], ['/account/login', 'POST'], ['/account/logout', 'POST'], ['/account/discover', 'GET']]) {
+        const refused = await raw(app.origin, `${API}${path}`, {
+          method,
+          headers: { 'x-smoke-refuse': '1', ...(method === 'POST' ? { 'content-type': 'application/json' } : {}) },
+          body: method === 'POST' ? '{}' : undefined,
+        })
+        assert.equal(refused.status, 403, `${path} must sit behind the browser gate`)
+      }
+      app.fake.setGate(undefined)
+
+      // Methods.
+      assert.equal((await raw(app.origin, `${API}/account`, { method: 'POST', body: '{}' })).status, 405)
+      assert.equal((await raw(app.origin, `${API}/account/create`)).status, 405)
+      assert.equal((await raw(app.origin, `${API}/account/discover`, { method: 'POST', body: '{}' })).status, 405)
+
+      // Body validation.
+      const missingUrl = await call(app.origin, `${API}/account/create`, { method: 'POST', body: {} })
+      assert.equal(missingUrl.status, 400)
+      assert.match(missingUrl.data.message, /relayUrl is required/)
+      const badUrl = await call(app.origin, `${API}/account/create`, { method: 'POST', body: { relayUrl: 'relay.example.com' } })
+      assert.equal(badUrl.status, 400)
+      assert.equal(badUrl.data.error, 'invalid-relay-url')
+      const badName = await call(app.origin, `${API}/account/create`, {
+        method: 'POST',
+        body: { relayUrl: relay.origin, name: 'x'.repeat(65) },
+      })
+      assert.equal(badName.status, 400)
+      assert.match(badName.data.message, /64 characters/)
+
+      // The relay's admin-key rule is surfaced, not swallowed.
+      const noAdmin = await call(app.origin, `${API}/account/create`, { method: 'POST', body: { relayUrl: relay.origin } })
+      assert.equal(noAdmin.status, 403)
+      assert.equal(noAdmin.data.error, 'admin-key-required')
+      assert.equal(existsSync(accountFile(dir)), false, 'a refused create persists nothing')
+      const withAdmin = await call(app.origin, `${API}/account/create`, {
+        method: 'POST',
+        body: { relayUrl: relay.origin, adminKey: 'smoke-admin-key' },
+      })
+      assert.equal(withAdmin.status, 200)
+      assert.equal(withAdmin.data.loggedIn, true)
+    } finally {
+      await app.close()
+      await relay.close()
+    }
+  })
+
+  await check('account: discovery proposes local relay candidates', async () => {
+    const relay = await createFakeAccountCenter()
+    const relayPort = Number(new URL(relay.origin).port)
+    const dir = join(root, 'w-discover')
+    const app = await mount({
+      ...FAST_CONFIG,
+      stateDir: dir,
+      relay: { url: `ws://127.0.0.1:${relayPort}` },
+    }, { addressDeps: lanAddressDeps(), webServerHost: '0.0.0.0', accountDeps: { heartbeatMs: 60_000 } })
+    try {
+      const discovered = await call(app.origin, `${API}/account/discover`)
+      assert.equal(discovered.status, 200)
+      const urls = discovered.data.candidates.map((candidate) => candidate.url)
+      // The advertised LAN host with the probed relay port.
+      assert.ok(urls.includes(`http://192.168.1.9:${relayPort}`), `expected the LAN candidate, got ${JSON.stringify(urls)}`)
+      assert.equal(discovered.data.candidates.find((candidate) => candidate.url === `http://192.168.1.9:${relayPort}`).source, 'local-relay')
+      // The configured relay is offered too, normalised to http(s).
+      assert.equal(discovered.data.configured.relayUrl, `http://127.0.0.1:${relayPort}`)
+      assert.ok(urls.includes(`http://127.0.0.1:${relayPort}`))
+      assert.equal(discovered.data.candidates.find((candidate) => candidate.url === `http://127.0.0.1:${relayPort}`).source, 'configured')
+      assert.equal(discovered.data.candidates.every((candidate) => candidate.reachable === true), true)
+      // The probe list is 8445 plus the configured explicit port, capped.
+      assert.deepEqual(deriveRelayPorts({ configUrl: `ws://127.0.0.1:${relayPort}` }), [8445, relayPort])
+      assert.deepEqual(normalizeRelayBase(`wss://relay.example.com/`), { url: 'https://relay.example.com', error: null })
+      assert.match(normalizeRelayBase('relay.example.com').error, /absolute address/)
+    } finally {
+      await app.close()
+      await relay.close()
+    }
+  })
+
+  await check('account: discovery uses https when the advertised address is https', async () => {
+    const relay = await createFakeAccountCenter()
+    const relayPort = Number(new URL(relay.origin).port)
+    const dir = join(root, 'w-discover-https')
+    const app = await mount({
+      ...FAST_CONFIG,
+      stateDir: dir,
+      publicUrl: 'https://dsh.example.com',
+      relay: { url: `ws://127.0.0.1:${relayPort}` },
+    }, { addressDeps: lanAddressDeps(), accountDeps: { heartbeatMs: 60_000 } })
+    try {
+      const discovered = await call(app.origin, `${API}/account/discover`)
+      const urls = discovered.data.candidates.map((candidate) => candidate.url)
+      assert.ok(
+        urls.includes(`https://dsh.example.com:${relayPort}`),
+        `an https deployment must propose https candidates, got ${JSON.stringify(urls)}`,
+      )
+      assert.ok(!urls.some((url) => url.startsWith('wss://')), 'candidates are account-center http(s) origins')
+    } finally {
+      await app.close()
+      await relay.close()
+    }
+  })
+
+  await check('account: discovery with nothing listening returns [] and does not hang', async () => {
+    // A port nobody listens on: deterministic "no relay here".
+    const closedPort = await new Promise((resolve) => {
+      const server = createServer()
+      server.listen(0, '127.0.0.1', () => {
+        const port = server.address().port
+        server.close(() => resolve(port))
+      })
+    })
+    const none = await discoverRelayCandidates({
+      candidates: [{ url: 'http://192.168.1.9:3000', kind: 'lan', reachable: true }],
+      ports: [closedPort],
+    })
+    assert.deepEqual(none.candidates, [])
+    assert.deepEqual(none.configured, { relayUrl: '' })
+
+    const dir = join(root, 'w-discover-none')
+    const app = await mount({ ...FAST_CONFIG, stateDir: dir }, { addressDeps: lanAddressDeps(), accountDeps: { heartbeatMs: 60_000 } })
+    try {
+      const startedAt = Date.now()
+      const discovered = await call(app.origin, `${API}/account/discover`)
+      const elapsed = Date.now() - startedAt
+      assert.equal(discovered.status, 200)
+      assert.ok(Array.isArray(discovered.data.candidates))
+      assert.ok(elapsed < 3_000, `discovery must respect its probe budget (took ${elapsed}ms)`)
+      // 8445 is the only port probed when nothing is configured; when it is
+      // genuinely free the answer is the documented empty list.
+      if (await isPortFree(8445)) {
+        assert.deepEqual(discovered.data.candidates, [])
+        assert.deepEqual(discovered.data.configured, { relayUrl: '' })
+      }
     } finally {
       await app.close()
     }
@@ -5863,6 +6601,7 @@ try {
   await phaseT(root)
   await phaseU(root)
   await phaseV(root)
+  await phaseW(root)
 } finally {
   rmSync(root, { recursive: true, force: true })
   clearTimeout(watchdog)
