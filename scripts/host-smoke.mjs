@@ -34,7 +34,10 @@ import { createSelectionStore, MAX_SELECTIONS } from '../lib/selection.js'
 import { MAX_ACCESS_SESSIONS, createAccessStore } from '../lib/access.js'
 import { mintSecret, newComputerId, normalizeDisplayName, sha256Hex, tokenMatches } from '../lib/keys.js'
 import { normalizeState, prunePendingKeys } from '../lib/state.js'
-import { collectServerUrls, resolveAddressPayload } from '../lib/addresses.js'
+import {
+  annotateRouteHealth, chooseRoute, collectServerUrls, probeRoute, refreshRouteHealth,
+  resetRouteHealth, resolveAddressPayload, ROUTE_COOLDOWN_MS,
+} from '../lib/addresses.js'
 import { createTunnel } from '../lib/tunnel.js'
 import * as contracts from '../lib/contracts.js'
 import {
@@ -138,6 +141,9 @@ function createFakeContext() {
     // Reachable-address probe seam (v1.3.3): deterministic loopback-only by
     // default so HTTP assertions do not depend on the test machine's NICs.
     addressDeps: {
+      // R6: routes are probed; the fake URLs in these tests do not resolve, so
+      // the default probe answers "healthy" unless a phase injects its own.
+      probe: async () => ({ ok: true, status: 200, ms: 1, error: null }),
       probeTailscale: async () => null,
       interfaces: { lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }] },
       hostname: 'smoke-host.local',
@@ -222,6 +228,11 @@ async function startListener(fake) {
 }
 
 /** Mount the plugin against a fresh fake context and a real listener. */
+/** Route entries gain R6 health bookkeeping; shape assertions ignore it. */
+function withoutHealth(list) {
+  return list.map(({ health, ...rest }) => rest)
+}
+
 async function mount(config, { addressDeps, webServerHost, tunnelExec, hubDeps } = {}) {
   const fake = createFakeContext()
   if (addressDeps !== undefined) fake.ctx.addressDeps = addressDeps
@@ -3126,13 +3137,16 @@ async function phaseK(root) {
     webServer: { host, port, protocol: 'http:', getOrigin: () => `http://127.0.0.1:${port}` },
   })
   const reqOf = (host = '127.0.0.1:49749') => ({ headers: { host } })
+  const healthyProbe = async () => ({ ok: true, status: 200, ms: 1, error: null })
   const loopbackOnlyDeps = {
+    probe: healthyProbe,
     probeTailscale: async () => null,
     interfaces: { lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }] },
     hostname: 'smoke-host.local',
   }
   // A machine with both Tailscale and a LAN address, plus the desktop bind.
   const tailscaleDeps = {
+    probe: healthyProbe,
     probeTailscale: async () => '100.121.33.106',
     interfaces: {
       lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }],
@@ -3148,7 +3162,7 @@ async function phaseK(root) {
     assert.equal(payload.serverUrl, 'http://127.0.0.1:49749')
     assert.equal(payload.loopbackOnly, true)
     assert.deepEqual(payload.listener, { host: '127.0.0.1', port: 49749, loopback: true })
-    assert.deepEqual(payload.serverUrls, [
+    assert.deepEqual(withoutHealth(payload.serverUrls), [
       { url: 'http://100.121.33.106:49749', kind: 'tailscale', label: 'Tailscale', recommended: false, reachable: false },
       { url: 'http://192.168.8.198:49749', kind: 'lan', label: '局域网', recommended: false, reachable: false },
       { url: 'http://127.0.0.1:49749', kind: 'loopback', label: '本机', recommended: true, reachable: true },
@@ -3162,7 +3176,7 @@ async function phaseK(root) {
     assert.equal(payload.serverUrl, 'http://100.121.33.106:49749')
     assert.equal(payload.loopbackOnly, false)
     assert.deepEqual(payload.listener, { host: '100.121.33.106', port: 49749, loopback: false })
-    assert.deepEqual(payload.serverUrls, [
+    assert.deepEqual(withoutHealth(payload.serverUrls), [
       { url: 'http://100.121.33.106:49749', kind: 'tailscale', label: 'Tailscale', recommended: true, reachable: true },
       { url: 'http://192.168.8.198:49749', kind: 'lan', label: '局域网', recommended: false, reachable: false },
       { url: 'http://127.0.0.1:49749', kind: 'loopback', label: '本机', recommended: false, reachable: false },
@@ -3196,7 +3210,7 @@ async function phaseK(root) {
     })
     assert.equal(payload.serverUrl, 'https://dsh.example.com')
     assert.equal(payload.loopbackOnly, false)
-    assert.deepEqual(payload.serverUrls[0], {
+    assert.deepEqual(withoutHealth(payload.serverUrls)[0], {
       url: 'https://dsh.example.com', kind: 'public', label: '公网', recommended: true, reachable: true,
     })
     assert.ok(payload.serverUrls.some((item) => item.kind === 'tailscale'), 'other candidates are still offered')
@@ -3497,7 +3511,7 @@ async function phaseL(root) {
       })
       assert.equal(state.serverUrl, 'https://hub.tail1234.ts.net:8443')
       assert.equal(state.loopbackOnly, false)
-      assert.deepEqual(state.serverUrls[0], {
+      assert.deepEqual(withoutHealth(state.serverUrls)[0], {
         url: 'https://hub.tail1234.ts.net:8443',
         kind: 'tunnel',
         label: 'Tailscale Serve',
@@ -4333,6 +4347,175 @@ async function phaseQ(root) {
   }
 }
 
+
+/**
+ * Phase R — R6: probe before use, cool a failed route down, keep identity tied
+ * to the computer record rather than to an address.
+ */
+async function phaseR(root) {
+  const dir = join(root, 'r')
+  const computerId = newComputerId()
+  const token = mintSecret()
+  seedState(dir, {
+    version: 1,
+    computers: [seedComputer(computerId, 'Route Box', {
+      tokenHash: sha256Hex(token),
+      capabilities: ['exec'],
+      caps: { exec: true, fs: false, jobs: false, pty: false, tunnel: false },
+      agentVersion: PLUGIN_VERSION,
+    })],
+    pendingKeys: [],
+  })
+  const ctxOf = (host) => ({
+    webServer: { host, port: 49749, protocol: 'http:', getOrigin: () => `http://127.0.0.1:${49749}` },
+  })
+  const reqOf = () => ({ headers: { host: '127.0.0.1:49749' } })
+  const deps = {
+    probeTailscale: async () => '100.121.33.106',
+    interfaces: {
+      lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }],
+      en0: [{ address: '192.168.8.198', family: 'IPv4', internal: false }],
+    },
+    hostname: 'desk.local',
+  }
+  const app = await mount({ ...FAST_CONFIG, stateDir: dir }, { webServerHost: '100.121.33.106' })
+  try {
+    await check('routes: a probe records ok/failed and honours the cooldown', async () => {
+      resetRouteHealth()
+      let clock = 1_000_000
+      const now = () => clock
+      let healthy = true
+      const probe = async (url) => (healthy
+        ? { ok: true, status: 200, ms: 3, error: null }
+        : { ok: false, status: 0, ms: 4, error: 'connect ECONNREFUSED' })
+      const candidates = [
+        { url: 'https://a.example', reachable: true },
+        { url: 'https://b.example', reachable: true },
+      ]
+
+      await refreshRouteHealth(candidates, { probe, now })
+      let annotated = annotateRouteHealth(candidates, { now })
+      assert.deepEqual(annotated.map((item) => item.health.state), ['ok', 'ok'])
+      assert.equal(annotated[0].health.checkedAt, clock)
+      assert.equal(annotated[0].health.cooldownUntil, null)
+
+      // A failure marks the route failed and starts the cooldown.
+      healthy = false
+      clock += 400_000 // past the recheck window, so it is due again
+      await refreshRouteHealth(candidates, { probe, now })
+      annotated = annotateRouteHealth(candidates, { now })
+      assert.deepEqual(annotated.map((item) => item.health.state), ['failed', 'failed'])
+      assert.equal(annotated[0].health.failures, 1)
+      assert.equal(annotated[0].health.cooldownUntil, clock + ROUTE_COOLDOWN_MS)
+
+      // Inside the cooldown it is NOT probed again, even when due by age.
+      let probes = 0
+      const countingProbe = async () => {
+        probes += 1
+        return { ok: true, status: 200, ms: 1, error: null }
+      }
+      clock += 1_000
+      await refreshRouteHealth(candidates, { probe: countingProbe, now })
+      assert.equal(probes, 0, 'a route in cooldown must not be re-probed')
+
+      // After the cooldown it is probed again and can recover.
+      clock += ROUTE_COOLDOWN_MS + 1
+      await refreshRouteHealth(candidates, { probe: countingProbe, now })
+      assert.equal(probes, 2)
+      annotated = annotateRouteHealth(candidates, { now })
+      assert.deepEqual(annotated.map((item) => item.health.state), ['ok', 'ok'])
+      assert.equal(annotated[0].health.failures, 0)
+    })
+
+    await check('routes: a failed route stops being recommended, the next one takes over', async () => {
+      resetRouteHealth()
+      const clock = 2_000_000
+      const now = () => clock
+      // Only the Tailscale route answers; then it stops answering.
+      let tailscaleOk = true
+      const probe = async (url) => {
+        const ok = url.includes('hub.example.com') ? tailscaleOk : true
+        return ok ? { ok: true, status: 200, ms: 2, error: null } : { ok: false, status: 0, ms: 2, error: 'refused' }
+      }
+      // Desktop bind with a configured publicUrl (a tunnel/proxy): the public
+      // route is the preferred one while it answers, and loses the slot when it
+      // stops answering, falling back to the loopback route.
+      const options = {
+        ctx: ctxOf('127.0.0.1'),
+        config: { publicUrl: 'https://hub.example.com', preferAddress: 'auto' },
+        req: reqOf(),
+        probe,
+        now,
+      }
+
+      await refreshRouteHealth(await collectServerUrls(options), { probe, now })
+      const first = await resolveAddressPayload(options)
+      assert.equal(first.serverUrl, 'https://hub.example.com')
+      assert.equal(first.serverUrls.find((item) => item.kind === 'public').health.state, 'ok')
+
+      tailscaleOk = false // now the public probe refuses
+      await refreshRouteHealth(await collectServerUrls(options), { probe, now: () => clock + 400_000 })
+      const second = await resolveAddressPayload({ ...options, now: () => clock + 400_000 })
+      const publicRoute = second.serverUrls.find((item) => item.kind === 'public')
+      assert.equal(publicRoute.health.state, 'failed')
+      assert.equal(publicRoute.recommended, false, 'a failed route must not stay recommended')
+      assert.equal(second.serverUrl, 'http://127.0.0.1:49749', 'the next usable route takes over')
+    })
+
+    await check('routes: a probe that never answers is a failure, not a hang', async () => {
+      resetRouteHealth()
+      const startedAt = Date.now()
+      const outcome = await probeRoute('http://127.0.0.1:9', {
+        timeoutMs: 150,
+        fetchImpl: (url, init) => new Promise((resolve, reject) => {
+          // Reject on abort exactly like fetch does.
+          if (init?.signal) init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })))
+        }),
+      })
+      assert.equal(outcome.ok, false)
+      assert.match(outcome.error, /timeout after 150ms/)
+      assert.ok(Date.now() - startedAt < 2_000, 'the probe must give up on its own budget')
+    })
+
+    await check('routes: /state carries route health and identity is the record, not the address', async () => {
+      resetRouteHealth()
+      const before = await call(app.origin, `${API}/state`)
+      const entry = before.data.computers.find((computer) => computer.id === computerId)
+      assert.ok(entry, 'the computer is listed')
+      const idsBefore = before.data.computers.map((computer) => computer.id)
+      for (const candidate of before.data.serverUrls) {
+        assert.ok(['unknown', 'ok', 'failed'].includes(candidate.health.state), 'health.state is exposed')
+        assert.equal(typeof candidate.health.failures, 'number')
+        assert.ok(candidate.health.checkedAt === null || typeof candidate.health.checkedAt === 'number')
+        assert.ok(candidate.health.cooldownUntil === null || typeof candidate.health.cooldownUntil === 'number')
+      }
+      // Identity: changing the advertised address changes no computer id.
+      const idsAfter = before.data.computers.map((computer) => computer.id)
+      assert.deepEqual(idsAfter, idsBefore)
+      assert.equal(entry.id, computerId, 'the id comes from the record, never from a route')
+      assert.equal(entry.tokenHash === undefined, true, 'the record keeps its secret out of /state')
+      const keys = await call(app.origin, `${API}/keys`, { method: 'POST', body: { os: 'macos' } })
+      assert.ok(keys.data.serverUrls.every((candidate) => candidate.health !== undefined))
+      assert.equal(keys.data.serverUrl, before.data.serverUrl, '/keys and /state agree on the route')
+    })
+
+    await check('routes: chooseRoute never picks a cooling route', async () => {
+      const now = () => 5_000_000
+      const list = annotateRouteHealth([
+        { url: 'https://cool.example', kind: 'public', label: '公网', reachable: true, recommended: true },
+        { url: 'https://warm.example', kind: 'lan', label: '局域网', reachable: true, recommended: false },
+      ], { now })
+      // Simulate a cooldown on the preferred route.
+      list[0].health.cooldownUntil = 5_000_000 + 1_000
+      assert.equal(chooseRoute(list).url, 'https://warm.example')
+      list[1].health.cooldownUntil = 5_000_000 + 1_000
+      assert.equal(chooseRoute(list), null, 'all routes cooling means no recommendation')
+    })
+  } finally {
+    await app.close()
+  }
+}
+
 watchdog.unref()
 
 const root = mkdtempSync(join(tmpdir(), 'dshc-smoke-'))
@@ -4355,6 +4538,7 @@ try {
   await phaseO(root)
   await phaseP(root)
   await phaseQ(root)
+  await phaseR(root)
 } finally {
   rmSync(root, { recursive: true, force: true })
   clearTimeout(watchdog)
