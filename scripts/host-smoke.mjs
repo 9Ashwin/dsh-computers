@@ -157,8 +157,21 @@ function createFakeContext() {
     },
   }
 
+  // Cordis throws when a plugin reads a context property it did not `inject`.
+  // The proxy reproduces that, so a plugin that loads here also loads in the
+  // real host (this is how the `ctx.hubDeps` activation bug was caught).
+  const strictCtx = new Proxy(ctx, {
+    get(target, property, receiver) {
+      if (typeof property === 'symbol' || property === 'then') return Reflect.get(target, property, receiver)
+      if (!(property in target)) {
+        throw new Error(`cannot get property "${String(property)}" without inject`)
+      }
+      return Reflect.get(target, property, receiver)
+    },
+  })
+
   return {
-    ctx,
+    ctx: strictCtx,
     routes,
     tools,
     sections,

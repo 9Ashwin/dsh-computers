@@ -30,7 +30,7 @@ export const name = 'dsh-computers'
 export const inject = ['tools', 'webServer']
 
 /** Version reported by `/api/dsh-computers/health` (and asserted by the smoke harness). */
-export const PLUGIN_VERSION = '1.5.0'
+export const PLUGIN_VERSION = '1.5.1'
 
 /** The machine agent bundle, served at request time (never imported). */
 const AGENT_URL = new URL('./agent/dsh-computers-agent.mjs', import.meta.url)
@@ -199,9 +199,15 @@ export function apply(ctx, config) {
   const resolved = resolveConfig(config)
   // Test seam: the smoke harness injects a clock and a short presence lease so
   // the 45 s expiry is assertable without sleeping. Production never sets it.
-  const hubDeps = ctx !== null && typeof ctx === 'object' && ctx.hubDeps !== null && typeof ctx.hubDeps === 'object'
-    ? ctx.hubDeps
-    : {}
+  // The read is guarded because Cordis throws on undeclared context properties
+  // (the same reason lib/routes.js guards `ctx.addressDeps`).
+  let hubDeps = {}
+  try {
+    const value = ctx === null || typeof ctx !== 'object' ? undefined : ctx.hubDeps
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) hubDeps = value
+  } catch {
+    hubDeps = {}
+  }
   const onWarn = (message) => {
     try {
       // The host's logger is not part of the injected contract; a warning on
