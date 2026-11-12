@@ -768,3 +768,61 @@ agent 侧配合：心跳 10s，连续 2 次无响应即判定连接死亡并重�
 - 身份锚定电脑记录（`computerId` + token），与地址无关。
 
 ## 12
+
+## 12 Relay（中继）
+
+> 状态：v1.6.0。设计细节见 `docs/relay-design.md`，部署见 `docs/relay-deploy.md`。
+
+### 12.1 目的
+
+让**主控（hub）也只需要出站**。hub 拨号到中继，客户端（agent / 浏览器）访问
+`<relay>/r/<hubId>/…`，中继按 `hubId` 配对并转发字节。于是「哪台当主控」由配置决定，
+不再受"谁有公网"约束。
+
+### 12.2 拓扑与端点
+
+| 端点 | 用途 |
+| --- | --- |
+| `GET /health` | `{ ok, hubs: [...] }` |
+| `GET /ws?hub=<hubId>&role=hub` | hub 拨号（WebSocket 升级）；重复注册 → 409 `hub_taken` |
+| `GET /ws?hub=<hubId>&role=client` | 客户端拨号（S2 起） |
+| `*/r/<hubId>/<rest>` | 转发到该 hub：HTTP、SSE 与 **WebSocket 升级** |
+| 未知 / 离线 hub | `502 hub_offline` |
+
+### 12.3 隧道内协议
+
+一条 WSS 上多路复用多个流（`lib/relay/wire.js` + `mux.js`）：
+
+```
+frame = opcode(1) | metaLen(4, BE) | meta(JSON) | payload
+```
+
+| opcode | 语义 |
+| --- | --- |
+| `http_open` / `http_head` / `http_data` / `http_end` / `http_error` | 一条 HTTP 请求/响应流 |
+| `ws_open` / `ws_frame` / `ws_close` | 一条 WebSocket 流（S2） |
+| `ping` / `pong` / `goaway` | 链路保活与优雅关闭 |
+
+上限：meta ≤ 8 KiB、payload ≤ 64 KiB、每 hub ≤ 256 条流、请求体 ≤ 8 MiB。
+
+### 12.4 hub 侧身份与持久化
+
+- `hubId`：`hub_` + 32 位十六进制（`lib/relay-identity.js` 负责持久化），首次启用中继时生成
+- 持久化：`<stateDir>/relay.json`（0600，原子写）——**不放在 `state.json`**，重置电脑列表不得让别人的收藏地址失效
+- 中继记录 `hubId ↔ hub 密钥` 绑定，防止抢占；撤销 = 关闭中继或换 `hubId`
+
+### 12.5 安全边界
+
+- hub 侧 bridge **只允许**打到本机 `127.0.0.1:<自己的 webServer 端口>`：路径必须以 `/` 开头，拒绝绝对 URL、拒绝 `..`，`Host` 头强制覆盖 → 隧道不能变成内网 SSRF 代理
+- 浏览器仍走 DSH 自己的登录态，中继不参与鉴权
+- 端到端加密未实现（信任假设等同 cloudflared/nginx）
+
+### 12.6 `/state.relay`
+
+```json
+{ "enabled": false, "configured": false, "hubId": "", "url": "", "publicUrl": "",
+  "state": "disabled", "connectedAt": null, "lastError": null, "streams": 0 }
+```
+
+`state` ∈ `disabled | idle | connecting | reconnecting | connected | failed | closed`（`connectedAt` 为 epoch 毫秒或 `null`）。启用且连接成功时，
+`serverUrls` 首位出现 `{ "kind": "relay", "label": "中继" }` 候选并被推荐。

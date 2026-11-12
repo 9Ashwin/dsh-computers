@@ -17,7 +17,10 @@
  * the recorded definitions, runtime mode (§10): role gating, runtime.json
  * persistence, connect/enable/disconnect/auto-restart against a fake hub, and
  * base-URL auto-detection (§4.2 proxy headers, Origin rescue, IPv6, sub-path),
- * and per-session target selection (selection routes, tool default, list marker).
+ * per-session target selection (selection routes, tool default, list marker),
+ * and the relay host wiring (v1.6.0): config validation, hubId minting/reuse in
+ * its own relay.json, `/state.relay` for disabled/connecting/connected/failed,
+ * and the `relay` address candidate (first and recommended only while up).
  */
 
 import assert from 'node:assert/strict'
@@ -39,6 +42,8 @@ import {
   resetRouteHealth, resolveAddressPayload, ROUTE_COOLDOWN_MS,
 } from '../lib/addresses.js'
 import { createTunnel } from '../lib/tunnel.js'
+import { createRuntimeStatusRoutes } from '../lib/routes.js'
+import { deriveRelayPublicUrl, mintHubId, normalizeRelayUrl } from '../lib/relay-manager.js'
 import * as contracts from '../lib/contracts.js'
 import {
   DENY_CODES, OPERATIONS, OPERATION_REQUIREMENTS, TOOL_OPERATIONS,
@@ -148,6 +153,9 @@ function createFakeContext() {
       interfaces: { lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }] },
       hostname: 'smoke-host.local',
     },
+    // Relay link seam (v1.6.0): declared so the strict proxy allows the read;
+    // a phase that wants a fake hub-link assigns it before mount().
+    relayDeps: undefined,
     tools: {
       register(definition) {
         if (tools.has(definition.name)) throw new Error(`duplicate tool ${definition.name}`)
@@ -246,11 +254,13 @@ function withoutHealth(list) {
   return list.map(({ health, ...rest }) => rest)
 }
 
-async function mount(config, { addressDeps, webServerHost, tunnelExec, hubDeps } = {}) {
+async function mount(config, { addressDeps, webServerHost, tunnelExec, hubDeps, relayDeps } = {}) {
   const fake = createFakeContext()
   if (addressDeps !== undefined) fake.ctx.addressDeps = addressDeps
   // R5b test seam: an injected clock + short lease for the presence sweep.
   if (hubDeps !== undefined) fake.ctx.hubDeps = hubDeps
+  // v1.6.0 relay seam: a fake hub-link factory, so no relay is dialled.
+  if (relayDeps !== undefined) fake.ctx.relayDeps = relayDeps
   if (typeof webServerHost === 'string' && webServerHost !== '') fake.setHost(webServerHost)
   if (typeof tunnelExec === 'function') fake.ctx.tunnelExec = tunnelExec
   apply(fake.ctx, config)
@@ -1230,6 +1240,7 @@ async function phaseD() {
       minAgentVersion: '',
       preferAddress: 'auto',
       tailscaleServe: { enabled: false, httpsPort: 8443 },
+      relay: { enabled: false, url: '', publicUrl: '', accessKey: '', hubId: '', name: '' },
       stateDir: '',
       keyTtlMinutes: 15,
       heartbeatMs: 20_000,
@@ -4529,6 +4540,336 @@ async function phaseR(root) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Phase S — relay host wiring (v1.6.0, docs/relay-design.md §5/§6.2/§10)
+// ---------------------------------------------------------------------------
+
+/** The documented `/state.relay` shape when relay is off (or no manager). */
+const RELAY_OFF = Object.freeze({
+  enabled: false,
+  configured: false,
+  hubId: '',
+  url: '',
+  publicUrl: '',
+  state: 'disabled',
+  connectedAt: null,
+  lastError: null,
+  streams: 0,
+})
+
+/** The relay service this build targets. */
+const RELAY_URL = 'wss://dsh-relay.nextai.show'
+
+/** A minted hubId: `hub_` + 32 hex characters (16 random bytes). */
+const HUB_ID_SHAPE = /^hub_[0-9a-f]{32}$/
+
+/**
+ * A fake hub-link: no socket, no relay process. It records the options the
+ * manager dialled with and lets a test drive the state machine the manager
+ * polls, so `/state.relay` is assertable end to end.
+ */
+function createFakeHubLink() {
+  const status = { state: 'connecting', connectedAt: null, lastError: null, streams: { open: 0 } }
+  const link = {
+    options: {},
+    started: 0,
+    stopped: 0,
+    handlers: [],
+    start() {
+      link.started += 1
+      return link
+    },
+    stop() {
+      link.stopped += 1
+      status.state = 'closed'
+      status.connectedAt = null
+    },
+    onStream(handler) {
+      link.handlers.push(handler)
+      return () => {}
+    },
+    status() {
+      return { ...status, streams: { ...status.streams } }
+    },
+    set(patch) {
+      Object.assign(status, patch)
+      return link
+    },
+  }
+  return link
+}
+
+/** A relayDeps seam that hands the manager one fake link. */
+function fakeRelayDeps(link) {
+  return {
+    createHubLink(options) {
+      link.options = options
+      return link
+    },
+  }
+}
+
+/** GET /state and return only the relay block. */
+async function relayOf(origin) {
+  return (await call(origin, `${API}/state`)).data.relay
+}
+
+async function phaseS(root) {
+  await check('relay: config validation (object/boolean, url, limits, frozen)', async () => {
+    assert.deepEqual(resolveConfig({}).relay, { enabled: false, url: '', publicUrl: '', accessKey: '', hubId: '', name: '' })
+    assert.equal(resolveConfig({ relay: false }).relay.enabled, false)
+    // Boolean shorthand `true` still needs an address: there is deliberately no
+    // default relay host, so the error names the service to use.
+    assert.throws(() => resolveConfig({ relay: true }), /relay\.url is required when relay is enabled/)
+    assert.throws(() => resolveConfig({ relay: { enabled: true } }), /relay\.url is required when relay is enabled/)
+    assert.throws(() => resolveConfig({ relay: { enabled: true, url: 'ftp://dsh-relay.nextai.show' } }), /relay\.url must be ws:\/\/ or wss:\/\//)
+    assert.throws(() => resolveConfig({ relay: { enabled: true, url: 'dsh-relay.nextai.show' } }), /relay\.url must be an absolute/)
+    assert.throws(() => resolveConfig({ relay: { enabled: true, url: 'wss://dsh-relay.nextai.show/ws' } }), /relay\.url must not carry a path/)
+    const normalized = resolveConfig({ relay: { enabled: true, url: 'https://dsh-relay.nextai.show/' } })
+    assert.equal(normalized.relay.url, 'wss://dsh-relay.nextai.show')
+    assert.ok(Object.isFrozen(normalized.relay), 'the relay config is frozen')
+    assert.ok(Object.isFrozen(normalized), 'the resolved config is frozen')
+    assert.equal(
+      resolveConfig({ relay: { publicUrl: 'https://dsh-relay.nextai.show/r/hub_x/' } }).relay.publicUrl,
+      'https://dsh-relay.nextai.show/r/hub_x',
+    )
+    assert.throws(() => resolveConfig({ relay: { publicUrl: 'wss://dsh-relay.nextai.show' } }), /relay\.publicUrl must use http or https/)
+    assert.throws(() => resolveConfig({ relay: { publicUrl: '/r/hub_x' } }), /relay\.publicUrl must be an absolute/)
+    assert.equal(resolveConfig({ relay: { accessKey: 'k'.repeat(256) } }).relay.accessKey.length, 256)
+    assert.throws(() => resolveConfig({ relay: { accessKey: 'k'.repeat(257) } }), /relay\.accessKey must be at most 256/)
+    assert.throws(() => resolveConfig({ relay: { accessKey: 42 } }), /relay\.accessKey must be a string/)
+    assert.equal(resolveConfig({ relay: { hubId: 'hub_A-1.b_c' } }).relay.hubId, 'hub_A-1.b_c')
+    assert.equal(resolveConfig({ relay: { hubId: '' } }).relay.hubId, '')
+    assert.throws(() => resolveConfig({ relay: { hubId: 'hub x' } }), /relay\.hubId must match/)
+    assert.throws(() => resolveConfig({ relay: { hubId: 'x'.repeat(129) } }), /relay\.hubId must match/)
+    assert.throws(() => resolveConfig({ relay: { hubId: 7 } }), /relay\.hubId must be a string/)
+    assert.equal(resolveConfig({ relay: { name: 'n'.repeat(64) } }).relay.name.length, 64)
+    assert.throws(() => resolveConfig({ relay: { name: 'n'.repeat(65) } }), /relay\.name must be at most 64/)
+    assert.throws(() => resolveConfig({ relay: { name: 5 } }), /relay\.name must be a string/)
+    assert.throws(() => resolveConfig({ relay: 'yes' }), /relay must be an object/)
+    assert.throws(() => resolveConfig({ relay: [] }), /relay must be an object/)
+    // Unknown keys are ignored (design §10), not fatal.
+    assert.equal(resolveConfig({ relay: { enabled: false, maxStreams: 7 } }).relay.enabled, false)
+    assert.deepEqual(resolveConfig({ relay: { enabled: false } }).relay, { enabled: false, url: '', publicUrl: '', accessKey: '', hubId: '', name: '' })
+  })
+
+  await check('relay: url helpers normalise the relay address and derive the entry', async () => {
+    assert.deepEqual(normalizeRelayUrl('https://dsh-relay.nextai.show/'), { url: 'wss://dsh-relay.nextai.show', error: null })
+    assert.deepEqual(normalizeRelayUrl('http://127.0.0.1:8080'), { url: 'ws://127.0.0.1:8080', error: null })
+    assert.equal(normalizeRelayUrl('').url, '')
+    assert.match(normalizeRelayUrl('ftp://dsh-relay.nextai.show').error, /ws:\/\/ or wss:\/\//)
+    assert.match(normalizeRelayUrl('wss://dsh-relay.nextai.show/ws').error, /must not carry a path/)
+    assert.equal(deriveRelayPublicUrl('', RELAY_URL, 'hub_x'), 'https://dsh-relay.nextai.show/r/hub_x')
+    assert.equal(deriveRelayPublicUrl('https://edge.example/r/hub_x/', RELAY_URL, 'hub_x'), 'https://edge.example/r/hub_x')
+    assert.match(mintHubId(), HUB_ID_SHAPE)
+  })
+
+  await check('relay: /state.relay is the disabled shape and nothing is persisted', async () => {
+    const offDir = join(root, 's-off')
+    const app = await mount({ ...FAST_CONFIG, stateDir: offDir })
+    try {
+      const state = (await call(app.origin, `${API}/state`)).data
+      assert.deepEqual(state.relay, RELAY_OFF)
+      assert.equal(state.serverUrls.some((candidate) => candidate.kind === 'relay'), false)
+      assert.equal(existsSync(join(offDir, 'relay.json')), false, 'a disabled relay must not create relay.json')
+    } finally {
+      await app.close()
+    }
+  })
+
+  await check('relay: /state.relay is the documented shape when no manager is mounted', async () => {
+    // `role: 'runtime'` also reports the link; with no manager it must answer
+    // the disabled shape rather than throw.
+    const fake = createFakeContext()
+    createRuntimeStatusRoutes({ ctx: fake.ctx, config: resolveConfig({}), role: 'runtime', version: PLUGIN_VERSION, tunnel: null, relay: null })
+    const listener = await startListener(fake)
+    try {
+      const response = await call(listener.origin, `${API}/state`)
+      assert.deepEqual(response.data.relay, RELAY_OFF)
+    } finally {
+      await listener.close()
+      fake.dispose()
+    }
+  })
+
+  await check('relay: a hubId is minted once, persisted 0600, and reused on reload', async () => {
+    const relayDir = join(root, 's-hub')
+    const link = createFakeHubLink()
+    const first = await mount({
+      ...FAST_CONFIG,
+      stateDir: relayDir,
+      publicUrl: 'https://public.example.com',
+      relay: { enabled: true, url: 'https://dsh-relay.nextai.show/' },
+    }, { relayDeps: fakeRelayDeps(link) })
+    let hubId
+    try {
+      // The manager waits for the web server to bind, then dials.
+      const connecting = await waitFor(() => relayOf(first.origin), (relay) => relay.state === 'connecting', 4000, 'relay connecting')
+      assert.equal(connecting.enabled, true)
+      assert.equal(connecting.configured, true)
+      assert.match(connecting.hubId, HUB_ID_SHAPE)
+      assert.equal(connecting.url, RELAY_URL)
+      assert.equal(connecting.publicUrl, `https://dsh-relay.nextai.show/r/${connecting.hubId}`)
+      assert.equal(connecting.connectedAt, null)
+      assert.equal(connecting.lastError, null)
+      assert.equal(connecting.streams, 0)
+      hubId = connecting.hubId
+      // The manager dialled with the normalised url and the minted id.
+      assert.equal(link.options.relayUrl, RELAY_URL)
+      assert.equal(link.options.hubId, hubId)
+      assert.equal(link.options.token, '')
+      assert.equal(link.started, 1, 'the link is started exactly once')
+      // Its own document, 0600, versioned.
+      const identityFile = join(relayDir, 'relay.json')
+      assert.ok(existsSync(identityFile), 'relay.json must be written when the id is minted')
+      assert.equal(statSync(identityFile).mode & 0o777, 0o600, `relay.json must be 0600, got 0${(statSync(identityFile).mode & 0o777).toString(8)}`)
+      const identity = JSON.parse(readFileSync(identityFile, 'utf8'))
+      assert.deepEqual(Object.keys(identity).sort(), ['createdAt', 'hubId', 'version'])
+      assert.equal(identity.version, 1)
+      assert.equal(identity.hubId, hubId)
+      assert.ok(Number.isFinite(Date.parse(identity.createdAt)), 'createdAt must be ISO')
+      // Never in state.json: resetting the registry must not orphan the address.
+      assert.equal(readFileSync(join(relayDir, 'state.json'), 'utf8').includes(hubId), false, 'the hubId must not live in state.json')
+      // While connecting, the relay is not advertised (a dead address is worse).
+      assert.equal((await call(first.origin, `${API}/state`)).data.serverUrls.some((c) => c.kind === 'relay'), false)
+
+      // Connected: first candidate, reachable, and it wins over publicUrl.
+      link.set({ state: 'open', connectedAt: Date.now() })
+      const connected = await waitFor(async () => (await call(first.origin, `${API}/state`)).data, (data) => data.relay.state === 'connected', 5000, 'relay connected')
+      assert.equal(connected.relay.connectedAt > 0, true)
+      const candidate = connected.serverUrls[0]
+      assert.equal(candidate.kind, 'relay', 'the relay candidate is first')
+      assert.equal(candidate.label, '中继')
+      assert.equal(candidate.url, connected.relay.publicUrl)
+      assert.equal(candidate.reachable, true)
+      assert.equal(candidate.recommended, true)
+      assert.equal(connected.serverUrl, connected.relay.publicUrl, 'the relay wins the recommendation')
+      assert.ok(connected.serverUrls.some((c) => c.kind === 'public'), 'the public candidate is still listed')
+      assert.equal(connected.serverUrls.filter((c) => c.recommended).length, 1, 'exactly one recommendation')
+      assert.ok(candidate.health !== undefined, 'candidates keep the health annotation')
+
+      // A drop removes the address instead of advertising a dead one.
+      link.set({ state: 'reconnecting', connectedAt: null, lastError: 'socket closed' })
+      const dropped = await waitFor(async () => (await call(first.origin, `${API}/state`)).data, (data) => data.relay.state === 'reconnecting', 5000, 'relay reconnecting')
+      assert.equal(dropped.relay.lastError, 'socket closed')
+      assert.equal(dropped.serverUrls.some((c) => c.kind === 'relay'), false, 'a down relay is not advertised')
+    } finally {
+      await first.close()
+    }
+    assert.equal(link.stopped >= 1, true, 'dispose stops the link')
+
+    // Reload: the persisted id is reused, never re-minted.
+    const link2 = createFakeHubLink()
+    const second = await mount({
+      ...FAST_CONFIG,
+      stateDir: relayDir,
+      relay: { enabled: true, url: RELAY_URL },
+    }, { relayDeps: fakeRelayDeps(link2) })
+    try {
+      const reused = await waitFor(() => relayOf(second.origin), (relay) => relay.state === 'connecting', 4000, 'relay reload')
+      assert.equal(reused.hubId, hubId, 'the persisted hubId is reused')
+      assert.equal(link2.options.hubId, hubId)
+      assert.equal(JSON.parse(readFileSync(join(relayDir, 'relay.json'), 'utf8')).hubId, hubId)
+    } finally {
+      await second.close()
+    }
+  })
+
+  await check('relay: an explicitly configured hubId is persisted and reused', async () => {
+    const pinnedDir = join(root, 's-pinned')
+    const link = createFakeHubLink()
+    const app = await mount({
+      ...FAST_CONFIG,
+      stateDir: pinnedDir,
+      relay: { enabled: true, url: RELAY_URL, hubId: 'hub_pinned-1' },
+    }, { relayDeps: fakeRelayDeps(link) })
+    try {
+      const relay = await waitFor(() => relayOf(app.origin), (value) => value.state === 'connecting', 4000, 'pinned hubId')
+      assert.equal(relay.hubId, 'hub_pinned-1')
+      assert.equal(link.options.hubId, 'hub_pinned-1')
+      const identity = JSON.parse(readFileSync(join(pinnedDir, 'relay.json'), 'utf8'))
+      assert.equal(identity.hubId, 'hub_pinned-1')
+      assert.equal(identity.version, 1)
+    } finally {
+      await app.close()
+    }
+  })
+
+  await check('relay: resetting state.json keeps the hubId', async () => {
+    const resetDir = join(root, 's-reset')
+    const linkA = createFakeHubLink()
+    const before = await mount({
+      ...FAST_CONFIG,
+      stateDir: resetDir,
+      relay: { enabled: true, url: RELAY_URL },
+    }, { relayDeps: fakeRelayDeps(linkA) })
+    let hubId
+    try {
+      hubId = (await waitFor(() => relayOf(before.origin), (relay) => relay.hubId !== '', 4000, 'hubId')).hubId
+    } finally {
+      await before.close()
+    }
+    // A registry reset is routine troubleshooting: the address other machines
+    // bookmarked must survive it, so the id lives in relay.json only.
+    rmSync(join(resetDir, 'state.json'), { force: true })
+    const linkB = createFakeHubLink()
+    const after = await mount({
+      ...FAST_CONFIG,
+      stateDir: resetDir,
+      relay: { enabled: true, url: RELAY_URL },
+    }, { relayDeps: fakeRelayDeps(linkB) })
+    try {
+      const relay = await waitFor(() => relayOf(after.origin), (value) => value.hubId !== '', 4000, 'hubId after reset')
+      assert.equal(relay.hubId, hubId, 'a state.json reset must not change the address')
+      assert.ok(existsSync(join(resetDir, 'relay.json')))
+      assert.deepEqual(JSON.parse(readFileSync(join(resetDir, 'state.json'), 'utf8')).computers, [], 'the registry itself is empty again')
+    } finally {
+      await after.close()
+    }
+  })
+
+  await check('relay: a corrupt relay.json is set aside and a fresh hubId is minted', async () => {
+    const corruptDir = join(root, 's-corrupt')
+    mkdirSync(corruptDir, { recursive: true })
+    writeFileSync(join(corruptDir, 'relay.json'), '{not json', { mode: 0o600 })
+    const link = createFakeHubLink()
+    const app = await mount({
+      ...FAST_CONFIG,
+      stateDir: corruptDir,
+      relay: { enabled: true, url: RELAY_URL },
+    }, { relayDeps: fakeRelayDeps(link) })
+    try {
+      const relay = await waitFor(() => relayOf(app.origin), (value) => value.hubId !== '', 4000, 'fresh hubId')
+      assert.match(relay.hubId, HUB_ID_SHAPE)
+      assert.equal(readdirSync(corruptDir).filter((name) => name.startsWith('relay.json.corrupt-')).length, 1, 'the corrupt file is moved aside')
+      assert.equal(JSON.parse(readFileSync(join(corruptDir, 'relay.json'), 'utf8')).hubId, relay.hubId)
+    } finally {
+      await app.close()
+    }
+  })
+
+  await check('relay: a link that cannot be built reports failed and never throws', async () => {
+    const failDir = join(root, 's-fail')
+    const app = await mount({
+      ...FAST_CONFIG,
+      stateDir: failDir,
+      relay: { enabled: true, url: RELAY_URL },
+    }, { relayDeps: { createHubLink: () => { throw new Error('dialer exploded') } } })
+    try {
+      const relay = await waitFor(() => relayOf(app.origin), (value) => value.state === 'failed', 4000, 'relay failed')
+      assert.equal(relay.enabled, true)
+      assert.equal(relay.configured, false, 'a link that never started is not configured')
+      assert.match(relay.lastError, /dialer exploded/)
+      assert.match(relay.hubId, HUB_ID_SHAPE, 'the id is minted before the dial')
+      const state = (await call(app.origin, `${API}/state`)).data
+      assert.equal(state.serverUrls.some((c) => c.kind === 'relay'), false, 'a failed relay is not advertised')
+      assert.notEqual(state.serverUrl, '', 'the hub stays usable over its direct addresses')
+    } finally {
+      await app.close()
+    }
+  })
+}
+
 watchdog.unref()
 
 const root = mkdtempSync(join(tmpdir(), 'dshc-smoke-'))
@@ -4552,6 +4893,7 @@ try {
   await phaseP(root)
   await phaseQ(root)
   await phaseR(root)
+  await phaseS(root)
 } finally {
   rmSync(root, { recursive: true, force: true })
   clearTimeout(watchdog)

@@ -32,7 +32,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 
 // Keep in sync with package.json. The server compares this for display only.
-export const AGENT_VERSION = '1.5.1'
+export const AGENT_VERSION = '1.6.0'
 
 const DEFAULT_EXEC_TIMEOUT_MS = 120_000
 const MAX_EXEC_TIMEOUT_MS = 24 * 60 * 60 * 1000

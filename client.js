@@ -79,7 +79,7 @@ window.__ModuleLoader__.load({
       'delete.action': '删除',
       loading: '正在加载电脑列表…',
       'empty.title': '还没有连接任何电脑',
-      'empty.hint': '点击右上角「连接电脑」，用一行命令把 Mac、Linux 或 Windows 接进来。',
+      'empty.hint': '点右上角「连接电脑」，把服务器地址和加入密钥填到另一台电脑的 设置 → 电脑 → 本机运行时；那台机器没有 DSH 时，再用弹窗里的命令行接入。',
       'error.load': '无法读取电脑列表',
       'error.loadDetail': '{title}：{message}',
       'error.network': '无法连接到服务器，请检查网络后重试。',
@@ -231,11 +231,22 @@ window.__ModuleLoader__.load({
       'addr.kind.mdns': '本机名',
       'addr.kind.loopback': '本机',
       'addr.kind.tunnel': 'Tailscale Serve',
+      'addr.kind.relay': '中继',
       'addr.tunnelPending': '正在配置 Tailscale Serve…',
       'addr.tunnelError': 'Tailscale Serve 配置失败：{message}',
       'addr.kind.other': '地址',
       'addr.listLabel': '可用的服务器地址',
       'addr.listening': '本机监听：{address}',
+      'relay.title': '中继',
+      'relay.hubLabel': '中继 ID',
+      'relay.urlLabel': '公网地址',
+      'relay.status.connected': '已连接',
+      'relay.status.connecting': '连接中',
+      'relay.status.failed': '失败',
+      'relay.connecting': '正在连接中继…',
+      'relay.failedLine': '中继连接失败：{message}。检查 relay.url 和服务器上的中继服务是否在运行',
+      'relay.unknownError': '未知错误',
+      'relay.hint': '别的电脑和手机用这个地址连到这台电脑，不需要公网 IP 或开放端口',
       'upstream.title': '作为运行时',
       'upstream.direction': '本机向这个服务器上报',
       'target.offline': '离线',
@@ -254,7 +265,7 @@ window.__ModuleLoader__.load({
       'delete.action': 'Delete',
       loading: 'Loading computers…',
       'empty.title': 'No computers connected yet',
-      'empty.hint': 'Use “Connect computer” in the top right and run one line in a terminal on a Mac, Linux or Windows machine.',
+      'empty.hint': 'Use “Connect computer” in the top right: paste the server URL and join key into Settings → Computers → This computer on the other machine. If that machine has no DSH, use the command line from the same dialog.',
       'error.load': 'Could not load the computer list',
       'error.loadDetail': '{title}: {message}',
       'error.network': 'Could not reach the server. Check the network and try again.',
@@ -406,11 +417,22 @@ window.__ModuleLoader__.load({
       'addr.kind.mdns': 'Local name',
       'addr.kind.loopback': 'Loopback',
       'addr.kind.tunnel': 'Tailscale Serve',
+      'addr.kind.relay': 'Relay',
       'addr.tunnelPending': 'Configuring Tailscale Serve…',
       'addr.tunnelError': 'Tailscale Serve failed: {message}',
       'addr.kind.other': 'Address',
       'addr.listLabel': 'Available server addresses',
       'addr.listening': 'Listening on {address}',
+      'relay.title': 'Relay',
+      'relay.hubLabel': 'Relay ID',
+      'relay.urlLabel': 'Public address',
+      'relay.status.connected': 'Connected',
+      'relay.status.connecting': 'Connecting',
+      'relay.status.failed': 'Failed',
+      'relay.connecting': 'Connecting to the relay…',
+      'relay.failedLine': 'Relay connection failed: {message}. Check relay.url and whether the relay service on the server is running',
+      'relay.unknownError': 'unknown error',
+      'relay.hint': 'Other computers and phones use this address to reach this computer — no public IP or open port needed',
       'upstream.title': 'As a runtime',
       'upstream.direction': 'This machine reports to this server',
       'target.offline': 'Offline',
@@ -1476,6 +1498,30 @@ window.__ModuleLoader__.load({
 .dshc-addrOption[aria-selected="true"] { background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2)); }
 .dshc-addrOption .dshc-addrKind { min-width: 40px; }
 
+/* Relay link (中继): the status line under the 本机地址 rows and the small
+ * card that explains the public address. Muted while the link comes up,
+ * amber when it failed (the line then carries the actionable hint). */
+.dshc-relayLine {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
+.dshc-relayLine[data-kind="muted"] { color: var(--dsw-alias-label-secondary); }
+.dshc-relayLine[data-kind="failed"] { color: var(--dsw-alias-state-warn-primary); }
+.dshc-relayId {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-primary);
+}
+/* The card inherits .dshc-copyStack / .dshc-hint; scope the spacing so the
+ * shared primitives keep their own defaults elsewhere. */
+.dshc-relayCard .dshc-relayUrl { margin-top: 10px; }
+.dshc-relayCard .dshc-relayHint { margin-top: 10px; }
+
 /* Composer menu: the manage-access row replaces the old muted footer. */
 .dshc-menuSep {
   height: 1px;
@@ -2029,6 +2075,7 @@ window.__ModuleLoader__.load({
       mdns: 'addr.kind.mdns',
       loopback: 'addr.kind.loopback',
       tunnel: 'addr.kind.tunnel',
+      relay: 'addr.kind.relay',
     };
 
     /** @param {string} kind - serverUrls[].kind. @returns {string} short label. */
@@ -2069,14 +2116,19 @@ window.__ModuleLoader__.load({
 
     /**
      * The address that should be copied/used: the recommended reachable one,
-     * else any reachable one, else the first candidate.
+     * else any reachable one, else the first candidate. A relay candidate only
+     * becomes the address to hand out once its link is up — the host sets
+     * `recommended` exactly then — so while it connects it stays informational
+     * and the local candidates keep the preference.
      * @param {Array} urls - serverUrls.
      * @returns {string} url or ''.
      */
     function preferredServerUrl(urls) {
       const ordered = orderServerUrls(urls);
-      const reachable = ordered.find((entry) => isReachableAddress(entry));
-      if (reachable !== undefined) return reachable.url;
+      const reachable = ordered.filter((entry) => isReachableAddress(entry));
+      const usable = reachable.find((entry) => entry.kind !== 'relay' || entry.recommended === true);
+      if (usable !== undefined) return usable.url;
+      if (reachable.length > 0) return reachable[0].url;
       return ordered.length > 0 ? ordered[0].url : '';
     }
 
@@ -2095,6 +2147,48 @@ window.__ModuleLoader__.load({
         if (/^http:/i.test(entry.url)) return '80';
       }
       return '';
+    }
+
+    /* Relay link states the host reports in `state.relay.state` (PROTOCOL
+     * relay): the browser only needs "up", "coming up" or "broken". */
+    const RELAY_PHASES = ['disabled', 'idle', 'connecting', 'connected', 'failed'];
+
+    /**
+     * Which relay state the payload describes, tolerating older hosts that
+     * only send the flags. Anything unknown reads as "not connected".
+     * @param {object|null} relay - `state.relay`.
+     * @returns {string} 'disabled' | 'idle' | 'connecting' | 'connected' | 'failed'.
+     */
+    function relayPhaseOf(relay) {
+      if (relay === null || typeof relay !== 'object') return 'disabled';
+      if (typeof relay.state === 'string' && RELAY_PHASES.includes(relay.state)) return relay.state;
+      if (relay.enabled !== true) return 'disabled';
+      if (relay.lastError) return 'failed';
+      return relay.connectedAt ? 'connected' : 'connecting';
+    }
+
+    /**
+     * The relay error text, never empty (the amber line needs a message).
+     * @param {object|null} relay - `state.relay`.
+     * @returns {string} last error or a localized fallback.
+     */
+    function relayMessageOf(relay) {
+      const error = relay !== null && typeof relay === 'object' && typeof relay.lastError === 'string'
+        ? relay.lastError.trim()
+        : '';
+      return error === '' ? t('relay.unknownError') : error;
+    }
+
+    /**
+     * Whether the connect modal may hand this candidate out. A relay
+     * candidate is always selectable: its URL is stable and the link may
+     * still be coming up, so the user can copy the address ahead of time.
+     * @param {object} entry - serverUrls[] item.
+     * @returns {boolean} selectable.
+     */
+    function isSelectableAddress(entry) {
+      if (isReachableAddress(entry)) return true;
+      return entry !== null && typeof entry === 'object' && entry.kind === 'relay';
     }
 
     /* Capability ids → localized chip labels; unknown ids render raw. */
@@ -2858,9 +2952,21 @@ window.__ModuleLoader__.load({
         };
       }, [keyInfo]);
 
-      const allCandidates = orderServerUrls(Array.isArray(keyInfo && keyInfo.serverUrls)
-        ? keyInfo.serverUrls
-        : (Array.isArray(props.serverUrls) ? props.serverUrls : []));
+      /* /keys carries the candidates it minted against; the live /state may
+       * already know a relay candidate the key does not (the link can come up
+       * after the key). Merge that in so the dropdown always matches the
+       * 本机地址 block and the relay stays selectable. */
+      const stateCandidates = Array.isArray(props.serverUrls) ? props.serverUrls : [];
+      const mintedCandidates = Array.isArray(keyInfo && keyInfo.serverUrls)
+        ? keyInfo.serverUrls.slice()
+        : stateCandidates.slice();
+      for (const entry of stateCandidates) {
+        if (entry === null || typeof entry !== 'object' || entry.kind !== 'relay') continue;
+        if (!mintedCandidates.some((candidate) => candidate && candidate.url === entry.url)) {
+          mintedCandidates.push(entry);
+        }
+      }
+      const allCandidates = orderServerUrls(mintedCandidates);
       /* Every candidate stays visible so the list matches the settings block,
        * but the picker only lets a reachable one be chosen, and the command
        * base prefers the recommended reachable address. */
@@ -3499,9 +3605,17 @@ window.__ModuleLoader__.load({
           ? h(AddressCard, {
             serverUrls,
             loopbackOnly,
+            relay: data && data.relay && typeof data.relay === 'object' ? data.relay : null,
             listener: data && data.listener && typeof data.listener === 'object' ? data.listener : null,
             tunnel: data && data.tunnel && typeof data.tunnel === 'object' ? data.tunnel : null,
             serverUrl: data && typeof data.serverUrl === 'string' ? data.serverUrl : '',
+          })
+          : null,
+        /* The relay card sits under 本机地址 and stays silent while the
+         * feature is off (the default), so nothing changes for old hosts. */
+        showComputers
+          ? h(RelayCard, {
+            relay: data && data.relay && typeof data.relay === 'object' ? data.relay : null,
           })
           : null,
         showRuntime
@@ -3633,8 +3747,8 @@ window.__ModuleLoader__.load({
      */
     function AddressPicker(props) {
       const options = orderServerUrls(Array.isArray(props.urls) ? props.urls : []);
-      const choices = options.some((entry) => isReachableAddress(entry))
-        ? options.filter((entry) => isReachableAddress(entry))
+      const choices = options.some((entry) => isSelectableAddress(entry))
+        ? options.filter((entry) => isSelectableAddress(entry))
         : options;
       const [open, setOpen] = React.useState(false);
       const listRef = React.useRef(null);
@@ -3776,9 +3890,13 @@ window.__ModuleLoader__.load({
       const entry = props.entry || {};
       const url = typeof entry.url === 'string' ? entry.url : '';
       const state = useCopyText(url);
-      const kind = typeof entry.label === 'string' && entry.label !== ''
-        ? entry.label
-        : addressKindLabel(entry.kind);
+      /* The relay's host label is already a user-facing name, but it is sent
+       * in the host locale; localize the kind instead so en stays English. */
+      const kind = entry.kind === 'relay'
+        ? addressKindLabel('relay')
+        : (typeof entry.label === 'string' && entry.label !== ''
+          ? entry.label
+          : addressKindLabel(entry.kind));
       const reachable = isReachableAddress(entry);
       const preferred = props.preferred === true && reachable;
       const loopback = entry.kind === 'loopback';
@@ -3816,7 +3934,8 @@ window.__ModuleLoader__.load({
     /**
      * 「本机地址」 block: every reachable candidate, recommended first, loopback
      * muted last, with the loopback-only warning when nothing else exists.
-     * @param {object} props - `serverUrls`, `loopbackOnly`.
+     * When the relay feature is on, its link state also sits under the rows.
+     * @param {object} props - `serverUrls`, `loopbackOnly`, `relay`.
      * @returns {object|null} card element, or null when the host sends nothing.
      */
     function AddressCard(props) {
@@ -3828,8 +3947,17 @@ window.__ModuleLoader__.load({
         if (fallbackUrl === '') return null;
         urls = [{ url: fallbackUrl, kind: 'loopback', recommended: true }];
       }
-      const loopbackOnly = props.loopbackOnly === true
-        || urls.every((entry) => entry.kind === 'loopback');
+      const relay = props.relay && typeof props.relay === 'object' ? props.relay : null;
+      const relayPhase = relayPhaseOf(relay);
+      const relayConnected = relay !== null && relay.enabled === true && relayPhase === 'connected';
+      /* A relay row is informational until its link is up: it must not hide
+       * the loopback-only warning (the other machines still cannot connect).
+       * Only the non-relay candidates decide whether a usable address exists. */
+      const localCandidates = urls.filter((entry) => entry.kind !== 'relay');
+      const loopbackOnly = relayConnected
+        ? false
+        : (props.loopbackOnly === true
+          || (localCandidates.length > 0 && localCandidates.every((entry) => entry.kind === 'loopback')));
       const preferredUrl = preferredServerUrl(urls);
       const tunnel = props.tunnel && typeof props.tunnel === 'object' ? props.tunnel : null;
       let tunnelLine = null;
@@ -3841,15 +3969,29 @@ window.__ModuleLoader__.load({
           tunnelLine = h('p', { className: 'dshc-addrListen' }, t('addr.tunnelPending'));
         }
       }
+      /* The relay URL is public and usually https on 443; the tailscale
+       * example must keep describing the local listener port instead. */
       const listenerPort = props.listener && typeof props.listener.port === 'number'
         ? String(props.listener.port)
-        : addressPort(urls);
+        : addressPort(localCandidates.length > 0 ? localCandidates : urls);
       const listenerHost = props.listener && typeof props.listener.host === 'string' && props.listener.host !== ''
         ? props.listener.host
         : '';
       const listenerAddress = listenerHost === ''
         ? ''
         : `${listenerHost}${listenerPort === '' ? '' : `:${listenerPort}`}`;
+      /* The link's own state sits directly under the rows: muted while it is
+       * coming up, amber (with the fix) when it broke. */
+      let relayLine = null;
+      if (relay !== null && relay.enabled === true) {
+        if (relayPhase === 'failed') {
+          relayLine = h('p', { className: 'dshc-relayLine', 'data-kind': 'failed', role: 'status' },
+            t('relay.failedLine', { message: relayMessageOf(relay) }));
+        } else if (relayPhase === 'connecting' || relayPhase === 'idle') {
+          relayLine = h('p', { className: 'dshc-relayLine', 'data-kind': 'muted', role: 'status' },
+            t('relay.connecting'));
+        }
+      }
       return h('div', { className: 'dshc-card2' },
         h('div', { className: 'dshc-card2Head' },
           h('span', { className: 'dshc-card2Title' }, t('addr.title'))),
@@ -3858,6 +4000,7 @@ window.__ModuleLoader__.load({
           entry,
           preferred: entry.url === preferredUrl,
         }))),
+        relayLine,
         listenerAddress !== ''
           ? h('p', { className: 'dshc-addrListen' }, t('addr.listening', { address: listenerAddress }))
           : null,
@@ -3873,6 +4016,51 @@ window.__ModuleLoader__.load({
               })),
             h('p', { className: 'dshc-hint' }, t('addr.loopbackHint')))
           : h('p', { className: 'dshc-hint' }, t('addr.hint')));
+    }
+
+    /**
+     * 「中继」 card under the 本机地址 block: the relay link that makes this
+     * machine reachable from other machines and phones without a public IP or
+     * an open port. Rendered only when the feature is enabled (default off
+     * stays silent), so an unconfigured deployment sees no extra chrome.
+     * @param {object} props - `relay` (`state.relay`).
+     * @returns {object|null} card element, or null when the relay is off.
+     */
+    function RelayCard(props) {
+      const relay = props.relay;
+      if (relay === null || typeof relay !== 'object' || relay.enabled !== true) return null;
+      const phase = relayPhaseOf(relay);
+      const dotState = phase === 'connected' ? 'running' : (phase === 'failed' ? 'failed' : 'connecting');
+      const statusKey = phase === 'connected'
+        ? 'relay.status.connected'
+        : (phase === 'failed' ? 'relay.status.failed' : 'relay.status.connecting');
+      const hubId = typeof relay.hubId === 'string' ? relay.hubId.trim() : '';
+      /* `publicUrl` is the address other machines use. `url` is the relay
+       * endpoint itself (often wss://), so it only stands in when it is an
+       * ordinary http(s) address; never label a socket URL 公网地址. */
+      const publicUrl = typeof relay.publicUrl === 'string' && relay.publicUrl !== ''
+        ? relay.publicUrl
+        : (typeof relay.url === 'string' && /^https?:\/\//i.test(relay.url) ? relay.url : '');
+      return h('div', { className: 'dshc-card2 dshc-relayCard', 'data-state': phase },
+        h('div', { className: 'dshc-card2Head' },
+          h('span', { className: 'dshc-card2Title' }, t('relay.title')),
+          h('span', { className: 'dshc-status', 'data-state': dotState },
+            h('span', { className: 'dshc-dot', 'data-state': dotState, 'aria-hidden': 'true' }),
+            t(statusKey))),
+        hubId !== ''
+          ? h('div', { className: 'dshc-runtimeMeta' },
+            h('span', { className: 'dshc-runtimeMetaKey' }, t('relay.hubLabel')),
+            h('code', { className: 'dshc-relayId', title: hubId }, hubId))
+          : null,
+        publicUrl !== ''
+          ? h('div', { className: 'dshc-copyStack dshc-relayUrl' },
+            h(CopyRow, { label: t('relay.urlLabel'), value: publicUrl, stacked: true }))
+          : null,
+        phase === 'failed'
+          ? h('p', { className: 'dshc-relayLine', 'data-kind': 'failed' },
+            t('relay.failedLine', { message: relayMessageOf(relay) }))
+          : null,
+        h('p', { className: 'dshc-hint dshc-relayHint' }, t('relay.hint')));
     }
 
     /**

@@ -18,6 +18,8 @@ import { createRuntimeManager } from './lib/runtime.js'
 import { createFsOps } from './lib/fs-ops.js'
 import { PREFER_ADDRESS_VALUES } from './lib/addresses.js'
 import { createTunnel } from './lib/tunnel.js'
+import { createRelay, normalizeRelayUrl } from './lib/relay-manager.js'
+import { HUB_ID_PATTERN, isHubId, readRelayIdentity, writeRelayIdentity } from './lib/relay-identity.js'
 import { createSelectionStore } from './lib/selection.js'
 import { majorMinor } from './lib/version.js'
 import { resolveStateDir, createStore } from './lib/state.js'
@@ -30,7 +32,7 @@ export const name = 'dsh-computers'
 export const inject = ['tools', 'webServer']
 
 /** Version reported by `/api/dsh-computers/health` (and asserted by the smoke harness). */
-export const PLUGIN_VERSION = '1.5.1'
+export const PLUGIN_VERSION = '1.6.0'
 
 /** The machine agent bundle, served at request time (never imported). */
 const AGENT_URL = new URL('./agent/dsh-computers-agent.mjs', import.meta.url)
@@ -50,6 +52,7 @@ const DEFAULTS = Object.freeze({
   execEnabled: true,
   preferAddress: 'auto',
   tailscaleServe: Object.freeze({ enabled: false, httpsPort: 8443 }),
+  relay: Object.freeze({ enabled: false, url: '', publicUrl: '', accessKey: '', hubId: '', name: '' }),
   maxOutputBytes: 1_048_576,
 })
 
@@ -174,6 +177,70 @@ export function resolveConfig(raw) {
     execEnabled = raw.execEnabled
   }
 
+  // ---- relay (v1.6.0, docs/relay-design.md §5, §10) ----------------------
+  // Opt-in only: a deployment that never sets `relay.enabled` behaves exactly
+  // as before. `url` is required when enabled — there is deliberately no
+  // default relay host, the operator names the service (e.g.
+  // `wss://dsh-relay.nextai.show`). `hubId` is usually minted and persisted by the
+  // manager; setting it here pins the address explicitly.
+  const relay = { ...DEFAULTS.relay }
+  if (raw.relay !== undefined && raw.relay !== null) {
+    const value = raw.relay
+    if (typeof value === 'boolean') {
+      relay.enabled = value
+    } else if (typeof value === 'object' && !Array.isArray(value)) {
+      if (value.enabled !== undefined && value.enabled !== null) {
+        if (typeof value.enabled !== 'boolean') throw configError('relay.enabled must be a boolean')
+        relay.enabled = value.enabled
+      }
+      if (value.url !== undefined && value.url !== null && value.url !== '') {
+        if (typeof value.url !== 'string') throw configError('relay.url must be a string')
+        const normalized = normalizeRelayUrl(value.url)
+        if (normalized.error !== null) throw configError(`relay.${normalized.error}`)
+        relay.url = normalized.url
+      }
+      if (value.publicUrl !== undefined && value.publicUrl !== null && value.publicUrl !== '') {
+        if (typeof value.publicUrl !== 'string') throw configError('relay.publicUrl must be a string')
+        const trimmed = value.publicUrl.trim().replace(/\/+$/, '')
+        let parsed
+        try {
+          parsed = new URL(trimmed)
+        } catch {
+          throw configError(`relay.publicUrl must be an absolute http(s) URL (received ${JSON.stringify(value.publicUrl)})`)
+        }
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+          throw configError('relay.publicUrl must use http or https')
+        }
+        relay.publicUrl = trimmed
+      }
+      if (value.accessKey !== undefined && value.accessKey !== null) {
+        if (typeof value.accessKey !== 'string') throw configError('relay.accessKey must be a string')
+        const trimmed = value.accessKey.trim()
+        if (trimmed.length > 256) throw configError('relay.accessKey must be at most 256 characters')
+        relay.accessKey = trimmed
+      }
+      if (value.hubId !== undefined && value.hubId !== null) {
+        if (typeof value.hubId !== 'string') throw configError('relay.hubId must be a string')
+        const trimmed = value.hubId.trim()
+        if (trimmed !== '' && !isHubId(trimmed)) {
+          throw configError(`relay.hubId must match ${HUB_ID_PATTERN} (received ${JSON.stringify(value.hubId)})`)
+        }
+        relay.hubId = trimmed
+      }
+      if (value.name !== undefined && value.name !== null) {
+        if (typeof value.name !== 'string') throw configError('relay.name must be a string')
+        const trimmed = value.name.trim()
+        if (trimmed.length > 64) throw configError('relay.name must be at most 64 characters')
+        relay.name = trimmed
+      }
+    } else {
+      throw configError('relay must be an object ({ enabled, url, … }) or a boolean')
+    }
+  }
+  if (relay.enabled && relay.url === '') {
+    throw configError("relay.url is required when relay is enabled (e.g. relay: { enabled: true, url: 'wss://dsh-relay.nextai.show' })")
+  }
+
   return Object.freeze({
     role,
     publicUrl,
@@ -181,6 +248,7 @@ export function resolveConfig(raw) {
     minAgentVersion,
     preferAddress,
     tailscaleServe: Object.freeze({ ...tailscaleServe }),
+    relay: Object.freeze({ ...relay }),
     stateDir,
     keyTtlMinutes: boundedInteger(raw.keyTtlMinutes, 'keyTtlMinutes', DEFAULTS.keyTtlMinutes),
     heartbeatMs: boundedInteger(raw.heartbeatMs, 'heartbeatMs', DEFAULTS.heartbeatMs),
@@ -229,6 +297,53 @@ export function apply(ctx, config) {
     return () => tunnel.dispose()
   }, 'dsh-computers: tailscale serve tunnel')
 
+  // ---- relay link (v1.6.0, docs/relay-design.md §5) ---------------------
+  // A hub behind NAT/loopback cannot be reached, so the relay inverts the
+  // direction: this plugin dials OUT and clients arrive at
+  // `<relay>/r/<hubId>/…`. No port is opened. Created for every role — like the
+  // tunnel above it is about this plugin's own web server, not about the role.
+  //
+  // The hubId is the address other machines bookmark, so it lives in its own
+  // relay.json (never state.json: resetting the computer registry must not
+  // orphan an address already handed out). Only an enabled relay reads it.
+  const persistedIdentity = resolved.relay.enabled ? readRelayIdentity(stateDir, { onWarn }) : null
+  const relayConfig = Object.freeze({
+    ...resolved.relay,
+    hubId: resolved.relay.hubId !== ''
+      ? resolved.relay.hubId
+      : (persistedIdentity === null ? '' : persistedIdentity.hubId),
+  })
+  const relay = createRelay({
+    ctx,
+    config: relayConfig,
+    // Fired when the manager mints an id: persist it before the first dial so
+    // the published address survives a restart.
+    onHubId: (hubId) => {
+      writeRelayIdentity(stateDir, {
+        hubId,
+        createdAt: persistedIdentity === null ? null : persistedIdentity.createdAt,
+      }, { onWarn })
+    },
+    log: (level, message) => {
+      // The link is chatty about reconnects; only surface warnings/errors, and
+      // never let the relay's logging take the plugin down.
+      if (level === 'warn' || level === 'error') onWarn(`dsh-computers relay: ${message}`)
+    },
+  })
+  // An explicitly configured hubId is just as persistent as a minted one: a
+  // later config edit that drops it must not change the published address.
+  const identityChanged = persistedIdentity === null || persistedIdentity.hubId !== relayConfig.hubId
+  if (relayConfig.enabled && relayConfig.hubId !== '' && identityChanged) {
+    writeRelayIdentity(stateDir, {
+      hubId: relayConfig.hubId,
+      createdAt: persistedIdentity === null ? null : persistedIdentity.createdAt,
+    }, { onWarn })
+  }
+  ctx.effect(() => {
+    relay.start()
+    return () => relay.dispose()
+  }, 'dsh-computers: relay link')
+
   // ---- hub half (PROTOCOL §1-§5, §8) ------------------------------------
   // role 'runtime' is the controlled machine only: it must not serve the hub
   // API, register computer_* tools or contribute a prompt section.
@@ -259,6 +374,7 @@ export function apply(ctx, config) {
       version: PLUGIN_VERSION,
       agentUrl: AGENT_URL,
       tunnel,
+      relay,
       onWarn,
     })
     createTools({ ctx, config: resolved, store, hub, selections, access, fsOps, version: PLUGIN_VERSION, onWarn })
@@ -278,6 +394,7 @@ export function apply(ctx, config) {
       role: resolved.role,
       version: PLUGIN_VERSION,
       tunnel,
+      relay,
       onWarn,
     })
   }

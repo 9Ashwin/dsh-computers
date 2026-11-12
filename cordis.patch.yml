@@ -21,6 +21,15 @@
         execTimeoutMs: 120000
         execEnabled: true
         promoteOnTimeout: true
+        # 中继（v1.6.0，默认关闭）：开启后本机可被任何网络下的机器/手机连到，
+        # 不需要公网 IP 或开放端口。详见 docs/relay-deploy.md
+        relay:
+          enabled: false
+          url: ''                 # 例如 wss://dsh-relay.nextai.show
+          publicUrl: ''           # 留空自动生成 https://<relay>/r/<hubId>
+          accessKey: ''
+          hubId: ''               # 留空自动生成并持久化到 <stateDir>/relay.json
+          name: ''
         # 自动把本机 DSH 通过 tailscale serve 暴露到 tailnet（默认关闭）
         tailscaleServe:
           enabled: false
