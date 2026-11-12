@@ -387,6 +387,7 @@ test('run sends heartbeats and picks up the server display name', async (t) => {
   assert.equal(heartbeat.body.meta.agentVersion, AGENT_VERSION)
   assert.deepEqual(heartbeat.body.meta.capabilities, ['exec', 'fs'])
   assert.equal(heartbeat.body.meta.mode, 'service')
+  assert.deepEqual(heartbeat.body.meta.caps, { exec: true, fs: true, jobs: true, pty: false, tunnel: false })
   assert.ok(heartbeat.body.meta.memoryBytes > 0)
 
   mock.pushConfig({ name: 'Renamed Mac' })
@@ -641,15 +642,18 @@ test('enroll reports capabilities and §11.6 handshake metadata', async (t) => {
   assert.ok(result.stdout.includes(workspace))
 
   const enrollment = await mock.waitForEnrollment()
-  assert.deepEqual(enrollment.capabilities, ['exec', 'fs'])
+  // (a) R2a: real capability flags in the enroll metadata — not version inference.
+  assert.deepEqual(enrollment.metadata.caps, { exec: true, fs: true, jobs: true, pty: false, tunnel: false })
+  // (d) old metadata fields are unchanged by the additive caps object.
   assert.equal(enrollment.metadata.version, 1)
   assert.equal(enrollment.metadata.agentVersion, AGENT_VERSION)
   assert.equal(enrollment.metadata.mode, 'service', 'CLI enrollment is the service mode')
+  assert.deepEqual(enrollment.metadata.capabilities, ['exec', 'fs'], 'legacy capabilities array untouched')
   assert.equal(enrollment.metadata.hostname, os.hostname())
   assert.equal(enrollment.metadata.os, process.platform)
   assert.equal(enrollment.metadata.arch, process.arch)
-  assert.deepEqual(enrollment.metadata.capabilities, ['exec', 'fs'])
   assert.equal(await fs.realpath(enrollment.metadata.workspaceBase), await fs.realpath(workspace))
+  assert.deepEqual(enrollment.capabilities, ['exec', 'fs'])
 
   const config = await readConfig(home)
   assert.equal(await fs.realpath(config.workspaceBase), await fs.realpath(workspace))
@@ -689,7 +693,8 @@ test('every reconnect carries the handshake metadata header (§11.6)', async (t)
   assert.equal(metadata.version, 1)
   assert.equal(metadata.agentVersion, AGENT_VERSION)
   assert.equal(metadata.mode, 'service', 'CLI run reports service mode on every reconnect')
-  assert.deepEqual(metadata.capabilities, ['exec', 'fs'])
+  assert.deepEqual(metadata.capabilities, ['exec', 'fs'], 'legacy capabilities array unchanged')
+  assert.deepEqual(metadata.caps, { exec: true, fs: true, jobs: true, pty: false, tunnel: false })
   assert.equal(await fs.realpath(metadata.workspaceBase), await fs.realpath(os.homedir()))
   assert.equal(metadata.hostname, os.hostname())
   assert.equal(metadata.os, process.platform)
@@ -782,7 +787,7 @@ test('embedded status() exposes capabilities and the host feature set', async (t
     'const deadline = Date.now() + 10000',
     'while (!runtime.status().connected && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25))',
     'const status = runtime.status()',
-    'await new Promise((resolve) => process.stdout.write("STATUS " + JSON.stringify({ mode: status.mode, capabilities: status.capabilities, features: status.features, workspaceBase: status.workspaceBase }) + String.fromCharCode(10), resolve))',
+    'await new Promise((resolve) => process.stdout.write("STATUS " + JSON.stringify({ mode: status.mode, capabilities: status.capabilities, caps: status.caps, features: status.features, workspaceBase: status.workspaceBase }) + String.fromCharCode(10), resolve))',
     'await runtime.stop()',
     'process.exit(0)',
   ].join('\n')
@@ -797,6 +802,7 @@ test('embedded status() exposes capabilities and the host feature set', async (t
   const status = readJsonLine(embedded.stdout, 'STATUS ')
   assert.equal(status.mode, 'embedded', 'the plugin host passes mode: "embedded"')
   assert.deepEqual(status.capabilities, ['exec', 'fs'])
+  assert.deepEqual(status.caps, { exec: true, fs: true, jobs: true, pty: false, tunnel: false })
   assert.deepEqual(status.features, ['stream', 'fs'])
   // The connect header from the embedded runtime also says embedded.
   const embeddedConnect = mock.eventsRequests.at(-1)
@@ -850,6 +856,58 @@ test('a silent streamed command emits heartbeat frames (§11.6)', async (t) => {
   const heartbeats = all.filter((frame) => frame.type === 'heartbeat')
   assert.ok(heartbeats.length >= 1)
   for (const heartbeat of heartbeats) assert.equal(heartbeat.data, '')
+
+  embedded.sendLine('stop')
+  const exited = await embedded.closed
+  assert.equal(exited.code, 0)
+})
+
+test('caps.fs is false when the fs handlers are unavailable (test option)', async (t) => {
+  const { mock, home } = await setup(t, { features: ['stream', 'fs'] })
+  const { config } = await enrollAgent(mock, home)
+  const script = [
+    `import { startRuntime } from ${JSON.stringify(agentPath)}`,
+    'const options = JSON.parse(process.env.DSHC_EMBEDDED_OPTIONS)',
+    'const runtime = startRuntime({ serverUrl: options.serverUrl, token: options.token, computerId: options.computerId, mode: "embedded", fs: false, log: () => {}, onState: () => {} })',
+    'const deadline = Date.now() + 10000',
+    'while (!runtime.status().connected && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25))',
+    'const status = runtime.status()',
+    'await new Promise((resolve) => process.stdout.write("STATUS " + JSON.stringify({ caps: status.caps, capabilities: status.capabilities, mode: status.mode }) + String.fromCharCode(10), resolve))',
+    'process.stdin.setEncoding("utf8")',
+    'process.stdin.resume()',
+    'await new Promise((resolve) => process.stdin.once("data", resolve))',
+    'await runtime.stop()',
+    'process.exit(0)',
+  ].join('\n')
+  const embedded = spawnNodeEval(script, {
+    home,
+    env: {
+      DSHC_EMBEDDED_OPTIONS: JSON.stringify({ serverUrl: mock.url, token: config.token, computerId: config.computerId }),
+    },
+  })
+  t.after(() => embedded.stop())
+  await embedded.waitForOutput(/STATUS /)
+  const status = readJsonLine(embedded.stdout, 'STATUS ')
+  assert.deepEqual(status.caps, { exec: true, fs: false, jobs: true, pty: false, tunnel: false })
+  // (d) compatibility: the legacy array and mode are untouched by the simulation.
+  assert.deepEqual(status.capabilities, ['exec', 'fs'])
+  assert.equal(status.mode, 'embedded')
+
+  // The connect metadata carries the same caps object.
+  const connect = mock.eventsRequests.at(-1)
+  const metadata = JSON.parse(Buffer.from(connect.headers['x-dsh-computers-metadata'], 'base64url').toString('utf8'))
+  assert.deepEqual(metadata.caps, { exec: true, fs: false, jobs: true, pty: false, tunnel: false })
+  assert.deepEqual(metadata.capabilities, ['exec', 'fs'])
+  assert.equal(metadata.version, 1)
+
+  // …and the agent ignores fs events even though the host advertises fs.
+  const requestId = mock.pushFs({ op: 'read', path: '/etc/hosts' })
+  await new Promise((resolve) => setTimeout(resolve, 400))
+  assert.equal(
+    mock.fsResults.some((entry) => entry.requestId === requestId),
+    false,
+    'fs handlers are unwired, so no fs result may be posted',
+  )
 
   embedded.sendLine('stop')
   const exited = await embedded.closed

@@ -168,8 +168,36 @@ function normalizeRuntimeMode(value) {
   return value === 'embedded' ? 'embedded' : 'service'
 }
 
-/** PROTOCOL §11.6 handshake metadata, reported at enroll and on every connect. */
-function handshakeMetadata(workspaceBase, mode) {
+/**
+ * R2a: per-instance capability flags — the source of truth for what this agent
+ * can actually do, so the host/UI never has to infer features from a version
+ * number. Additive to §11.6 metadata; older hosts ignore unknown keys.
+ *
+ *   exec   — run shell commands (`exec` events, results, cancel, chunks)
+ *   fs     — remote file access (§11.3 handlers are wired). `false` only when
+ *            the instance was started with the test/advanced option `fs:false`
+ *   jobs   — supports the host's background-job path: it accepts `cancel`,
+ *            streams output chunks and always posts one final result
+ *   pty    — terminal backend (§11.4, not implemented yet: always false)
+ *   tunnel — relay/tunnel transport (not implemented: always false)
+ *
+ * `caps` does not get its own envelope: it rides inside the existing §11.6
+ * metadata (`version: 1`), alongside the legacy `capabilities: ['exec','fs']`
+ * array, which stays untouched for backwards compatibility.
+ */
+function agentCaps({ fs = true, jobs = true } = {}) {
+  return { exec: true, fs: fs === true, jobs: jobs === true, pty: false, tunnel: false }
+}
+
+/**
+ * PROTOCOL §11.6 handshake metadata + R2a `caps`.
+ *
+ * Reported in the enroll body, in the `x-dsh-computers-metadata` header on
+ * every SSE connect (probe and each reconnect) and mirrored into the heartbeat
+ * `meta`. `caps` is the authoritative per-instance capability object; the
+ * legacy `capabilities` array is kept unchanged for older hosts.
+ */
+function handshakeMetadata(workspaceBase, mode, caps) {
   const info = machineInfo('')
   return {
     version: HANDSHAKE_VERSION,
@@ -179,6 +207,7 @@ function handshakeMetadata(workspaceBase, mode) {
     os: info.os,
     arch: info.arch,
     capabilities: [...AGENT_CAPABILITIES],
+    caps: { ...(caps ?? agentCaps()) },
     workspaceBase: normalizeWorkspaceBase(workspaceBase),
   }
 }
@@ -582,7 +611,7 @@ async function probeEventStream(config, timeoutMs = 5000) {
   timer.unref?.()
   try {
     const response = await fetch(eventsUrl(config.serverUrl), {
-      headers: sseHeaders(config.token, handshakeMetadata(config.workspaceBase, config.mode)),
+      headers: sseHeaders(config.token, handshakeMetadata(config.workspaceBase, config.mode, config.caps)),
       signal: controller.signal,
     })
     if (response.status === 401) {
@@ -845,6 +874,7 @@ async function sendHeartbeat(runtime) {
           agentVersion: AGENT_VERSION,
           capabilities: [...AGENT_CAPABILITIES],
           mode: config.mode,
+          caps: { ...config.caps },
         },
       },
       timeoutMs: 15_000,
@@ -1583,7 +1613,12 @@ function handleFs(runtime, rawData) {
     return
   }
   // §11.5: an old host never sends fs events; only accept them when it
-  // advertised the `fs` feature in `hello`.
+  // advertised the `fs` feature in `hello` AND this instance actually wired the
+  // fs handlers (R2a `caps.fs` — false only under the test/advanced option).
+  if (!runtime.config.fsEnabled) {
+    runtimeLog(runtime, 'warn', `忽略 fs 事件（本实例未启用 fs 能力）：${request.op} ${request.requestId}`)
+    return
+  }
   if (!runtime.state.features.includes('fs')) {
     runtimeLog(runtime, 'warn', `忽略 fs 事件（服务器未声明 fs 能力）：${request.op} ${request.requestId}`)
     return
@@ -1663,7 +1698,11 @@ function createRuntime(options) {
     name: typeof options.name === 'string' ? options.name.trim() : '',
     workspaceBase: normalizeWorkspaceBase(options.workspaceBase),
     mode: normalizeRuntimeMode(options.mode),
+    // R2a: `fs:false` is a test/advanced option that simulates an agent build
+    // with no fs handlers; real builds always wire them.
+    caps: agentCaps({ fs: options.fs !== false }),
   }
+  config.fsEnabled = config.caps.fs
   return {
     config,
     log: typeof options.log === 'function' ? options.log : defaultRuntimeLog,
@@ -1706,6 +1745,7 @@ function createRuntime(options) {
  *   name?: string,
  *   heartbeatMs?: number,
  *   mode?: 'embedded' | 'service',   // default 'service'; the plugin passes 'embedded'
+ *   fs?: boolean,                    // default true; false = simulate an agent without fs handlers (tests)
  *   log?: (level: 'info'|'warn'|'error', message: string) => void,
  *   onState?: (state: object) => void,
  * }} options
@@ -1713,8 +1753,8 @@ function createRuntime(options) {
  *
  * `status()` is synchronous and returns
  * `{ running, connected, serverUrl, computerId, name, mode, workspaceBase,
- *    capabilities, features, heartbeatMs, since, lastConnectedAt, lastError,
- *    attempts, exitCode }` —
+ *    capabilities, caps, features, heartbeatMs, since, lastConnectedAt,
+ *    lastError, attempts, exitCode }` —
  * the host manager only needs `connected` / `since` / `lastError` from it.
  *
  * A fatal `{"error":"invalid-token"}` 401 does NOT throw: the loop ends, sets
@@ -1753,6 +1793,7 @@ function runtimeStatus(runtime) {
     mode: runtime.config.mode,
     workspaceBase: runtime.config.workspaceBase,
     capabilities: [...AGENT_CAPABILITIES],
+    caps: { ...runtime.config.caps },
     features: [...state.features],
     heartbeatMs: state.heartbeatMs,
     since: state.since,
@@ -1918,7 +1959,7 @@ async function runRuntimeLoop(runtime) {
 async function runOneSession(runtime, signal) {
   const config = runtime.config
   const response = await fetch(eventsUrl(config.serverUrl), {
-    headers: sseHeaders(config.token, handshakeMetadata(config.workspaceBase, config.mode)),
+    headers: sseHeaders(config.token, handshakeMetadata(config.workspaceBase, config.mode, config.caps)),
     signal,
   })
   if (response.status === 401) {
@@ -2124,7 +2165,7 @@ async function cmdEnroll(argv) {
     // PROTOCOL §11.1 (top-level capabilities) + §11.6 (handshake metadata).
     capabilities: [...AGENT_CAPABILITIES],
     machine: machineInfo(requestedName),
-    metadata: handshakeMetadata(workspaceBase, 'service'),
+    metadata: handshakeMetadata(workspaceBase, 'service', agentCaps()),
   }
   if (values.replace) body.replace = true
 

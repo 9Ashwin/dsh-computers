@@ -134,7 +134,7 @@ const runtime = startRuntime({
   onState: (state) => {},      // connect/disconnect/error/stop transitions
 })
 
-runtime.status() // synchronous snapshot (see below)
+runtime.status() // synchronous snapshot incl. mode, capabilities, caps, features (see below)
 await runtime.stop() // idempotent: aborts SSE, SIGKILLs children, awaits the loop
 ```
 
@@ -167,10 +167,27 @@ Semantics guaranteed to the host:
 
 ### Capabilities and gating (§11.1, §11.5)
 
-The agent reports `capabilities: ["exec", "fs"]` in the enroll body, in the
-heartbeat `meta`, in the §11.6 metadata and in `startRuntime().status()`.
-Nothing new is sent to an old host: the `hello` event's `features` list decides
-what is enabled per connection —
+The agent reports the legacy `capabilities: ["exec", "fs"]` array (kept
+unchanged for older hosts) **and** an R2 `caps` object describing what this
+instance can actually do — the host/UI should use `caps`, not version numbers:
+
+```json
+{ "exec": true, "fs": true, "jobs": true, "pty": false, "tunnel": false }
+```
+
+| flag | meaning |
+| --- | --- |
+| `exec` | can run shell commands, cancel them, stream chunks and post results |
+| `fs` | §11.3 remote file handlers are wired; `false` only when started with the test/advanced `fs: false` option |
+| `jobs` | supports the host's background-job path (accepts `cancel`, streams output, always posts one final result) |
+| `pty` | terminal backend (§11.4) — not implemented: always `false` |
+| `tunnel` | relay/tunnel transport — not implemented: always `false` |
+
+`caps` rides inside the existing §11.6 metadata (`version: 1`); no second
+envelope is introduced, and unknown keys are ignored by older hosts. `caps` is
+also in the heartbeat `meta`, in every connect header and in
+`startRuntime().status()`. Nothing new is *sent* to an old host: the `hello`
+event's `features` list still decides what is enabled per connection —
 
 | `hello.features` | behaviour |
 | --- | --- |
@@ -181,7 +198,7 @@ what is enabled per connection —
 ### Handshake metadata (§11.6)
 
 Enroll sends `metadata: { version: 1, agentVersion, mode, hostname, os, arch,
-capabilities, workspaceBase }`, and every SSE connect (probe and each
+capabilities, caps, workspaceBase }`, and every SSE connect (probe and each
 reconnect) carries the same JSON in the `x-dsh-computers-metadata` header as
 base64url — an SSE GET has no body, so the header is how the reference-product
 handshake metadata maps onto this wire. `mode` is `service` for the CLI/launchd
@@ -384,4 +401,8 @@ paths:
   and the fs ops round-trip (read text/binary + windows + limits, relative-path
   rejection, write/list/stat/mkdir/rename/delete, glob with `**` and `{a,b}`,
   grep with `include`/`maxMatches`/binary skip, and `stop()` during an
-  in-flight fs request leaves no result POST).
+  in-flight fs request leaves no result POST);
+- R2a caps: enroll metadata, every connect header and heartbeat `meta` carry
+  `{exec:true,fs:true,jobs:true,pty:false,tunnel:false}`; `startRuntime({fs:false})`
+  reports `fs:false`, ignores fs events, and leaves the legacy `capabilities`
+  array + `mode` unchanged; old metadata fields are untouched.
