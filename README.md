@@ -212,3 +212,14 @@ node --check client.js          # 浏览器半
 ## License
 
 MIT
+
+## 开发与测试
+
+```bash
+npm test           # 全部：host smoke + agent + relay
+npm run test:host  # host smoke（186 组断言）
+npm run test:agent # agent（43 项）
+npm run test:relay # relay S0/S1（47 项）
+```
+
+> Node 24 把裸目录参数当作模块说明符，所以 relay 测试用显式 glob（脚本里已带引号）。

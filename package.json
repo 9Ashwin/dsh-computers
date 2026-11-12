@@ -60,5 +60,11 @@
   },
   "bin": {
     "dsh-computers-relay": "./bin/dsh-computers-relay.mjs"
+  },
+  "scripts": {
+    "test": "node scripts/host-smoke.mjs && node --test agent/test/ && node --test \"lib/relay/test/*.test.mjs\"",
+    "test:host": "node scripts/host-smoke.mjs",
+    "test:agent": "node --test agent/test/",
+    "test:relay": "node --test \"lib/relay/test/*.test.mjs\""
   }
 }
