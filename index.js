@@ -19,13 +19,16 @@ import { createFsOps } from './lib/fs-ops.js'
 import { PREFER_ADDRESS_VALUES } from './lib/addresses.js'
 import { createTunnel } from './lib/tunnel.js'
 import { createRelay, normalizeRelayUrl } from './lib/relay-manager.js'
+// v1.9.2: the managed local relay — the plugin spawns and supervises its own
+// `bin/dsh-computers-relay.mjs`, so upgrading the plugin upgrades the relay.
+import { createRelaySupervisor } from './lib/relay-supervisor.js'
 import { HUB_ID_PATTERN, isHubId, readRelayIdentity, writeRelayIdentity } from './lib/relay-identity.js'
 import { createFleetIdentity } from './lib/fleet-identity.js'
 import { createAccountManager, machineNameOf, preferNonLoopback, readAccountControllable } from './lib/account.js'
-import { createSelfRuntime } from './lib/self-runtime.js'
+import { createSelfRuntime, readSelfComputerId } from './lib/self-runtime.js'
 import { resolveBaseUrl } from './lib/http.js'
 import { createComputerSkills } from './lib/skills.js'
-import { createSelectionStore } from './lib/selection.js'
+import { createSelectionStore, normalizeSessionId } from './lib/selection.js'
 import { majorMinor } from './lib/version.js'
 import { resolveStateDir, createStore } from './lib/state.js'
 import { createTools } from './lib/tools.js'
@@ -37,7 +40,7 @@ export const name = 'dsh-computers'
 export const inject = ['tools', 'webServer']
 
 /** Version reported by `/api/dsh-computers/health` (and asserted by the smoke harness). */
-export const PLUGIN_VERSION = '1.9.1'
+export const PLUGIN_VERSION = '1.9.2'
 
 /** The machine agent bundle, served at request time (never imported). */
 const AGENT_URL = new URL('./agent/dsh-computers-agent.mjs', import.meta.url)
@@ -62,7 +65,19 @@ const DEFAULTS = Object.freeze({
   execEnabled: true,
   preferAddress: 'auto',
   tailscaleServe: Object.freeze({ enabled: false, httpsPort: 8443 }),
-  relay: Object.freeze({ enabled: false, url: '', publicUrl: '', accessKey: '', hubId: '', name: '' }),
+  relay: Object.freeze({
+    enabled: false,
+    url: '',
+    publicUrl: '',
+    accessKey: '',
+    hubId: '',
+    name: '',
+    // v1.9.2: the managed local relay. `localPort` is the loopback port the
+    // plugin's own relay process binds; `localAutoStart` is FALSE by default —
+    // the plugin must never start a listening server unasked.
+    localPort: 8445,
+    localAutoStart: false,
+  }),
   maxOutputBytes: 1_048_576,
 })
 
@@ -243,6 +258,19 @@ export function resolveConfig(raw) {
         if (trimmed.length > 64) throw configError('relay.name must be at most 64 characters')
         relay.name = trimmed
       }
+      // v1.9.2: the managed local relay. The port is where the plugin's own
+      // relay process listens on loopback; auto-start stays opt-in, because a
+      // plugin load must not open a server the user never asked for.
+      if (value.localPort !== undefined && value.localPort !== null && value.localPort !== '') {
+        if (!Number.isSafeInteger(value.localPort) || value.localPort < 1 || value.localPort > 65535) {
+          throw configError('relay.localPort must be an integer between 1 and 65535')
+        }
+        relay.localPort = value.localPort
+      }
+      if (value.localAutoStart !== undefined && value.localAutoStart !== null) {
+        if (typeof value.localAutoStart !== 'boolean') throw configError('relay.localAutoStart must be a boolean')
+        relay.localAutoStart = value.localAutoStart
+      }
     } else {
       throw configError('relay must be an object ({ enabled, url, … }) or a boolean')
     }
@@ -306,6 +334,16 @@ export function apply(ctx, config) {
     if (value !== null && typeof value === 'object' && !Array.isArray(value)) selfRuntimeDeps = value
   } catch {
     selfRuntimeDeps = {}
+  }
+  // Local-relay seam (v1.9.2): the smoke harness injects a fake relay bin, a
+  // counting spawner and short backoffs so the child lifecycle is assertable
+  // without starting a real relay. `autoStart: false` keeps other mounts quiet.
+  let relaySupervisorDeps = {}
+  try {
+    const value = ctx === null || typeof ctx !== 'object' ? undefined : ctx.relaySupervisorDeps
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) relaySupervisorDeps = value
+  } catch {
+    relaySupervisorDeps = {}
   }
   const onWarn = (message) => {
     try {
@@ -479,6 +517,20 @@ export function apply(ctx, config) {
       deps: selfRuntimeDeps,
     })
 
+    // v1.9.2: the plugin's OWN relay process (one-click, no git/systemd/root).
+    // The supervisor spawns `bin/dsh-computers-relay.mjs` on loopback and keeps
+    // its data under `<stateDir>/relay-data`; upgrading the plugin therefore
+    // upgrades the relay. It is created for the hub surface only (a runtime-only
+    // deployment never hosts a relay). Auto-start is opt-in — see the effect
+    // below — because loading a plugin must never open a listening server.
+    const relaySupervisor = createRelaySupervisor({
+      ctx,
+      stateDir,
+      port: resolved.relay.localPort,
+      onWarn,
+      deps: relaySupervisorDeps,
+    })
+
     // Routes first (the browser page and the agents can arrive immediately),
     // then the tools and the prompt section.
     createRoutes({
@@ -494,17 +546,23 @@ export function apply(ctx, config) {
       agentUrl: AGENT_URL,
       tunnel,
       relay,
+      relaySupervisor,
       fleet,
       account,
       selfRuntime,
       onWarn,
     })
-    createTools({ ctx, config: resolved, store, hub, selections, access, fsOps, version: PLUGIN_VERSION, onWarn })
+    // v1.9.2: the tools own the LAZY start of 「本地电脑」 — a tool call with a
+    // null pin starts the local runtime and waits for it to register — so the
+    // manager instance is handed over instead of the tools reading its files.
+    createTools({ ctx, config: resolved, store, hub, selections, access, fsOps, selfRuntime, version: PLUGIN_VERSION, onWarn })
 
-    // Start the self-runtime at load unless the user turned 被控 off. The switch
-    // lives in account.json and survives restarts, so a disabled machine stays
-    // disabled; `autoStart: false` is the harness seam that keeps other smoke
-    // phases from spawning children.
+    // v1.9.2: loading the plugin must NOT make this machine appear connected.
+    // The self-runtime is lazy: it starts on the first tool call for 本地电脑 or
+    // from the 被控 switch, so this load-time hook is a no-op unless the
+    // deployment explicitly opted in (`selfRuntimeDeps.autoStart === true`, the
+    // harness seam). It is kept so an eager deployment still has one place to
+    // ask, and so the manager is disposed with the plugin either way.
     ctx.effect(() => {
       try {
         let controllable = true
@@ -513,12 +571,27 @@ export function apply(ctx, config) {
         } catch {
           controllable = true
         }
-        if (selfRuntimeDeps.autoStart !== false && controllable) void selfRuntime.autoStart()
+        if (selfRuntimeDeps.autoStart === true && controllable) void selfRuntime.autoStart()
       } catch (error) {
         onWarn(`dsh-computers: the self runtime could not auto-start: ${error && error.message ? error.message : error}`)
       }
       return () => selfRuntime.dispose()
     }, 'dsh-computers: self runtime')
+
+    // The local relay is started only when the operator asked for it
+    // (`relay.localAutoStart: true`). The default is FALSE on purpose: loading a
+    // plugin must never open a listening server the user did not request. The
+    // `autoStart` seam lets the smoke harness force/suppress it.
+    ctx.effect(() => {
+      try {
+        const shouldAutoStart = relaySupervisorDeps.autoStart === true
+          || (relaySupervisorDeps.autoStart !== false && resolved.relay.localAutoStart === true)
+        if (shouldAutoStart) void relaySupervisor.autoStart()
+      } catch (error) {
+        onWarn(`dsh-computers: the local relay could not auto-start: ${error && error.message ? error.message : error}`)
+      }
+      return () => relaySupervisor.dispose()
+    }, 'dsh-computers: local relay supervisor')
 
     // ---- remote skills in the slash menu (v1.9.0) ----------------------
     // Every connected computer's own skills become DSH skills named
@@ -531,6 +604,48 @@ export function apply(ctx, config) {
       hub,
       fsOps,
       computers: () => store.read().computers,
+      // v1.9.2: the slash menu shows only the machine PINNED in the viewing
+      // session, not every connected machine's skills. DSH hands the viewing
+      // agent to `list()` as `options.scope`, so this resolver maps that agent's
+      // session to its pin:
+      // - no session (or no pin) → 本地电脑 only;
+      // - a pinned account device (`acct:<machineId>`) → nothing, because that
+      //   device reports its skills to ITS OWN hub, not to this one;
+      // - any other pin → exactly that computer.
+      scopeComputer: (agent) => {
+        let sessionId = null
+        try {
+          sessionId = normalizeSessionId(agent?.session?.id ?? agent?.id)
+        } catch {
+          sessionId = null
+        }
+        if (sessionId === null) return 'local'
+        let pinned = null
+        try {
+          pinned = selections.get(sessionId)
+        } catch {
+          pinned = null
+        }
+        if (pinned === null) return 'local'
+        if (pinned.startsWith('acct:')) return 'none'
+        return pinned
+      },
+      // The registry record of THIS machine's own runtime, so `'local'` can be
+      // resolved even before the (now lazy) runtime enrolled in this process:
+      // the persisted isolated identity is the fallback.
+      selfComputerId: () => {
+        try {
+          const id = selfRuntime.status().computerId
+          if (typeof id === 'string' && id !== '') return id
+        } catch {
+          // Fall through to the persisted identity.
+        }
+        try {
+          return readSelfComputerId(stateDir) || null
+        } catch {
+          return null
+        }
+      },
       onWarn,
     })
     try {

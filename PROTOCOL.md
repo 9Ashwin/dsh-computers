@@ -988,3 +988,40 @@ dshk_<16 hex 账号体>_<32 hex 密钥体>        例：dshk_6d56dbd4988a3fe3_88
 - `403 not-controllable`（这台机器关了被控）、`503 self-runtime-unavailable`（自运行时没跑）、`401 invalid-key`
 - 工具侧路由：`null` 选中 = 本地电脑 → 自运行时；`acct:<machineId>` → `<entryUrl>/api/dsh-computers/fleet/*` 带 `x-fleet-key`；
   `computer_list` / `computer_skills` 会把账号设备合并进来并标 `via: 'account'`
+
+## 17 托管中继与单列表界面（v1.9.2）
+
+### 17.1 本机中继（一键）
+
+中继代码在插件包里，所以插件可以自己起中继——**升级插件 = 升级中继**，不需要 git/systemd/root。
+
+| 路由 | 语义 |
+| --- | --- |
+| `GET /api/dsh-computers/relay/supervisor` | `{ supervisor: { state, pid, port, since, lastError, logs, adopted }, localUrl }` |
+| `POST /api/dsh-computers/relay/supervisor` | `{ action: 'start' | 'stop' | 'restart', port? }` → 同样的形状 + `suggestedUrl` |
+
+- spawn：`node <pkg>/bin/dsh-computers-relay.mjs --port <port> --host 127.0.0.1 --data-dir <stateDir>/relay-data`
+- 端口已被别的中继占用时**接管**（`adopted: true`，不重复起进程；停用只放弃接管，不杀别人的进程）
+- 崩溃退避：5 分钟最多 3 次（1s/2s/4s），之后 `failed` 并给出原因
+- `relay.localAutoStart` 默认 **false**：绝不在用户没要求时起服务器
+- 启动**不会**自动启用中继链路（那仍是「启用」开关的事）
+
+### 17.2 单个列表（只留账号）
+
+界面收敛为一个列表：**账号**。`/agent/enroll` 的加入地址流程保留在 API/CLI 里（自运行时与无 DSH 的机器用），但**界面上不再出现**。
+
+### 17.3 被控与自运行时
+
+- 自运行时**不再在加载时启动**：第一次需要「本地电脑」时才懒启动（等待注册最多 5 秒）
+- **被控开关只控制 fleet API**（`403 not-controllable`），不会停掉本机运行时——否则自己的「本地电脑」就用不了
+- `/state.computers[]` 里本机那条带 `self: true`，UI 与 `computer_list` 都把它从"远端电脑"里排除；`computer_list` 用 `localComputer` 单独返回
+
+### 17.4 斜杠菜单只显示选中机器的技能
+
+DSH 把**当前 agent** 作为 `options.scope` 传给技能提供者，插件据此查该会话的选择器：
+选中某台 → 只列那台的技能；选「本地电脑」→ 只列本机；选中账号设备 → 不列（它的技能在自己 hub 上）。
+
+### 17.5 账号目录携带被控状态
+
+`POST /api/fleet/accounts/<id>/devices` 接受 `controllable: boolean`（默认 true），设备列表原样返回，
+于是同账号的其他机器能提前看到"不允许被控"并拒绝调度（真正的门禁仍在该机器的 hub 上）。

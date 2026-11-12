@@ -75,6 +75,11 @@ import {
 import { formatFleetKey, parseFleetKey as parseRelayFleetKey } from '../lib/relay/accounts.js'
 // v1.9.1: the local (self) runtime that makes the composer's 本地电脑 executable.
 import { createSelfRuntime, MAX_RESTARTS, SELF_CONFIG_NAME, SELF_DIR_NAME } from '../lib/self-runtime.js'
+// v1.9.2: the managed local relay (one-click, no systemd).
+import {
+  createRelaySupervisor, DEFAULT_RELAY_PORT, MAX_RESTARTS as RELAY_MAX_RESTARTS,
+  probeRelayHealth, RELAY_DATA_DIR_NAME,
+} from '../lib/relay-supervisor.js'
 import * as contracts from '../lib/contracts.js'
 import {
   DENY_CODES, OPERATIONS, OPERATION_REQUIREMENTS, TOOL_OPERATIONS,
@@ -190,10 +195,15 @@ function createFakeContext() {
     // Account-center seam (v1.8.0): a short heartbeat so the 60 s registration
     // loop is assertable without waiting a minute.
     accountDeps: undefined,
-    // Self-runtime seam (v1.9.1): `autoStart: false` by default, so the other
-    // phases never spawn a real agent child; phase Y overrides it with a fake
-    // agent path, short backoffs and a counting spawner.
-    selfRuntimeDeps: { autoStart: false },
+    // Self-runtime seam (v1.9.1/v1.9.2): the runtime is LAZY by default, so
+    // the other phases must neither start it at load (`autoStart: false`) nor
+    // spawn a real agent child when a tool happens to target 本地电脑
+    // (`lazyStart: false`). Phase Y overrides both with a fake agent path,
+    // short backoffs and a counting spawner.
+    selfRuntimeDeps: { autoStart: false, lazyStart: false },
+    // Local-relay seam (v1.9.2): a fake relay bin / counting spawner / short
+    // backoffs for phase AA; production never sets it.
+    relaySupervisorDeps: undefined,
     tools: {
       register(definition) {
         if (tools.has(definition.name)) throw new Error(`duplicate tool ${definition.name}`)
@@ -292,7 +302,7 @@ function withoutHealth(list) {
   return list.map(({ health, ...rest }) => rest)
 }
 
-async function mount(config, { addressDeps, webServerHost, tunnelExec, hubDeps, relayDeps, accountDeps, selfRuntimeDeps, skills } = {}) {
+async function mount(config, { addressDeps, webServerHost, tunnelExec, hubDeps, relayDeps, accountDeps, selfRuntimeDeps, relaySupervisorDeps, skills } = {}) {
   const fake = createFakeContext()
   if (addressDeps !== undefined) fake.ctx.addressDeps = addressDeps
   // R5b test seam: an injected clock + short lease for the presence sweep.
@@ -303,6 +313,8 @@ async function mount(config, { addressDeps, webServerHost, tunnelExec, hubDeps, 
   if (accountDeps !== undefined) fake.ctx.accountDeps = accountDeps
   // v1.9.1 self-runtime seam: fake agent path / spawner / backoffs (phase Y).
   if (selfRuntimeDeps !== undefined) fake.ctx.selfRuntimeDeps = selfRuntimeDeps
+  // v1.9.2 local-relay seam: fake relay bin / spawner / backoffs (phase AA).
+  if (relaySupervisorDeps !== undefined) fake.ctx.relaySupervisorDeps = relaySupervisorDeps
   // v1.9.0 skills seam: a fake `skills` service, so the provider registration
   // (and its disposer) is observable without a real DSH composition.
   if (skills !== undefined) fake.setService('skills', skills)
@@ -1287,7 +1299,7 @@ async function phaseD() {
       minAgentVersion: '',
       preferAddress: 'auto',
       tailscaleServe: { enabled: false, httpsPort: 8443 },
-      relay: { enabled: false, url: '', publicUrl: '', accessKey: '', hubId: '', name: '' },
+      relay: { enabled: false, url: '', publicUrl: '', accessKey: '', hubId: '', name: '', localPort: 8445, localAutoStart: false },
       stateDir: '',
       keyTtlMinutes: 15,
       heartbeatMs: 20_000,
@@ -2270,9 +2282,10 @@ async function phaseH(root) {
 
     await check('computer_exec: no pin and no argument is an actionable error', async () => {
       const anonymous = execTool.execute({ command: 'echo nope' }, { signal: new AbortController().signal })
-      // v1.9.1: no pin = 「本地电脑」; this fixture has no local runtime, so the
-      // message tells the user how to turn 被控 on.
-      await assert.rejects(anonymous, /本地电脑的运行时没启动：设置 → 电脑 → 高级 里把被控打开/)
+      // v1.9.2: no pin = 「本地电脑」; the runtime is LAZY, so a tool call starts
+      // it — but this fixture disables the lazy start (no agent child), and the
+      // message points at the runtime instead of the 被控 switch.
+      await assert.rejects(anonymous, /本地电脑的运行时没启动：请在 设置 → 电脑 → 高级 里查看本机运行时/)
       const otherSession = execTool.execute(
         { command: 'echo nope' },
         { signal: new AbortController().signal, agent: { id: 'sess_without_a_pin' } },
@@ -4619,6 +4632,17 @@ const RELAY_OFF = Object.freeze({
   streams: 0,
 })
 
+/** The managed-local-relay block in its stopped default (v1.9.2). */
+function supervisorOff(port = DEFAULT_RELAY_PORT) {
+  return { state: 'stopped', pid: null, port, since: null, lastError: null, logs: [], adopted: false }
+}
+
+/**
+ * `/state.relay` with no relay link configured: the v1.6.0 disabled link shape
+ * plus the v1.9.2 `supervisor` block (additive to the same object).
+ */
+const RELAY_OFF_STATE = Object.freeze({ ...RELAY_OFF, supervisor: Object.freeze(supervisorOff()) })
+
 /** The relay service this build targets. */
 const RELAY_URL = 'wss://relay.example.com'
 
@@ -4723,7 +4747,7 @@ async function relayOf(origin) {
 
 async function phaseS(root) {
   await check('relay: config validation (object/boolean, url, limits, frozen)', async () => {
-    assert.deepEqual(resolveConfig({}).relay, { enabled: false, url: '', publicUrl: '', accessKey: '', hubId: '', name: '' })
+    assert.deepEqual(resolveConfig({}).relay, { enabled: false, url: '', publicUrl: '', accessKey: '', hubId: '', name: '', localPort: DEFAULT_RELAY_PORT, localAutoStart: false })
     assert.equal(resolveConfig({ relay: false }).relay.enabled, false)
     // Boolean shorthand `true` still needs an address: there is deliberately no
     // default relay host, so the error names the service to use.
@@ -4757,7 +4781,7 @@ async function phaseS(root) {
     assert.throws(() => resolveConfig({ relay: [] }), /relay must be an object/)
     // Unknown keys are ignored (design §10), not fatal.
     assert.equal(resolveConfig({ relay: { enabled: false, maxStreams: 7 } }).relay.enabled, false)
-    assert.deepEqual(resolveConfig({ relay: { enabled: false } }).relay, { enabled: false, url: '', publicUrl: '', accessKey: '', hubId: '', name: '' })
+    assert.deepEqual(resolveConfig({ relay: { enabled: false } }).relay, { enabled: false, url: '', publicUrl: '', accessKey: '', hubId: '', name: '', localPort: DEFAULT_RELAY_PORT, localAutoStart: false })
   })
 
   await check('relay: url helpers normalise the relay address and derive the entry', async () => {
@@ -4776,7 +4800,7 @@ async function phaseS(root) {
     const app = await mount({ ...FAST_CONFIG, stateDir: offDir })
     try {
       const state = (await call(app.origin, `${API}/state`)).data
-      assert.deepEqual(state.relay, RELAY_OFF)
+      assert.deepEqual(state.relay, RELAY_OFF_STATE)
       assert.equal(state.serverUrls.some((candidate) => candidate.kind === 'relay'), false)
       assert.equal(existsSync(join(offDir, 'relay.json')), false, 'a disabled relay must not create relay.json')
     } finally {
@@ -5027,7 +5051,10 @@ async function phaseT(root) {
       // GET /relay is the cheap poll target: same shape as /state.relay.
       const polled = await call(offApp.origin, `${API}/relay`)
       assert.equal(polled.status, 200)
-      assert.deepEqual(polled.data, relay, 'GET /relay and /state.relay agree')
+      // /state.relay is GET /relay plus the v1.9.2 supervisor block (additive).
+      const { supervisor, ...link } = relay
+      assert.deepEqual(polled.data, link, 'GET /relay and /state.relay agree on the link')
+      assert.equal(supervisor.state, 'stopped', '/state.relay carries the local relay supervisor')
     } finally {
       await offApp.close()
     }
@@ -5609,7 +5636,7 @@ async function phaseV(root) {
       app = await mount({}, { relayDeps: fake.deps })
       const state = (await call(app.origin, `${API}/state`)).data
       assert.equal(state.role, 'both')
-      assert.deepEqual(state.relay, RELAY_OFF, 'an empty config serves the documented disabled relay shape')
+      assert.deepEqual(state.relay, RELAY_OFF_STATE, 'an empty config serves the documented disabled relay shape')
       assert.deepEqual(state.computers, [])
       assert.equal(typeof state.serverUrl, 'string')
       assert.notEqual(state.serverUrl, '', 'the hub advertises a direct address even with no config')
@@ -7151,14 +7178,20 @@ async function phaseX(root) {
       ])
 
       // Before the first stream the machine is not activated: no candidates.
+      // v1.9.2: the slash menu is scoped to the session pin, and a pin can only
+      // be set once the machine is visible (activated), so the pin happens below.
       const { provider } = service.registrations[0]
-      assert.deepEqual(await provider.list({}), [])
+      const sessionId = 'x-enroll-session'
+      assert.deepEqual(await provider.list({ scope: { session: { id: sessionId } } }), [])
 
       const sse = await openSse(app.origin, `${API}/agent/events`, { authorization: `Bearer ${token}` })
       try {
         await sse.nextEvent('hello', 2000)
+        const pinned = await call(app.origin, `${API}/selection`, { method: 'POST', body: { sessionId, computerId } })
+        assert.equal(pinned.status, 200)
+        const scope = { scope: { session: { id: sessionId } } }
         const machineSlugOf = recordOf().name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
-        const online = await provider.list({})
+        const online = await provider.list(scope)
         assert.deepEqual(online.map((candidate) => candidate.name), [`${machineSlugOf}-deploy`, `${machineSlugOf}-relative`])
         assert.equal(online[0].locator.path, '/Users/enroll/.dsh/skills/deploy')
 
@@ -7169,14 +7202,14 @@ async function phaseX(root) {
           body: { skills: [{ name: 'release', description: 'Cut a release', path: '/Users/enroll/.agents/skills/release' }] },
         })
         assert.equal(beat.status, 200)
-        assert.deepEqual((await provider.list({})).map((candidate) => candidate.name), [`${machineSlugOf}-release`])
+        assert.deepEqual((await provider.list(scope)).map((candidate) => candidate.name), [`${machineSlugOf}-release`])
         const cleared = await call(app.origin, `${API}/agent/heartbeat`, {
           method: 'POST',
           headers: { authorization: `Bearer ${token}` },
           body: { skills: [] },
         })
         assert.equal(cleared.status, 200)
-        assert.deepEqual(await provider.list({}), [], 'an empty report removes the machine\'s skills')
+        assert.deepEqual(await provider.list(scope), [], 'an empty report removes the machine\'s skills')
       } finally {
         sse.close()
       }
@@ -7255,9 +7288,10 @@ async function waitForGone(pid, timeoutMs = 3000) {
 
 /** A spawner that counts calls and still starts the real child. */
 function countingSpawn() {
-  const state = { calls: 0, spawn: null }
+  const state = { calls: 0, lastArgs: null, spawn: null }
   state.spawn = (...args) => {
     state.calls += 1
+    state.lastArgs = args
     return spawnChild(...args)
   }
   return state
@@ -7339,25 +7373,36 @@ async function phaseY(root) {
       assert.equal(readAccountDoc(dir).controllable, true, 'the switch is persisted in account.json')
     })
 
-    await check('self-runtime: turning 被控 off stops the process and persists the switch', async () => {
-      const stopped = await call(app.origin, `${API}/account/controllable`, {
+    await check('self-runtime: 被控 off keeps the local runtime running and only persists the flag', async () => {
+      const off = await call(app.origin, `${API}/account/controllable`, {
         method: 'POST',
         body: { enabled: false },
       })
-      assert.equal(stopped.status, 200)
-      assert.equal(stopped.data.controllable, false)
-      assert.equal(stopped.data.self.runtime.state, 'stopped')
-      assert.equal(stopped.data.self.runtime.pid, null)
+      assert.equal(off.status, 200)
+      assert.equal(off.data.controllable, false)
+      // v1.9.2: 被控 gates the machine-facing fleet API, NOT the process —
+      // 本地电脑 must keep working for its own user.
+      assert.equal(off.data.self.runtime.state, 'running', '被控 off must not stop the local runtime')
+      assert.equal(off.data.self.runtime.pid, runningPid, 'the same process keeps running')
+      assert.doesNotThrow(() => process.kill(runningPid, 0), 'the agent child is still alive')
       assert.equal(readAccountControllable(dir), false)
       assert.equal(readAccountDoc(dir).controllable, false)
-      await waitForGone(runningPid)
       assert.equal((await call(app.origin, `${API}/self`)).data.controllable, false)
+
+      // Turning it back on just flips the flag (and is idempotent for the
+      // runtime): no second process, no restart.
+      const back = await call(app.origin, `${API}/account/controllable`, { method: 'POST', body: { enabled: true } })
+      assert.equal(back.status, 200)
+      assert.equal(back.data.controllable, true)
+      assert.equal(back.data.self.runtime.state, 'running')
+      assert.equal(back.data.self.runtime.pid, runningPid, 'enabling 被控 does not replace a running runtime')
+      assert.equal(readAccountControllable(dir), true)
 
       // A non-boolean body is the protocol's 400 and changes nothing.
       const bad = await call(app.origin, `${API}/account/controllable`, { method: 'POST', body: { enabled: 'yes' } })
       assert.equal(bad.status, 400)
       assert.equal(bad.data.error, 'bad-request')
-      assert.equal(readAccountControllable(dir), false, 'a rejected switch changes nothing')
+      assert.equal(readAccountControllable(dir), true, 'a rejected switch changes nothing')
     })
 
     await check('self-runtime: restart() replaces the process', async () => {
@@ -7393,6 +7438,137 @@ async function phaseY(root) {
   } finally {
     await app.close()
   }
+
+  /** The id the lazy runtime enrolled as (asserted again after a reload). */
+  let lazyComputerId = ''
+
+  await check('self-runtime: load spawns nothing; the first 本地电脑 tool call starts it and waits', async () => {
+    const lazyDir = join(root, 'y-lazy')
+    const spawner = countingSpawn()
+    const lazyApp = await mount({ ...FAST_CONFIG, stateDir: lazyDir }, {
+      selfRuntimeDeps: {
+        // v1.9.2: production defaults — no load-time start, lazy start allowed.
+        lazyStart: true,
+        agentPath,
+        spawn: spawner.spawn,
+        pollMs: 10,
+        portWaitMs: 2000,
+        registrationTimeoutMs: 5000,
+        stopGraceMs: 300,
+      },
+    })
+    const streams = []
+    try {
+      await sleep(300)
+      // 1) Loading the plugin must NOT make this machine "connected".
+      assert.equal(spawner.calls, 0, 'no agent child is spawned at load')
+      const stoppedSelf = await call(lazyApp.origin, `${API}/self`)
+      assert.equal(stoppedSelf.data.runtime.state, 'stopped')
+      assert.equal(stoppedSelf.data.runtime.computerId, null)
+      assert.equal(existsSync(join(lazyDir, SELF_DIR_NAME)), false, 'no isolated identity before the first need')
+      const stoppedState = await call(lazyApp.origin, `${API}/state`)
+      assert.equal(stoppedState.data.computers.length, 0, 'the local machine is not listed as connected')
+
+      // 2) The first tool call targeting 本地电脑 (null pin) starts it…
+      const execTool = lazyApp.fake.tools.get('computer_exec')
+      let early = null
+      const outcome = execTool.execute({ command: 'echo lazy' }, { signal: new AbortController().signal })
+        .then((value) => ({ value }), (error) => ({ error }))
+      outcome.then((settled) => { early = settled })
+      const config = await waitFor(
+        () => {
+          try {
+            return readSelfConfig(lazyDir)
+          } catch {
+            return null
+          }
+        },
+        (value) => value !== null,
+        5000,
+        'the lazy runtime to enroll',
+      )
+      // …and waits: the child exists, but no stream has registered it yet.
+      await sleep(300)
+      assert.equal(early, null, 'the tool call must wait for the computer to register, not race the spawn')
+      assert.equal(spawner.calls, 1, 'exactly one child, started on demand')
+
+      // 3) The agent's stream lands → the waiting tool call proceeds.
+      const sse = await openSse(lazyApp.origin, `${API}/agent/events`, { authorization: `Bearer ${config.token}` })
+      streams.push(sse)
+      await sse.nextEvent('hello', 2000)
+      const event = await sse.nextEvent('exec', 4000)
+      assert.equal(event.data.command, 'echo lazy')
+      const posted = await raw(lazyApp.origin, `${API}/agent/results`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${config.token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          requestId: event.data.requestId,
+          ok: true,
+          exitCode: 0,
+          signal: null,
+          stdout: 'lazy hi\n',
+          stderr: '',
+          durationMs: 3,
+          truncated: false,
+          timedOut: false,
+          error: null,
+        }),
+      })
+      assert.equal(posted.status, 200)
+      const settled = await outcome
+      assert.ok(settled.value, `expected success, got ${settled.error && settled.error.message}`)
+      assert.equal(settled.value.computer.id, config.computerId, '本地电脑 is the lazily started runtime')
+      assert.equal(settled.value.stdout, 'lazy hi\n')
+      lazyComputerId = config.computerId
+
+      // 4) Once running, the local record is marked `self` and the tool list
+      //    reports it as `localComputer`, never as a remote computer.
+      const liveState = await call(lazyApp.origin, `${API}/state`)
+      const liveEntry = liveState.data.computers.find((computer) => computer.id === config.computerId)
+      assert.ok(liveEntry !== undefined, 'the started runtime is registered')
+      assert.equal(liveEntry.self, true, '/state marks the local runtime with self: true')
+      const listTool = lazyApp.fake.tools.get('computer_list')
+      const value = await listTool.execute({}, {})
+      assert.equal(value.computers.length, 0, 'the local runtime is never listed as a remote computer')
+      assert.equal(value.localComputer.id, config.computerId)
+      assert.equal(value.localComputer.self, true)
+      assert.equal(value.localComputer.local, true)
+      assert.equal(value.selectedComputerId, null)
+    } finally {
+      for (const stream of streams) stream.close()
+      await lazyApp.close()
+    }
+  })
+
+  await check('self-runtime: after a reload the persisted local record is still marked self (and never listed remotely)', async () => {
+    const lazyDir = join(root, 'y-lazy')
+    const spawner = countingSpawn()
+    const reloaded = await mount({ ...FAST_CONFIG, stateDir: lazyDir }, {
+      selfRuntimeDeps: { autoStart: false, lazyStart: false, agentPath, spawn: spawner.spawn, pollMs: 10, portWaitMs: 1000 },
+    })
+    try {
+      await sleep(200)
+      // A reload must not resurrect the runtime eagerly…
+      assert.equal(spawner.calls, 0, 'a reload never spawns the local agent')
+      const self = await call(reloaded.origin, `${API}/self`)
+      assert.equal(self.data.runtime.state, 'stopped')
+      assert.equal(self.data.runtime.computerId, null, 'the in-memory id is gone after a reload')
+      // …but the registry still holds the record, and the persisted identity is
+      // what keeps it flagged `self` instead of showing up as a remote machine.
+      const state = await call(reloaded.origin, `${API}/state`)
+      const record = state.data.computers.find((computer) => computer.id === lazyComputerId)
+      assert.ok(record !== undefined, 'the local record survives in the registry')
+      assert.equal(record.self, true, 'the persisted identity marks it after a reload')
+      assert.equal(record.online, false, 'it is not connected until the lazy start runs')
+      const listTool = reloaded.fake.tools.get('computer_list')
+      const value = await listTool.execute({}, {})
+      assert.equal(value.computers.some((computer) => computer.id === lazyComputerId), false)
+      assert.equal(value.localComputer.id, lazyComputerId, '本地电脑 still resolves internally')
+      assert.equal(value.localComputer.self, true)
+    } finally {
+      await reloaded.close()
+    }
+  })
 
   await check('self-runtime: controllable:false at load does not start (no child spawned)', async () => {
     const offDir = join(root, 'y-off')
@@ -7515,16 +7691,19 @@ async function phaseY(root) {
       assert.equal(calls.options.computerId, runtime.computerId)
       assert.match(calls.options.token, /^dshc_[A-Za-z0-9_-]+$/)
       assert.equal(calls.options.mode, 'embedded')
-      // The same 被控 switch tears the embedded loop down again.
+      // v1.9.2: 被控 off does NOT tear the loop down — the local user keeps
+      // 本地电脑; only the machine-facing fleet API is gated.
       const off = await call(embeddedApp.origin, `${API}/account/controllable`, {
         method: 'POST',
         body: { enabled: false },
       })
-      assert.equal(off.data.self.runtime.state, 'stopped')
-      assert.equal(calls.stop, 1, 'the embedded loop is stopped with the switch')
+      assert.equal(off.data.self.runtime.state, 'running', '被控 off leaves the embedded loop running')
+      assert.equal(calls.stop, 0, 'the embedded loop is not stopped by the switch')
     } finally {
       await embeddedApp.close()
     }
+    // The plugin unmount is what stops it (the same loop, no leaked handle).
+    assert.equal(calls.stop, 1, 'the embedded loop is stopped when the plugin unmounts')
   })
 
   await check('self-runtime: the device registration carries controllable', async () => {
@@ -7868,16 +8047,78 @@ async function phaseZ(root) {
 
       const listTool = fleetApp.fake.tools.get('computer_list')
       const value = await listTool.execute({}, {})
-      const local = value.computers.find((computer) => computer.id === selfConfig.computerId)
-      assert.ok(local !== undefined, 'the local runtime is listed')
-      assert.equal(local.via, 'registry')
-      assert.equal(local.online, true)
+      // v1.9.2: the local runtime is NOT a remote computer — it is reported
+      // separately as `localComputer` with `self: true`.
+      assert.equal(
+        value.computers.some((computer) => computer.id === selfConfig.computerId),
+        false,
+        'the local runtime is never listed as a remote computer',
+      )
+      assert.ok(value.localComputer !== null, 'the local target is reported')
+      assert.equal(value.localComputer.id, selfConfig.computerId)
+      assert.equal(value.localComputer.self, true)
+      assert.equal(value.localComputer.local, true)
+      assert.equal(value.localComputer.via, 'registry')
+      assert.equal(value.localComputer.online, true)
+      const content = listTool.output.render({}, value)
+      assert.ok(content[0].text.includes('本地电脑'), 'the render names the local target')
     })
 
-    await check('fleet: 被控 off answers 403 not-controllable', async () => {
+    await check('state: only this machine’s own record carries self: true', async () => {
+      // A genuinely remote computer joins the same hub: it must never be
+      // confused with the local runtime, which is marked by computer id.
+      const created = await call(fleetApp.origin, `${API}/keys`, { method: 'POST', body: {} })
+      const enrolled = await call(fleetApp.origin, `${API}/agent/enroll`, {
+        method: 'POST',
+        body: {
+          key: created.data.key,
+          agentVersion: PLUGIN_VERSION,
+          capabilities: ['exec'],
+          machine: { hostname: 'z-remote.local', os: 'linux', arch: 'x64' },
+        },
+      })
+      assert.equal(enrolled.status, 200)
+      const remoteSse = await openSse(fleetApp.origin, `${API}/agent/events`, {
+        authorization: `Bearer ${enrolled.data.token}`,
+      })
+      fleetSse.push(remoteSse)
+      await remoteSse.nextEvent('hello', 2000)
+
+      const state = await call(fleetApp.origin, `${API}/state`)
+      const selfEntry = state.data.computers.find((computer) => computer.id === selfConfig.computerId)
+      const remoteEntry = state.data.computers.find((computer) => computer.id === enrolled.data.computerId)
+      assert.ok(selfEntry !== undefined, 'the local runtime record is in /state.computers')
+      assert.equal(selfEntry.self, true, 'the local record is flagged')
+      assert.ok(remoteEntry !== undefined, 'the remote computer is in /state.computers')
+      assert.equal(remoteEntry.self, false, 'a remote computer is never flagged as self')
+      assert.equal(
+        state.data.computers.filter((computer) => computer.self === true).length,
+        1,
+        'exactly one entry is self',
+      )
+
+      const listTool = fleetApp.fake.tools.get('computer_list')
+      const value = await listTool.execute({}, {})
+      assert.ok(value.computers.some((computer) => computer.id === enrolled.data.computerId), 'the remote computer is listed')
+      assert.equal(
+        value.computers.some((computer) => computer.id === selfConfig.computerId),
+        false,
+        'computer_list excludes the local runtime from the remote list',
+      )
+      assert.equal(value.localComputer.id, selfConfig.computerId)
+    })
+
+    await check('fleet: 被控 off keeps the runtime running but the fleet API answers 403', async () => {
+      const before = (await call(fleetApp.origin, `${API}/self`)).data.runtime
+      assert.equal(before.state, 'running')
       const off = await call(fleetApp.origin, `${API}/account/controllable`, { method: 'POST', body: { enabled: false } })
       assert.equal(off.status, 200)
-      assert.equal(off.data.self.runtime.state, 'stopped')
+      assert.equal(off.data.controllable, false)
+      // v1.9.2: the switch gates the fleet API, not the process.
+      assert.equal(off.data.self.runtime.state, 'running', '被控 off must not stop the local runtime')
+      assert.equal(off.data.self.runtime.pid, before.pid)
+      assert.doesNotThrow(() => process.kill(before.pid, 0), 'the local agent child is still alive')
+
       const refused = await call(fleetApp.origin, `${API}/fleet/exec`, {
         method: 'POST',
         headers: { 'x-fleet-key': account.key },
@@ -7886,6 +8127,32 @@ async function phaseZ(root) {
       assert.equal(refused.status, 403)
       assert.equal(refused.data.error, 'not-controllable')
       assert.match(refused.data.message, /被控/)
+      const fsRefused = await call(fleetApp.origin, `${API}/fleet/fs`, {
+        method: 'POST',
+        headers: { 'x-fleet-key': account.key },
+        body: { op: 'read', payload: { path: '/etc/hostname' } },
+      })
+      assert.equal(fsRefused.status, 403, 'the fs route is gated by the same flag')
+      assert.equal(fsRefused.data.error, 'not-controllable')
+
+      // 本地电脑 keeps working for its own user while 被控 is off.
+      const execTool = fleetApp.fake.tools.get('computer_exec')
+      const outcome = execTool.execute({ command: 'echo still-local' }, { signal: new AbortController().signal })
+        .then((value) => ({ value }), (error) => ({ error }))
+      const event = await sse.nextEvent('exec', 3000)
+      assert.equal(event.data.command, 'echo still-local')
+      await answerExec(event, 'local still\n')
+      const settled = await outcome
+      assert.ok(settled.value, `expected success, got ${settled.error && settled.error.message}`)
+      assert.equal(settled.value.computer.id, selfConfig.computerId)
+      assert.equal(settled.value.stdout, 'local still\n')
+
+      // Turning it back on just flips the flag: no restart, no second process.
+      const on = await call(fleetApp.origin, `${API}/account/controllable`, { method: 'POST', body: { enabled: true } })
+      assert.equal(on.status, 200)
+      assert.equal(on.data.controllable, true)
+      assert.equal(on.data.self.runtime.state, 'running')
+      assert.equal(on.data.self.runtime.pid, before.pid, 'enabling 被控 does not replace the running runtime')
     })
   } finally {
     for (const client of fleetSse) client.close()
@@ -7898,7 +8165,19 @@ async function phaseZ(root) {
   const downDir = join(root, 'z-down')
   const downApp = await mount({ ...FAST_CONFIG, stateDir: downDir }, {
     accountDeps: { heartbeatMs: 60_000 },
-    selfRuntimeDeps: { autoStart: false, agentPath, pollMs: 10, portWaitMs: 1000 },
+    // v1.9.2: the lazy start is real here, but both start paths fail at once —
+    // this part asserts the ERRORS, not a spawned agent.
+    selfRuntimeDeps: {
+      lazyStart: true,
+      spawn: () => {
+        throw new Error('spawn is blocked in this host')
+      },
+      startRuntime: () => {
+        throw new Error('the embedded runtime is unavailable')
+      },
+      pollMs: 10,
+      portWaitMs: 1000,
+    },
   })
   try {
     const account = await seedRelayAccount(downRelay, 'Down Account')
@@ -7916,11 +8195,17 @@ async function phaseZ(root) {
       assert.equal(refused.data.error, 'self-runtime-unavailable')
       assert.match(refused.data.message, /被控/)
 
+      // v1.9.2: a null-pin tool call LAZILY starts the runtime; when that start
+      // fails the error names the runtime and what to check, never "no computer
+      // selected".
       const execTool = downApp.fake.tools.get('computer_exec')
       await assert.rejects(
         execTool.execute({ command: 'echo nope' }, { signal: new AbortController().signal }),
-        /本地电脑的运行时没启动：设置 → 电脑 → 高级 里把被控打开/,
+        /本地电脑的运行时没启动：the local runtime could not start/,
       )
+      const self = await call(downApp.origin, `${API}/self`)
+      assert.equal(self.data.runtime.state, 'failed', 'the failed lazy start is reported')
+      assert.equal(self.data.runtime.pid, null)
     })
   } finally {
     await downApp.close()
@@ -8076,7 +8361,506 @@ async function phaseZ(root) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Phase AB — v1.9.2: the slash menu shows only the SESSION's pinned machine
+// ---------------------------------------------------------------------------
+
+async function phaseAB(root) {
+  const agentPath = join(root, 'ab-fake-agent.mjs')
+  writeFakeAgent(agentPath)
+  const dir = join(root, 'ab-scope')
+  mkdirSync(dir, { recursive: true })
+  // A session pinned to an ACCOUNT device must see nothing: that device reports
+  // its skills to its own hub, not to this one. The store is read at mount, so
+  // seed the document first.
+  writeFileSync(join(dir, 'selections.json'), JSON.stringify({
+    version: 1,
+    selections: { 'ab-acct-session': { computerId: 'acct:mach_0123456789abcdef' } },
+  }), { mode: 0o600 })
+
+  const service = createFakeSkillsService()
+  const app = await mount({ ...FAST_CONFIG, stateDir: dir }, {
+    skills: service,
+    selfRuntimeDeps: { autoStart: false, agentPath, pollMs: 10, portWaitMs: 3000, stopGraceMs: 300 },
+  })
+  const streams = []
+  try {
+    /** Enroll one machine, report a skill, and mark it online. */
+    const enroll = async (hostname, workspaceBase, skills) => {
+      const created = await call(app.origin, `${API}/keys`, { method: 'POST', body: {} })
+      const response = await call(app.origin, `${API}/agent/enroll`, {
+        method: 'POST',
+        body: {
+          key: created.data.key,
+          agentVersion: PLUGIN_VERSION,
+          capabilities: ['exec', 'fs'],
+          machine: { hostname, os: 'darwin', arch: 'arm64' },
+          metadata: { capabilities: ['exec', 'fs'], workspaceBase },
+          skills,
+        },
+      })
+      assert.equal(response.status, 200)
+      const stream = await openSse(app.origin, `${API}/agent/events`, { authorization: `Bearer ${response.data.token}` })
+      await stream.nextEvent('hello', 2000)
+      streams.push(stream)
+      return response.data
+    }
+
+    const alpha = await enroll('alpha.local', '/Users/alpha', [{ name: 'deploy', description: 'from alpha' }])
+    const beta = await enroll('beta.local', '/Users/beta', [{ name: 'release', description: 'from beta' }])
+    const { provider } = service.registrations[0]
+
+    await check('skills scope: a pinned session sees only that machine', async () => {
+      const pin = (sessionId, computerId) => call(app.origin, `${API}/selection`, { method: 'POST', body: { sessionId, computerId } })
+      assert.equal((await pin('ab-alpha-session', alpha.computerId)).status, 200)
+      assert.equal((await pin('ab-beta-session', beta.computerId)).status, 200)
+      const alphaNames = (await provider.list({ scope: { session: { id: 'ab-alpha-session' } } })).map((candidate) => candidate.name)
+      assert.deepEqual(alphaNames, ['alpha-local-deploy'])
+      const betaNames = (await provider.list({ scope: { session: { id: 'ab-beta-session' } } })).map((candidate) => candidate.name)
+      assert.deepEqual(betaNames, ['beta-local-release'])
+      // The agent object shape DSH passes (`agent.session.id`) is honoured, and
+      // the bare `agent.id` fallback works too.
+      assert.deepEqual((await provider.list({ scope: { id: 'ab-beta-session' } })).map((candidate) => candidate.name), ['beta-local-release'])
+    })
+
+    await check('skills scope: an account-device pin contributes nothing', async () => {
+      assert.deepEqual(await provider.list({ scope: { session: { id: 'ab-acct-session' } } }), [], 'an acct: pin cannot see this hub’s machines')
+    })
+
+    await check('skills scope: an unpinned session sees only 本地电脑', async () => {
+      // No self-runtime yet: the filter must still hide both remote machines.
+      assert.deepEqual(await provider.list({ scope: { session: { id: 'ab-none-session' } } }), [], 'unpinned sessions do not inherit every machine')
+      // Start this machine's own runtime and give it a reported skill.
+      const self = await call(app.origin, `${API}/account/controllable`, { method: 'POST', body: { enabled: true } })
+      assert.equal(self.status, 200)
+      assert.equal(self.data.self.runtime.state, 'running')
+      const selfId = self.data.self.runtime.computerId
+      const selfConfig = readSelfConfig(dir)
+      const selfStream = await openSse(app.origin, `${API}/agent/events`, { authorization: `Bearer ${selfConfig.token}` })
+      streams.push(selfStream)
+      await selfStream.nextEvent('hello', 2000)
+      const beat = await call(app.origin, `${API}/agent/heartbeat`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${selfConfig.token}` },
+        body: { skills: [{ name: 'local-only', description: 'only this machine' }] },
+      })
+      assert.equal(beat.status, 200)
+      const local = await provider.list({ scope: { session: { id: 'ab-none-session' } } })
+      assert.equal(local.length, 1, 'only the local machine contributes')
+      assert.equal(local[0].locator.computerId, selfId)
+      assert.ok(local[0].name.endsWith('-local-only'))
+      // ...and a session pinned to another machine still does not see it.
+      assert.deepEqual((await provider.list({ scope: { session: { id: 'ab-alpha-session' } } })).map((candidate) => candidate.name), ['alpha-local-deploy'])
+    })
+  } finally {
+    for (const stream of streams) stream.close()
+    await app.close()
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Phase AA — v1.9.2: the managed local relay (one-click, no systemd)
+// ---------------------------------------------------------------------------
+
+/**
+ * A stand-in for `bin/dsh-computers-relay.mjs`. The supervisor only needs a
+ * long-running process with output (or, for the crash/bind cases, one that dies
+ * immediately); the real relay is exercised by `npm run test:relay`.
+ */
+function writeFakeRelayBin(file, { crash = false, exitCode = 3, bindError = false } = {}) {
+  writeFileSync(file, crash
+    ? `process.exit(${exitCode})\n`
+    : bindError
+      ? [
+        "console.error('dsh-computers-relay: cannot listen on 127.0.0.1:8445: listen EADDRINUSE')",
+        'process.exit(1)',
+        '',
+      ].join('\n')
+      : [
+        "process.on('SIGTERM', () => process.exit(0))",
+        "process.on('SIGINT', () => process.exit(0))",
+        "console.log('dsh-computers-relay listening on http://127.0.0.1:0 (fake)')",
+        'setInterval(() => {}, 1000)',
+        '',
+      ].join('\n'))
+}
+
+/** An ephemeral loopback port that is free right now (bound, then released). */
+async function freePort() {
+  const server = createServer()
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  const { port } = server.address()
+  await new Promise((resolve) => server.close(resolve))
+  return port
+}
+
+/** A real loopback HTTP listener with a fixed answer (health / foreign service). */
+async function fakeHealthServer(body, statusCode = 200) {
+  const server = createServer((req, res) => {
+    res.writeHead(statusCode, { 'content-type': 'application/json; charset=utf-8' })
+    res.end(JSON.stringify(body))
+  })
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve))
+  return {
+    port: server.address().port,
+    async close() {
+      await new Promise((resolve) => {
+        server.close(() => resolve())
+        if (typeof server.closeAllConnections === 'function') server.closeAllConnections()
+      })
+    },
+  }
+}
+
+/** Poll the supervisor status through its route until `predicate` holds. */
+async function waitForSupervisor(origin, predicate, timeoutMs, label) {
+  return await waitFor(
+    async () => (await call(origin, `${API}/relay/supervisor`)).data.supervisor,
+    predicate,
+    timeoutMs,
+    label,
+  )
+}
+
+async function phaseAA(root) {
+  const binPath = join(root, 'aa-fake-relay.mjs')
+  writeFakeRelayBin(binPath)
+
+  await check('local relay: config validates localPort / localAutoStart (off by default)', async () => {
+    const resolved = resolveConfig({ relay: { localPort: 9001, localAutoStart: true } })
+    assert.equal(resolved.relay.localPort, 9001)
+    assert.equal(resolved.relay.localAutoStart, true)
+    const defaults = resolveConfig({})
+    assert.equal(defaults.relay.localPort, DEFAULT_RELAY_PORT)
+    assert.equal(defaults.relay.localAutoStart, false, 'auto-start is OFF by default')
+    assert.throws(() => resolveConfig({ relay: { localPort: 0 } }), /localPort/)
+    assert.throws(() => resolveConfig({ relay: { localPort: 70_000 } }), /localPort/)
+    assert.throws(() => resolveConfig({ relay: { localPort: '8445' } }), /localPort/)
+    assert.throws(() => resolveConfig({ relay: { localAutoStart: 'yes' } }), /localAutoStart/)
+  })
+
+  await check('local relay: probeRelayHealth tells relay / foreign / free apart', async () => {
+    const relay = await fakeHealthServer({ ok: true, hubs: [], accounts: 0 })
+    const foreign = await fakeHealthServer({ nope: true })
+    const free = await freePort()
+    try {
+      assert.deepEqual(await probeRelayHealth(relay.port), { healthy: true, occupied: true })
+      assert.deepEqual(await probeRelayHealth(foreign.port), { healthy: false, occupied: true })
+      assert.deepEqual(await probeRelayHealth(free), { healthy: false, occupied: false })
+    } finally {
+      await relay.close()
+      await foreign.close()
+    }
+  })
+
+  // ---- one mount drives start/stop/restart/bad-request -------------------
+  const offDir = join(root, 'aa-off')
+  const spawner = countingSpawn()
+  const app = await mount({ ...FAST_CONFIG, stateDir: offDir }, {
+    relaySupervisorDeps: { binPath, spawn: spawner.spawn, restartDelays: [10, 10, 10], stopGraceMs: 300 },
+  })
+  let relayPid = null
+  try {
+    await sleep(250)
+
+    await check('local relay: mounting never starts it, and the stopped shapes are served', async () => {
+      assert.equal(spawner.calls, 0, 'the local relay is never started unasked')
+      const response = await call(app.origin, `${API}/relay/supervisor`)
+      assert.equal(response.status, 200)
+      assert.deepEqual(Object.keys(response.data).sort(), ['localUrl', 'supervisor'])
+      assert.deepEqual(response.data.supervisor, {
+        state: 'stopped',
+        pid: null,
+        port: DEFAULT_RELAY_PORT,
+        since: null,
+        lastError: null,
+        logs: [],
+        adopted: false,
+      })
+      assert.equal(response.data.localUrl, `http://127.0.0.1:${DEFAULT_RELAY_PORT}`)
+      const state = await call(app.origin, `${API}/state`)
+      assert.equal(state.status, 200)
+      assert.deepEqual(state.data.relay.supervisor, response.data.supervisor, '/state.relay.supervisor mirrors the route')
+      assert.equal(state.data.relay.enabled, false, 'the relay link stays disabled')
+    })
+
+    await check('local relay: the browser gate runs first on GET and POST', async () => {
+      app.fake.setGate({ requestRejection: () => 401, trustedHosts: [] })
+      assert.equal((await call(app.origin, `${API}/relay/supervisor`)).status, 401)
+      assert.equal((await call(app.origin, `${API}/relay/supervisor`, { method: 'POST', body: { action: 'start' } })).status, 401)
+      app.fake.setGate(undefined)
+    })
+
+    // A real ephemeral port: the default 8445 may be occupied on a dev machine.
+    const port = await freePort()
+
+    await check('local relay: start spawns the package bin, stop kills it', async () => {
+      const started = await call(app.origin, `${API}/relay/supervisor`, { method: 'POST', body: { action: 'start', port } })
+      assert.equal(started.status, 200)
+      assert.equal(started.data.supervisor.state, 'running')
+      assert.equal(started.data.supervisor.port, port)
+      assert.equal(started.data.supervisor.adopted, false)
+      assert.equal(typeof started.data.supervisor.since, 'string')
+      assert.ok(Number.isSafeInteger(started.data.supervisor.pid), 'a spawned relay reports its pid')
+      assert.equal(started.data.localUrl, `http://127.0.0.1:${port}`)
+      assert.equal(started.data.suggestedUrl, null, 'a loopback request cannot suggest a public url')
+      assert.equal(spawner.calls, 1, 'exactly one child is spawned')
+      relayPid = started.data.supervisor.pid
+      assert.doesNotThrow(() => process.kill(relayPid, 0), 'the relay child is alive')
+
+      // The spawn contract: node <pkg>/bin/… --port <p> --host 127.0.0.1 --data-dir <stateDir>/relay-data
+      const [nodePath, argv, options] = spawner.lastArgs
+      assert.equal(nodePath, process.execPath, 'spawned with the host node binary')
+      assert.equal(argv[0], binPath, 'the package bin is executed')
+      assert.deepEqual(argv.slice(1), ['--port', String(port), '--host', '127.0.0.1', '--data-dir', join(offDir, RELAY_DATA_DIR_NAME)])
+      assert.deepEqual(options.stdio, ['ignore', 'pipe', 'pipe'])
+      assert.equal(options.windowsHide, true)
+      assert.equal(options.cwd, offDir)
+      assert.equal(existsSync(join(offDir, RELAY_DATA_DIR_NAME)), true, 'the relay data directory is created')
+      assert.equal(statSync(join(offDir, RELAY_DATA_DIR_NAME)).mode & 0o777, 0o700)
+
+      // Starting the relay does NOT enable the relay link (a separate switch).
+      assert.equal((await call(app.origin, `${API}/relay`)).data.enabled, false)
+
+      // The child's output lands in the ring buffer's tail.
+      const logs = await waitFor(
+        async () => (await call(app.origin, `${API}/relay/supervisor`)).data.supervisor.logs,
+        (value) => value.some((line) => line.includes('fake')),
+        3000,
+        'the relay log tail',
+      )
+      assert.ok(logs.every((line) => line.length <= 500), 'log lines are capped')
+
+      const stopped = await call(app.origin, `${API}/relay/supervisor`, { method: 'POST', body: { action: 'stop' } })
+      assert.equal(stopped.status, 200)
+      assert.equal(stopped.data.supervisor.state, 'stopped')
+      assert.equal(stopped.data.supervisor.pid, null)
+      await waitForGone(relayPid)
+      relayPid = null
+      assert.equal((await call(app.origin, `${API}/state`)).data.relay.supervisor.state, 'stopped')
+    })
+
+    await check('local relay: restart replaces the process and start(port) moves it', async () => {
+      const first = await call(app.origin, `${API}/relay/supervisor`, { method: 'POST', body: { action: 'start', port } })
+      assert.equal(first.data.supervisor.state, 'running')
+      const firstPid = first.data.supervisor.pid
+      const restarted = await call(app.origin, `${API}/relay/supervisor`, { method: 'POST', body: { action: 'restart' } })
+      assert.equal(restarted.data.supervisor.state, 'running')
+      assert.notEqual(restarted.data.supervisor.pid, firstPid, 'restart spawns a new child')
+      await waitForGone(firstPid)
+      const nextPort = await freePort()
+      const moved = await call(app.origin, `${API}/relay/supervisor`, { method: 'POST', body: { action: 'start', port: nextPort } })
+      assert.equal(moved.data.supervisor.port, nextPort)
+      assert.equal(moved.data.supervisor.state, 'running')
+      assert.notEqual(moved.data.supervisor.pid, restarted.data.supervisor.pid)
+      relayPid = moved.data.supervisor.pid
+      await call(app.origin, `${API}/relay/supervisor`, { method: 'POST', body: { action: 'stop' } })
+      await waitForGone(relayPid)
+      relayPid = null
+    })
+
+    await check('local relay: a bad action or port is a 400 and changes nothing', async () => {
+      const callsBefore = spawner.calls
+      const badAction = await call(app.origin, `${API}/relay/supervisor`, { method: 'POST', body: { action: 'explode' } })
+      assert.equal(badAction.status, 400)
+      assert.equal(badAction.data.error, 'bad-request')
+      const missing = await call(app.origin, `${API}/relay/supervisor`, { method: 'POST', body: {} })
+      assert.equal(missing.status, 400)
+      for (const bad of [0, 70_000, '8445', 1.5]) {
+        const response = await call(app.origin, `${API}/relay/supervisor`, { method: 'POST', body: { action: 'start', port: bad } })
+        assert.equal(response.status, 400, `port ${JSON.stringify(bad)} is rejected`)
+      }
+      assert.equal((await call(app.origin, `${API}/relay/supervisor`)).data.supervisor.state, 'stopped')
+      assert.equal(spawner.calls, callsBefore, 'rejected requests never spawn')
+    })
+  } finally {
+    await app.close()
+    if (relayPid !== null) await waitForGone(relayPid)
+  }
+
+  await check('local relay: an already-running relay is adopted, never duplicated', async () => {
+    const health = await fakeHealthServer({ ok: true, hubs: [], accounts: 0 })
+    const dir = join(root, 'aa-adopt')
+    const adoptSpawner = countingSpawn()
+    const app = await mount({ ...FAST_CONFIG, stateDir: dir, relay: { localPort: health.port } }, {
+      relaySupervisorDeps: { binPath, spawn: adoptSpawner.spawn, restartDelays: [10], stopGraceMs: 300 },
+    })
+    try {
+      const started = await call(app.origin, `${API}/relay/supervisor`, { method: 'POST', body: { action: 'start' } })
+      assert.equal(started.status, 200)
+      assert.equal(started.data.supervisor.state, 'running')
+      assert.equal(started.data.supervisor.adopted, true, 'the existing relay is adopted')
+      assert.equal(started.data.supervisor.pid, null, 'an adopted relay has no pid we own')
+      assert.equal(started.data.supervisor.port, health.port)
+      assert.equal(started.data.localUrl, `http://127.0.0.1:${health.port}`)
+      assert.equal(adoptSpawner.calls, 0, 'no duplicate relay is spawned')
+      assert.ok(started.data.supervisor.logs.some((line) => /adopted/i.test(line)))
+      assert.equal((await call(app.origin, `${API}/state`)).data.relay.supervisor.adopted, true)
+
+      // stop() releases the adoption but must NOT kill a process we do not own.
+      const stopped = await call(app.origin, `${API}/relay/supervisor`, { method: 'POST', body: { action: 'stop' } })
+      assert.equal(stopped.data.supervisor.state, 'stopped')
+      assert.equal(stopped.data.supervisor.adopted, false)
+      assert.equal(adoptSpawner.calls, 0)
+      assert.equal((await fetch(`http://127.0.0.1:${health.port}/health`)).status, 200, 'the adopted relay keeps running')
+
+      // A later start adopts it again instead of spawning.
+      const again = await call(app.origin, `${API}/relay/supervisor`, { method: 'POST', body: { action: 'start' } })
+      assert.equal(again.data.supervisor.adopted, true)
+      assert.equal(adoptSpawner.calls, 0)
+    } finally {
+      await app.close()
+      await health.close()
+    }
+  })
+
+  await check('local relay: a port held by another service fails with an actionable message', async () => {
+    const foreign = await fakeHealthServer({ hello: 'not a relay' })
+    const dir = join(root, 'aa-busy')
+    const busySpawner = countingSpawn()
+    const app = await mount({ ...FAST_CONFIG, stateDir: dir, relay: { localPort: foreign.port } }, {
+      relaySupervisorDeps: { binPath, spawn: busySpawner.spawn, restartDelays: [10], stopGraceMs: 300 },
+    })
+    try {
+      const response = await call(app.origin, `${API}/relay/supervisor`, { method: 'POST', body: { action: 'start' } })
+      assert.equal(response.status, 200, 'a failed start is still a 200 carrying a failed status')
+      assert.equal(response.data.supervisor.state, 'failed')
+      assert.equal(response.data.supervisor.pid, null)
+      assert.match(response.data.supervisor.lastError, /already in use/)
+      assert.equal(busySpawner.calls, 0, 'nothing is spawned into an occupied port')
+      assert.equal((await call(app.origin, `${API}/state`)).status, 200, 'the page still loads')
+    } finally {
+      await app.close()
+      await foreign.close()
+    }
+  })
+
+  await check('local relay: a crash loop backs off and gives up after 3 restarts', async () => {
+    const crashBin = join(root, 'aa-crash-relay.mjs')
+    writeFakeRelayBin(crashBin, { crash: true, exitCode: 3 })
+    const port = await freePort()
+    const crashSpawner = countingSpawn()
+    const app = await mount({ ...FAST_CONFIG, stateDir: join(root, 'aa-crash'), relay: { localPort: port, localAutoStart: true } }, {
+      relaySupervisorDeps: { binPath: crashBin, spawn: crashSpawner.spawn, restartDelays: [10, 10, 10], stopGraceMs: 300 },
+    })
+    try {
+      const status = await waitForSupervisor(app.origin, (value) => value.state === 'failed', 6000, 'the supervisor to give up')
+      assert.match(status.lastError, /keeps crashing/i)
+      assert.match(status.lastError, /3 restarts/)
+      assert.equal(crashSpawner.calls, RELAY_MAX_RESTARTS + 1, 'the initial start plus exactly 3 automatic restarts')
+      assert.equal(status.pid, null)
+      assert.equal((await call(app.origin, `${API}/state`)).status, 200)
+    } finally {
+      await app.close()
+    }
+  })
+
+  await check('local relay: a bind failure in the child is reported without retrying', async () => {
+    const bindBin = join(root, 'aa-bind-relay.mjs')
+    writeFakeRelayBin(bindBin, { bindError: true })
+    const port = await freePort()
+    const bindSpawner = countingSpawn()
+    const app = await mount({ ...FAST_CONFIG, stateDir: join(root, 'aa-bind'), relay: { localPort: port, localAutoStart: true } }, {
+      relaySupervisorDeps: { binPath: bindBin, spawn: bindSpawner.spawn, restartDelays: [10, 10, 10], stopGraceMs: 300 },
+    })
+    try {
+      const status = await waitForSupervisor(app.origin, (value) => value.state === 'failed', 5000, 'the bind failure')
+      assert.match(status.lastError, /already in use/)
+      assert.equal(bindSpawner.calls, 1, 'a bind failure cannot fix itself, so it is not retried')
+    } finally {
+      await app.close()
+    }
+  })
+
+  await check('local relay: localAutoStart:true starts it at load', async () => {
+    const port = await freePort()
+    const autoSpawner = countingSpawn()
+    const app = await mount({ ...FAST_CONFIG, stateDir: join(root, 'aa-autostart'), relay: { localPort: port, localAutoStart: true } }, {
+      relaySupervisorDeps: { binPath, spawn: autoSpawner.spawn, restartDelays: [10], stopGraceMs: 300 },
+    })
+    let pid = null
+    try {
+      const status = await waitForSupervisor(app.origin, (value) => value.state === 'running', 5000, 'the relay to auto-start')
+      pid = status.pid
+      assert.ok(Number.isSafeInteger(pid))
+      assert.equal(autoSpawner.calls, 1)
+    } finally {
+      await app.close()
+      if (pid !== null) await waitForGone(pid)
+    }
+  })
+
+  await check('local relay: a failed spawn never throws into apply()', async () => {
+    const port = await freePort()
+    const app = await mount({ ...FAST_CONFIG, stateDir: join(root, 'aa-failed'), relay: { localPort: port, localAutoStart: true } }, {
+      relaySupervisorDeps: {
+        binPath,
+        spawn: () => {
+          throw new Error('spawn is blocked in this host')
+        },
+        restartDelays: [10],
+        stopGraceMs: 300,
+      },
+    })
+    try {
+      const status = await waitForSupervisor(app.origin, (value) => value.state === 'failed', 5000, 'the failed spawn')
+      assert.match(status.lastError, /could not start/i)
+      const state = await call(app.origin, `${API}/state`)
+      assert.equal(state.status, 200, '/state still answers after a failed relay spawn')
+      assert.equal(state.data.relay.supervisor.state, 'failed')
+    } finally {
+      await app.close()
+    }
+  })
+
+  await check('local relay: POST suggests wss://<public host>:<port> when derivable', async () => {
+    const port = await freePort()
+    const suggestSpawner = countingSpawn()
+    const app = await mount({
+      ...FAST_CONFIG,
+      stateDir: join(root, 'aa-suggest'),
+      publicUrl: 'https://dsh.example.com',
+      relay: { localPort: port },
+    }, {
+      relaySupervisorDeps: { binPath, spawn: suggestSpawner.spawn, restartDelays: [10], stopGraceMs: 300 },
+    })
+    let pid = null
+    try {
+      const started = await call(app.origin, `${API}/relay/supervisor`, { method: 'POST', body: { action: 'start' } })
+      pid = started.data.supervisor.pid
+      assert.equal(started.data.suggestedUrl, `wss://dsh.example.com:${port}`)
+      // The GET keeps the documented two-field shape: the suggestion is advice
+      // that belongs to the action, not a status field.
+      assert.deepEqual(Object.keys((await call(app.origin, `${API}/relay/supervisor`)).data).sort(), ['localUrl', 'supervisor'])
+    } finally {
+      await call(app.origin, `${API}/relay/supervisor`, { method: 'POST', body: { action: 'stop' } }).catch(() => {})
+      await app.close()
+      if (pid !== null) await waitForGone(pid)
+    }
+  })
+
+  await check('local relay: dispose() with the plugin kills the owned child', async () => {
+    const port = await freePort()
+    const disposeSpawner = countingSpawn()
+    const app = await mount({ ...FAST_CONFIG, stateDir: join(root, 'aa-dispose'), relay: { localPort: port, localAutoStart: true } }, {
+      relaySupervisorDeps: { binPath, spawn: disposeSpawner.spawn, restartDelays: [10], stopGraceMs: 300 },
+    })
+    const status = await waitForSupervisor(app.origin, (value) => value.state === 'running', 5000, 'the relay to start')
+    const pid = status.pid
+    await app.close()
+    await waitForGone(pid, 5000)
+    let alive = true
+    try {
+      process.kill(pid, 0)
+    } catch {
+      alive = false
+    }
+    assert.equal(alive, false, 'the relay child is gone after the plugin unloads')
+  })
+}
+
 watchdog.unref()
+
 const root = mkdtempSync(join(tmpdir(), 'dshc-smoke-'))
 let exitCode = 0
 try {
@@ -8106,6 +8890,8 @@ try {
   await phaseX(root)
   await phaseY(root)
   await phaseZ(root)
+  await phaseAA(root)
+  await phaseAB(root)
 } finally {
   rmSync(root, { recursive: true, force: true })
   clearTimeout(watchdog)

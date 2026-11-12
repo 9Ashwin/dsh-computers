@@ -40,26 +40,20 @@ window.__ModuleLoader__.load({
     const PANEL_ORDER = 20;
     const STYLE_ID = 'dsh-computers/client.css';
     const STATE_POLL_MS = 5000;
-    const KEY_POLL_MS = 2000;
     const NOTICE_MS = 4200;
 
     /* Document-relative on purpose: the GUI is served with <base href="./">, so
      * a root-absolute "/api/..." escapes a sub-path deployment (PROTOCOL §4). */
     const API = {
       state: 'api/dsh-computers/state',
-      keys: 'api/dsh-computers/keys',
-      keyStatus: 'api/dsh-computers/key-status',
-      remove: 'api/dsh-computers/delete',
-      rename: 'api/dsh-computers/rename',
-      /* Runtime mode (PROTOCOL §10.5): this machine joining a hub. */
-      runtime: 'api/dsh-computers/runtime',
-      runtimeConnect: 'api/dsh-computers/runtime/connect',
-      runtimeEnable: 'api/dsh-computers/runtime/enable',
-      runtimeDisconnect: 'api/dsh-computers/runtime/disconnect',
       /* Relay on/off (PROTOCOL relay): the 中继 card's switch. The host
        * answers with the fresh `state.relay` payload, so the card can
        * reconcile without waiting for the next 5 s poll. */
       relayEnable: 'api/dsh-computers/relay/enable',
+      /* Local relay supervisor (v1.9.2): the plugin starts/stops the relay
+       * process itself. GET is the status, POST is `{ action, port? }`; a host
+       * that predates it answers 404 and the card hides the block. */
+      relaySupervisor: 'api/dsh-computers/relay/supervisor',
       /* Account center (PROTOCOL account): one account on the relay; machines
        * sign into it instead of pairing with each other one by one. The host
        * may not have these routes yet — every call below degrades quietly. */
@@ -77,7 +71,6 @@ window.__ModuleLoader__.load({
       /* Access rules (task-11 host side): which computers a session may use,
        * and which agent presets may use a computer. */
       access: 'api/dsh-computers/access',
-      accessComputer: 'api/dsh-computers/access/computer',
     };
 
     // #region locales
@@ -87,17 +80,10 @@ window.__ModuleLoader__.load({
       nav: '电脑',
       title: '电脑',
       description: '把你自己电脑接进来，agent 就能在它上面直接执行命令。',
-      'badge.bots': '{used}/{total} 个 Bot',
       online: '在线',
       offline: '离线',
-      'rename.action': '重命名',
-      'delete.action': '删除',
       loading: '正在加载电脑列表…',
-      'empty.title': '还没有连接任何电脑',
-      'empty.hint': '把「复制接入地址」得到的地址粘贴到另一台电脑的 设置 → 电脑 → 接入；那台机器没有 DSH 时，用下面的命令行接入。',
-      'empty.cliAction': '没有 DSH 的机器？用命令行接入',
-      'join.blocked': '这台机器现在只有本机地址，没法生成给别的电脑用的接入地址：先在下面「高级 → 中继」里启用中继，或给它配一个公网地址。',
-      'error.load': '无法读取电脑列表',
+      'error.loadTitle': '加载失败',
       'error.loadDetail': '{title}：{message}',
       'error.network': '无法连接到服务器，请检查网络后重试。',
       'error.badResponse': '服务器返回了无法识别的响应。',
@@ -107,18 +93,7 @@ window.__ModuleLoader__.load({
       'render.error': '这个页面遇到了意外错误。',
       'render.reload': '重新加载',
 
-      'rename.title': '重命名这台电脑',
-      'rename.field': '显示名称',
-      'rename.placeholder': '例如：客厅 Mac mini',
-      'rename.hint': '1–64 个字符，只影响这份列表和 agent 看到的名称。',
-      'rename.failed': '重命名失败：{message}',
-      'renamed.notice': '已重命名为「{name}」',
 
-      'delete.title': '删除这台电脑？',
-      'delete.body': '「{name}」会从列表移除，与它之间的连接会断开。需要时可以重新连接。',
-      'delete.confirm': '删除',
-      'delete.failed': '删除失败：{message}',
-      'deleted.notice': '已删除「{name}」',
 
       'dialog.close': '关闭',
       cancel: '取消',
@@ -126,59 +101,25 @@ window.__ModuleLoader__.load({
       saving: '保存中…',
       deleting: '删除中…',
 
-      'connect.title': '连接电脑',
-      'connect.subtitle': '在另一台电脑的 设置 → 电脑 → 接入 里粘贴下面的服务器地址和加入密钥；没有 DSH 的机器用下面的命令行',
-      'connect.osGroup': '选择电脑的系统',
-      'connect.os.windows': 'Windows',
-      'connect.os.macos': 'macOS',
-      'connect.os.linux': 'Linux',
-      'connect.replace.title': '覆盖这台电脑已保存的连接',
-      'connect.replace.hint': '终端提示已有其他连接时开启，再重新复制命令',
-      'connect.command.label': '终端命令',
-      'connect.copy': '复制命令',
       'connect.copied': '已复制',
       'connect.copyFailed': '复制失败，请手动选中命令文本',
-      'connect.creating': '正在生成命令…',
-      'connect.createFailed': '命令生成失败：{message}',
-      'connect.waiting': '等待电脑连接…',
-      'connect.connected': '电脑已连接',
-      'connect.expired': '命令已过期，请重新生成',
-      'connect.used': '该命令已被使用，请重新生成',
-      'connect.unknown': '命令已失效，请重新生成',
-      'connect.regenerate': '重新生成',
-      'connect.connected.notice': '已连接「{name}」',
-      'connect.connected.noticeAnonymous': '电脑已连接',
-      'connect.pendingCommand': '命令准备中…',
-      'connect.serverUrl': '服务器地址',
-      'connect.serverUrlHint': '在另一台电脑的「接入」里填这个地址',
-      'connect.enrollmentKey': '加入密钥',
-      'connect.enrollmentKeyHint': '15 分钟内有效，只能用一次',
       'connect.copyField': '复制{field}',
-      'connect.cliToggle': '没有 DSH 的机器？用命令行接入',
-      'connect.cliHint': '在要连接的电脑上安装 Node.js 22+，然后在终端运行下方命令',
 
-      'computers.group': '已连接的电脑',
-      /* v1.7.0 one-field join: the 接入 card is the whole page up top. */
+      /* v1.9.2: with an account signed in the directory IS the list, so the
+       * registry card only appears for machines the account does not know. */
+      /* v1.9.2 one-field join: the 接入 card is the whole page up top. */
       'join.title': '接入',
-      'join.addressLabel': '接入地址',
-      'join.addressPlaceholder': 'https://relay.example.com/r/hub_…',
-      'join.hint': '在另一台电脑的 设置 → 电脑 → 已连接的电脑 里点「复制接入地址」，把整串粘贴到这里。',
-      'join.keyToggle': '用加入密钥',
-      'join.addressToggle': '用接入地址',
-      'join.connected': '已连接',
-      'join.invalid': '这不像一个接入地址：它应该形如 https://…/r/hub_…#join=…',
       'advanced.title': '高级',
       'advanced.summary': '中继与账号中心',
-      'fleet.copy': '复制接入地址',
+      /* v1.9.2: the one-address join form is a fallback for machines without
+       * an account center, so it lives here, collapsed. */
 
       /* Account center (PROTOCOL account): one account on the relay, so
        * machines signed into it find each other with no per-machine pairing. */
-      'account.modesLabel': '接入方式',
-      'account.mode.account': '登录账号',
-      'account.mode.address': '接入地址',
       'account.login.hint': '用同一个账号密钥登录的电脑会自动出现在彼此的列表里，不需要逐台配对。',
       /* v1.9.1: ONE pasted account key (`dshk_<16hex>_<32hex>`) instead of the
        * old 账号 ID + 密码 pair. The client only checks the shape as a hint. */
+      'account.login.title': '登录账号',
       'account.login.key': '账号密钥',
       'account.login.keyPlaceholder': 'dshk_…',
       'account.login.keyShape': '这看起来不像账号密钥（一般以 dshk_ 开头），仍会提交给服务器。',
@@ -194,7 +135,6 @@ window.__ModuleLoader__.load({
       'account.logoutFailed': '退出登录失败：{message}',
       'account.loggedIn.notice': '已登录账号 {accountId}',
       'account.loggedOut.notice': '已退出账号',
-      'account.devices.title': '账号里的电脑',
       'account.devices.count': '{count} 台电脑',
       'account.devices.empty': '这个账号还没有其他电脑',
       'account.devices.thisMachine': '本机',
@@ -202,7 +142,6 @@ window.__ModuleLoader__.load({
       'account.platform.unknown': '未知系统',
       /* 被控 (controllable): whether other machines in the account may run
        * commands on this one. Only THIS machine can flip it. */
-      'account.devices.controllable': '被控',
       'account.devices.allowed': '允许被控',
       'account.devices.blocked': '不允许被控',
       'account.devices.controllableAria': '允许账号里的其他电脑控制「{name}」',
@@ -227,26 +166,6 @@ window.__ModuleLoader__.load({
       'account.key.warning': '任何拿到这串密钥的人都能加入这个账号，请妥善保管。',
       'account.key.highlight': '这是你的账号密钥，随时可以回来复制',
       'account.key.unsupported': '这台机器还不支持查看密钥，请升级插件',
-      'runtime.hint': '加入密钥来自服务器「连接电脑」弹窗，只能用一次，15 分钟内有效。',
-      'runtime.serverLabel': '服务器地址',
-      'runtime.serverPlaceholder': 'https://dsh.example.com',
-      'runtime.keyLabel': '加入密钥',
-      'runtime.keyPlaceholder': 'dshc_…',
-      'runtime.connect': '连接',
-      'runtime.connecting': '连接中…',
-      'runtime.disconnect': '断开',
-      'runtime.disconnectTitle': '断开这台电脑？',
-      'runtime.disconnectBody': '这台电脑会停止向 {server} 保持连接，并在那台服务器的电脑列表里变为离线。记录会保留（可在服务器上删除），之后也可以随时重新连接。',
-      'runtime.disconnectFailed': '断开失败：{message}',
-      'runtime.connectFailed': '连接失败：{message}',
-      'runtime.loading': '正在读取本机状态…',
-      'runtime.loadFailed': '无法读取本机状态',
-      'runtime.status.running': '运行中',
-      'runtime.status.stopped': '已停止',
-      'runtime.status.connecting': '连接中…',
-      'runtime.status.failed': '连接失败',
-      'runtime.connected.notice': '本机已接入 {server}',
-      'runtime.disconnected.notice': '已断开接入',
 
       'target.label': '目标电脑',
       'target.cloud': '本地电脑',
@@ -261,62 +180,20 @@ window.__ModuleLoader__.load({
       'access.done': '完成',
       'access.cloudHint': '本机',
       'access.noneHint': '关闭全部后，这台对话不能使用任何远程电脑',
-      'access.computer.subtitle': '哪些 Bot 可以使用它?',
-      'access.defaultPreset': '默认',
       'access.loading': '正在读取权限…',
       'access.loadFailed': '无法读取权限设置',
       'access.saveFailed': '保存失败：{message}',
       'access.badgeAria': '管理「{name}」的使用权限',
-      'access.presetsEmpty': '还没有可用的 Bot 预设',
       'access.computersEmpty': '还没有连接的电脑',
-      'access.computer.titleFallback': '这台电脑',
       'access.presetDenied': '该电脑的 Bot 权限未包含当前预设',
-      'cap.exec': '执行',
-      'cap.fs': '文件',
-      'cap.jobs': '后台任务',
-      'cap.pty': '终端',
-      'cap.exec.title': '可以在这台电脑上执行命令',
-      'cap.fs.title': '可以读写这台电脑上的文件',
-      'cap.jobs.title': '命令可以在后台继续跑',
-      'cap.pty.title': '可以打开交互式终端',
-      'drift.chip': '可升级',
-      'drift.title': '升级这台电脑的 agent',
-      'drift.body': '这台电脑运行的是 agent {current}，需要更新的版本才能使用全部能力。',
-      'drift.expected': '当前服务器使用 agent {version}。',
-      'drift.commandLabel': '在要升级的电脑上运行',
-      'drift.hint': '升级会重启这台电脑上的 agent 服务，正在执行的命令会中断。',
-      'drift.close': '关闭',
-      'drift.unknownVersion': '未知版本',
-      'drift.runtimeHint': '本机 agent 版本落后于服务器，升级 DSH 后重启生效',
-      'drift.embedded.body': '这台电脑是通过 DSH 插件自带的本机运行时接入的，升级插件本身即可。',
-      'drift.embedded.steps': '打开 设置 → 插件市场 → 已安装 → dsh-computers → 检查更新，然后重启 DSH。',
-      'drift.embedded.cliLabel': '或者在命令行里安装',
-      'mode.embedded': '插件运行时',
-      'mode.service': '系统服务',
-      /* Only the address-kind labels survive: the connect modal's combobox
-       * still names each candidate. The 本机地址 block is gone. */
-      'addr.unreachable': '未监听',
-      'addr.loopbackOnlyShort': '只有本机地址可用，其他电脑连不上',
-      'addr.kind.public': '公网',
-      'addr.kind.forwarded': '代理',
-      'addr.kind.host': '主机',
-      'addr.kind.tailscale': 'Tailscale',
-      'addr.kind.lan': '局域网',
-      'addr.kind.mdns': '本机名',
-      'addr.kind.loopback': '本机',
-      'addr.kind.tunnel': 'Tailscale Serve',
-      'addr.kind.relay': '中继',
-      'addr.kind.other': '地址',
-      'addr.listLabel': '可用的服务器地址',
-            'relay.title': '中继',
+      'relay.title': '中继',
       'relay.hubLabel': '中继 ID',
       'relay.urlLabel': '公网地址',
       'relay.status.connected': '已连接',
       'relay.status.connecting': '连接中…',
       'relay.status.failed': '失败',
       'relay.status.disabled': '已停用',
-      'relay.connecting': '正在连接中继…',
-      'relay.failedLine': '中继连接失败：{message}。检查中继服务是否在运行',
+      'relay.failedLine': '中继连接失败：{message}。检查中继地址，或启动本机中继',
       'relay.unknownError': '未知错误',
       'relay.hint': '别的电脑和手机用这个地址连到这台电脑，不需要公网 IP 或开放端口',
       'relay.enable': '启用',
@@ -332,10 +209,29 @@ window.__ModuleLoader__.load({
       'relay.upgradeHint': '这台机器还不支持在界面上配置中继，请升级插件',
       'relay.enableFailed': '切换中继失败：{message}',
       'relay.saveFailed': '保存中继地址失败：{message}',
+      /* v1.9.2: the plugin runs the relay itself — one click, no service to
+       * install, no nginx/systemd. These strings are the whole setup copy. */
+      'relay.local.title': '本机中继',
+      'relay.local.stopped': '本机中继未运行',
+      'relay.local.starting': '正在启动中继…',
+      'relay.local.running': '运行中 · {host} · PID {pid}',
+      'relay.local.runningNoPid': '运行中 · {host}',
+      'relay.local.failed': '本机中继启动失败',
+      'relay.local.port': '端口',
+      'relay.local.start': '启动中继',
+      'relay.local.restart': '重启',
+      'relay.local.stop': '停止',
+      'relay.local.logs': '日志',
+      'relay.local.logsRefresh': '刷新',
+      'relay.local.logsEmpty': '还没有日志',
+      'relay.local.startFailed': '启动中继失败：{message}',
+      'relay.local.stopFailed': '停止中继失败：{message}',
+      'relay.local.restartFailed': '重启中继失败：{message}',
+      'relay.local.readyHint': '中继已启动，地址已填好：点「启用」就能用它',
+      'relay.local.remote': '中继也可以部署在别的机器上，填它的地址即可',
       'target.offline': '离线',
       'target.failed': '切换失败：{message}',
       /* Account devices in the picker: a second group after the local ones. */
-      'target.accountGroup': '账号里的电脑',
       'target.notControllable': '不允许被控',
       'target.deviceGone': '选中的电脑已不在账号里，已切回本地电脑',
     };
@@ -344,17 +240,10 @@ window.__ModuleLoader__.load({
       nav: 'Computers',
       title: 'Computers',
       description: 'Bring your own machines in so the agent can run commands on them.',
-      'badge.bots': '{used}/{total} Bot',
       online: 'Online',
       offline: 'Offline',
-      'rename.action': 'Rename',
-      'delete.action': 'Delete',
       loading: 'Loading computers…',
-      'empty.title': 'No computers connected yet',
-      'empty.hint': 'Paste the address from “Copy join address” into Settings → Computers → Join on the other computer. If that machine has no DSH, use the command line below.',
-      'empty.cliAction': 'No DSH on that machine? Use the command line',
-      'join.blocked': 'This machine only has a local address right now, so there is no join address for other computers yet. Enable the relay under Advanced → Relay below, or give it a public address.',
-      'error.load': 'Could not load the computer list',
+      'error.loadTitle': 'Could not load',
       'error.loadDetail': '{title}: {message}',
       'error.network': 'Could not reach the server. Check the network and try again.',
       'error.badResponse': 'The server returned an unrecognized response.',
@@ -364,18 +253,7 @@ window.__ModuleLoader__.load({
       'render.error': 'This page hit an unexpected error.',
       'render.reload': 'Reload',
 
-      'rename.title': 'Rename this computer',
-      'rename.field': 'Display name',
-      'rename.placeholder': 'e.g. Living room Mac mini',
-      'rename.hint': '1–64 characters. Only this list and the name the agent sees change.',
-      'rename.failed': 'Rename failed: {message}',
-      'renamed.notice': 'Renamed to “{name}”',
 
-      'delete.title': 'Delete this computer?',
-      'delete.body': '“{name}” leaves this list and its connection is dropped. You can connect it again later.',
-      'delete.confirm': 'Delete',
-      'delete.failed': 'Delete failed: {message}',
-      'deleted.notice': 'Deleted “{name}”',
 
       'dialog.close': 'Close',
       cancel: 'Cancel',
@@ -383,59 +261,25 @@ window.__ModuleLoader__.load({
       saving: 'Saving…',
       deleting: 'Deleting…',
 
-      'connect.title': 'Connect computer',
-      'connect.subtitle': 'Open Settings → Computers → Join on the other machine and paste the server URL and join key below; use the command line below for a machine without DSH',
-      'connect.osGroup': 'Choose the system of that computer',
-      'connect.os.windows': 'Windows',
-      'connect.os.macos': 'macOS',
-      'connect.os.linux': 'Linux',
-      'connect.replace.title': 'Replace the connection saved on this computer',
-      'connect.replace.hint': 'Turn this on when the terminal says another connection already exists, then copy the command again',
-      'connect.command.label': 'Terminal command',
-      'connect.copy': 'Copy command',
       'connect.copied': 'Copied',
       'connect.copyFailed': 'Copy failed — select the command text manually',
-      'connect.creating': 'Generating command…',
-      'connect.createFailed': 'Could not generate the command: {message}',
-      'connect.waiting': 'Waiting for the computer to connect…',
-      'connect.connected': 'Connected',
-      'connect.expired': 'This command expired — generate a new one',
-      'connect.used': 'This command was already used — generate a new one',
-      'connect.unknown': 'This command is no longer valid — generate a new one',
-      'connect.regenerate': 'Generate again',
-      'connect.connected.notice': 'Connected “{name}”',
-      'connect.connected.noticeAnonymous': 'Computer connected',
-      'connect.pendingCommand': 'Preparing the command…',
-      'connect.serverUrl': 'Server URL',
-      'connect.serverUrlHint': 'Paste this into “Join” on the other computer',
-      'connect.enrollmentKey': 'Join key',
-      'connect.enrollmentKeyHint': 'Valid for 15 minutes, single use',
       'connect.copyField': 'Copy {field}',
-      'connect.cliToggle': 'No DSH on that machine? Use the command line',
-      'connect.cliHint': 'Install Node.js 22+ on that machine, then run the command below in a terminal',
 
-      'computers.group': 'Connected computers',
-      /* v1.7.0 one-field join: the Join card is the whole page up top. */
+      /* v1.9.2: with an account signed in the directory IS the list, so the
+       * registry card only appears for machines the account does not know. */
+      /* v1.9.2 one-field join: the Join card is the whole page up top. */
       'join.title': 'Join',
-      'join.addressLabel': 'Join address',
-      'join.addressPlaceholder': 'https://relay.example.com/r/hub_…',
-      'join.hint': 'On the other computer open Settings → Computers → Connected computers and click “Copy join address”, then paste the whole string here.',
-      'join.keyToggle': 'Use a join key',
-      'join.addressToggle': 'Use a join address',
-      'join.connected': 'Connected to',
-      'join.invalid': 'That does not look like a join address; it should look like https://…/r/hub_…#join=…',
       'advanced.title': 'Advanced',
       'advanced.summary': 'Relay and account center',
-      'fleet.copy': 'Copy join address',
+      /* v1.9.2: the one-address join form is a fallback for machines without
+       * an account center, so it lives here, collapsed. */
 
       /* Account center (PROTOCOL account): one account on the relay, so
        * machines signed into it find each other with no per-machine pairing. */
-      'account.modesLabel': 'Join method',
-      'account.mode.account': 'Sign in',
-      'account.mode.address': 'Join address',
       'account.login.hint': 'Computers signed in with the same account key show up in each other’s list automatically — no per-machine pairing.',
       /* v1.9.1: ONE pasted account key (`dshk_<16hex>_<32hex>`) instead of the
        * old 账号 ID + 密码 pair. The client only checks the shape as a hint. */
+      'account.login.title': 'Sign in',
       'account.login.key': 'Account key',
       'account.login.keyPlaceholder': 'dshk_…',
       'account.login.keyShape': 'That does not look like an account key (it usually starts with dshk_) — it will still be sent to the server.',
@@ -451,13 +295,11 @@ window.__ModuleLoader__.load({
       'account.logoutFailed': 'Sign-out failed: {message}',
       'account.loggedIn.notice': 'Signed in as {accountId}',
       'account.loggedOut.notice': 'Signed out',
-      'account.devices.title': 'Computers in this account',
       'account.devices.count': '{count} computers',
       'account.devices.empty': 'No other computers in this account yet',
       'account.devices.thisMachine': 'This machine',
       'account.devices.unknown': 'Unknown device',
       'account.platform.unknown': 'Unknown system',
-      'account.devices.controllable': 'Controllable',
       'account.devices.allowed': 'Controllable',
       'account.devices.blocked': 'Not controllable',
       'account.devices.controllableAria': 'Let other computers in this account control “{name}”',
@@ -482,26 +324,6 @@ window.__ModuleLoader__.load({
       'account.key.warning': 'Anyone with this key can join this account — keep it safe.',
       'account.key.highlight': 'This is your account key — come back here to copy it any time',
       'account.key.unsupported': 'This machine cannot show the key yet — please update the plugin',
-      'runtime.hint': 'The join key comes from the server’s “Connect computer” dialog; single use, valid for 15 minutes.',
-      'runtime.serverLabel': 'Server URL',
-      'runtime.serverPlaceholder': 'https://dsh.example.com',
-      'runtime.keyLabel': 'Join key',
-      'runtime.keyPlaceholder': 'dshc_…',
-      'runtime.connect': 'Connect',
-      'runtime.connecting': 'Connecting…',
-      'runtime.disconnect': 'Disconnect',
-      'runtime.disconnectTitle': 'Disconnect this computer?',
-      'runtime.disconnectBody': 'This machine stops connecting to {server} and goes offline in that server’s computer list. The record stays until you delete it there, and you can connect again at any time.',
-      'runtime.disconnectFailed': 'Disconnect failed: {message}',
-      'runtime.connectFailed': 'Connect failed: {message}',
-      'runtime.loading': 'Reading this computer’s status…',
-      'runtime.loadFailed': 'Could not read this computer’s status',
-      'runtime.status.running': 'Running',
-      'runtime.status.stopped': 'Stopped',
-      'runtime.status.connecting': 'Connecting…',
-      'runtime.status.failed': 'Connection failed',
-      'runtime.connected.notice': 'This computer joined {server}',
-      'runtime.disconnected.notice': 'Disconnected',
 
       'target.label': 'Target computer',
       'target.cloud': 'Local computer',
@@ -516,62 +338,20 @@ window.__ModuleLoader__.load({
       'access.done': 'Done',
       'access.cloudHint': 'This machine',
       'access.noneHint': 'With everything off, this chat cannot use any remote computer',
-      'access.computer.subtitle': 'Which Bots may use it?',
-      'access.defaultPreset': 'Default',
       'access.loading': 'Reading access rules…',
       'access.loadFailed': 'Could not read the access rules',
       'access.saveFailed': 'Could not save: {message}',
       'access.badgeAria': 'Manage who may use “{name}”',
-      'access.presetsEmpty': 'No Bot presets available yet',
       'access.computersEmpty': 'No computers connected yet',
-      'access.computer.titleFallback': 'This computer',
       'access.presetDenied': 'This computer’s Bot access does not include the current preset',
-      'cap.exec': 'Exec',
-      'cap.fs': 'Files',
-      'cap.jobs': 'Jobs',
-      'cap.pty': 'Terminal',
-      'cap.exec.title': 'Can run commands on this computer',
-      'cap.fs.title': 'Can read and write files on this computer',
-      'cap.jobs.title': 'Commands can keep running in the background',
-      'cap.pty.title': 'Can open an interactive terminal',
-      'drift.chip': 'Upgradable',
-      'drift.title': 'Upgrade this computer’s agent',
-      'drift.body': 'This computer runs agent {current}; a newer version is needed for every capability.',
-      'drift.expected': 'This server uses agent {version}.',
-      'drift.commandLabel': 'Run this on the computer you want to upgrade',
-      'drift.hint': 'Upgrading restarts the agent service on that computer; running commands are interrupted.',
-      'drift.close': 'Close',
-      'drift.unknownVersion': 'unknown version',
-      'drift.runtimeHint': 'This computer’s agent is behind the server; update DSH and restart',
-      'drift.embedded.body': 'This computer is connected through the DSH plugin’s own local runtime, so upgrading the plugin is what upgrades it.',
-      'drift.embedded.steps': 'Open Settings → Plugin Market → Installed → dsh-computers → Check for updates, then restart DSH.',
-      'drift.embedded.cliLabel': 'Or install it from the command line',
-      'mode.embedded': 'Plugin runtime',
-      'mode.service': 'System service',
-      /* Only the address-kind labels survive: the connect modal's combobox
-       * still names each candidate. The 本机地址 block is gone. */
-      'addr.unreachable': 'Not listening',
-      'addr.loopbackOnlyShort': 'Only a loopback address is available; other computers cannot connect',
-      'addr.kind.public': 'Public',
-      'addr.kind.forwarded': 'Proxy',
-      'addr.kind.host': 'Host',
-      'addr.kind.tailscale': 'Tailscale',
-      'addr.kind.lan': 'LAN',
-      'addr.kind.mdns': 'Local name',
-      'addr.kind.loopback': 'Loopback',
-      'addr.kind.tunnel': 'Tailscale Serve',
-      'addr.kind.relay': 'Relay',
-                  'addr.kind.other': 'Address',
-      'addr.listLabel': 'Available server addresses',
-            'relay.title': 'Relay',
+      'relay.title': 'Relay',
       'relay.hubLabel': 'Relay ID',
       'relay.urlLabel': 'Public address',
       'relay.status.connected': 'Connected',
       'relay.status.connecting': 'Connecting…',
       'relay.status.failed': 'Failed',
       'relay.status.disabled': 'Disabled',
-      'relay.connecting': 'Connecting to the relay…',
-      'relay.failedLine': 'Relay connection failed: {message}. Check whether the relay service is running',
+      'relay.failedLine': 'Relay connection failed: {message}. Check the relay address, or start the local relay',
       'relay.unknownError': 'unknown error',
       'relay.hint': 'Other computers and phones use this address to reach this computer — no public IP or open port needed',
       'relay.enable': 'Enabled',
@@ -585,9 +365,28 @@ window.__ModuleLoader__.load({
       'relay.upgradeHint': 'This machine cannot configure the relay from the UI yet — please upgrade the plugin',
       'relay.enableFailed': 'Could not change the relay: {message}',
       'relay.saveFailed': 'Could not save the relay address: {message}',
+      /* v1.9.2: the plugin runs the relay itself — one click, no service to
+       * install, no nginx/systemd. These strings are the whole setup copy. */
+      'relay.local.title': 'Local relay',
+      'relay.local.stopped': 'The local relay is not running',
+      'relay.local.starting': 'Starting the local relay…',
+      'relay.local.running': 'Running · {host} · PID {pid}',
+      'relay.local.runningNoPid': 'Running · {host}',
+      'relay.local.failed': 'The local relay failed to start',
+      'relay.local.port': 'Port',
+      'relay.local.start': 'Start relay',
+      'relay.local.restart': 'Restart',
+      'relay.local.stop': 'Stop',
+      'relay.local.logs': 'Logs',
+      'relay.local.logsRefresh': 'Refresh',
+      'relay.local.logsEmpty': 'No logs yet',
+      'relay.local.startFailed': 'Could not start the relay: {message}',
+      'relay.local.stopFailed': 'Could not stop the relay: {message}',
+      'relay.local.restartFailed': 'Could not restart the relay: {message}',
+      'relay.local.readyHint': 'The relay is running and the address is filled in — click Enable to use it',
+      'relay.local.remote': 'The relay can also run on another machine — just enter its address',
       'target.offline': 'Offline',
       'target.failed': 'Could not switch: {message}',
-      'target.accountGroup': 'Computers in this account',
       'target.notControllable': 'Not controllable',
       'target.deviceGone': 'The selected computer left the account; switched back to the local computer',
     };
@@ -690,19 +489,6 @@ window.__ModuleLoader__.load({
         shapes: [
           ['path', { d: 'M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z' }],
           ['circle', { cx: 12, cy: 12, r: 3 }],
-        ],
-      });
-    }
-
-    function IconTrash(props) {
-      return h(SvgIcon, {
-        size: props.size,
-        shapes: [
-          ['path', { d: 'M3 6h18' }],
-          ['path', { d: 'M8 6V4h8v2' }],
-          ['path', { d: 'M19 6l-1 14H6L5 6' }],
-          ['path', { d: 'M10 11v6' }],
-          ['path', { d: 'M14 11v6' }],
         ],
       });
     }
@@ -819,18 +605,15 @@ window.__ModuleLoader__.load({
   white-space: nowrap;
   cursor: pointer;
 }
-@media (hover: hover) {
-  .dshc-primary:hover:not(:disabled) {
+@media (hover: hover) {.dshc-primary:hover:not(:disabled) {
     background: var(--dsw-alias-button-primary-hover, var(--dsw-alias-brand-primary));
-  }
-}
+  }}
 .dshc-primary:disabled { opacity: 0.45; cursor: not-allowed; }
 .dshc-primary:focus-visible {
   outline: 2px solid var(--dsw-alias-brand-primary);
   outline-offset: 2px;
 }
 .dshc-primary svg { flex: none; }
-
 .dshc-notice {
   display: inline-flex;
   align-items: center;
@@ -850,65 +633,6 @@ window.__ModuleLoader__.load({
 .dshc-notice svg { flex: none; }
 .dshc-notice[data-kind="success"] svg { color: var(--dsw-alias-state-success-primary); }
 .dshc-notice[data-kind="error"] { color: var(--dsw-alias-state-error-primary); }
-
-.dshc-list {
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 16px;
-  background: var(--dsw-alias-bg-layer-1);
-  overflow: hidden;
-}
-.dshc-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 56px;
-  padding: 8px 10px 8px 16px;
-}
-.dshc-row + .dshc-row { border-top: 1px solid var(--dsw-alias-border-l1); }
-.dshc-rowMain {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  flex: 1 1 auto;
-}
-.dshc-name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 15.5px;
-  line-height: 22px;
-  font-weight: 500;
-  letter-spacing: -0.005em;
-  color: var(--dsw-alias-label-primary);
-}
-.dshc-badge {
-  flex: none;
-  padding: 1px 7px;
-  border-radius: 6px;
-  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
-  color: var(--dsw-alias-label-secondary);
-  font-size: 11.5px;
-  line-height: 16px;
-  font-weight: 500;
-  white-space: nowrap;
-}
-.dshc-badgeBtn {
-  border: none;
-  font-family: inherit;
-  cursor: pointer;
-}
-@media (hover: hover) {
-  .dshc-badgeBtn:hover {
-    background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
-    color: var(--dsw-alias-label-primary);
-  }
-}
-.dshc-badgeBtn:focus-visible {
-  outline: 2px solid var(--dsw-alias-brand-primary);
-  outline-offset: 1px;
-}
 .dshc-status {
   flex: none;
   display: inline-flex;
@@ -926,8 +650,6 @@ window.__ModuleLoader__.load({
   border-radius: 50%;
   background: var(--dsw-alias-state-idle-primary);
 }
-.dshc-row[data-online="true"] .dshc-dot { background: var(--dsw-alias-state-success-primary); }
-.dshc-rowActions { display: flex; align-items: center; gap: 2px; flex: none; }
 .dshc-iconBtn {
   display: inline-flex;
   align-items: center;
@@ -941,88 +663,15 @@ window.__ModuleLoader__.load({
   color: var(--dsw-alias-label-secondary);
   cursor: pointer;
 }
-@media (hover: hover) {
-  .dshc-iconBtn:hover:not(:disabled) {
+@media (hover: hover) {.dshc-iconBtn:hover:not(:disabled) {
     background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
     color: var(--dsw-alias-label-primary);
-  }
-}
+  }}
 .dshc-iconBtn:active:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2)); }
 .dshc-iconBtn:disabled { opacity: 0.45; cursor: not-allowed; }
 .dshc-iconBtn:focus-visible {
   outline: 2px solid var(--dsw-alias-brand-primary);
   outline-offset: 1px;
-}
-.dshc-trash:hover:not(:disabled) { color: var(--dsw-alias-state-error-primary); }
-.dshc-trash:active:not(:disabled) { color: var(--dsw-alias-state-error-primary); }
-
-.dshc-empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 6px;
-  padding: 44px 24px 46px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 16px;
-  background: var(--dsw-alias-bg-layer-1);
-  text-align: center;
-}
-.dshc-emptyIcon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 40px;
-  height: 40px;
-  margin-bottom: 6px;
-  border-radius: 12px;
-  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
-  color: var(--dsw-alias-label-secondary);
-}
-.dshc-emptyIcon svg { display: block; }
-.dshc-emptyTitle {
-  font-size: 14px;
-  line-height: 22px;
-  font-weight: 500;
-  color: var(--dsw-alias-label-primary);
-}
-.dshc-emptyHint {
-  max-width: 380px;
-  margin: 0;
-  font-size: 12.5px;
-  line-height: 19px;
-  color: var(--dsw-alias-label-secondary);
-}
-
-.dshc-skeleton {
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 16px;
-  background: var(--dsw-alias-bg-layer-1);
-  overflow: hidden;
-}
-.dshc-skeletonRow {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  min-height: 56px;
-  padding: 0 16px;
-}
-.dshc-skeletonRow + .dshc-skeletonRow { border-top: 1px solid var(--dsw-alias-border-l1); }
-.dshc-skeletonBar {
-  height: 12px;
-  border-radius: 6px;
-  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
-  animation: dshc-pulse 1.5s ease-in-out infinite;
-}
-.dshc-skeletonBar[data-wide="true"] { width: 34%; }
-.dshc-skeletonBar[data-narrow="true"] { width: 18%; margin-left: auto; }
-
-/* Runtime-mode card (PROTOCOL §10.6): this machine joining a hub. */
-.dshc-groupTitle {
-  margin: 0 0 10px;
-  font-size: 13px;
-  line-height: 20px;
-  font-weight: 500;
-  color: var(--dsw-alias-label-secondary);
 }
 .dshc-card2 {
   margin-bottom: 18px;
@@ -1044,16 +693,6 @@ window.__ModuleLoader__.load({
   letter-spacing: 0.01em;
   color: var(--dsw-alias-label-secondary);
 }
-.dshc-runtimeName {
-  margin-top: 9px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 15.5px;
-  line-height: 22px;
-  font-weight: 500;
-  color: var(--dsw-alias-label-primary);
-}
 .dshc-runtimeMeta {
   display: flex;
   gap: 6px;
@@ -1064,13 +703,6 @@ window.__ModuleLoader__.load({
   color: var(--dsw-alias-label-secondary);
 }
 .dshc-runtimeMetaKey { flex: none; }
-.dshc-runtimeMetaValue {
-  min-width: 0;
-  overflow-wrap: anywhere;
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
-  line-height: 18px;
-}
 .dshc-runtimeActions {
   display: flex;
   align-items: center;
@@ -1104,12 +736,10 @@ window.__ModuleLoader__.load({
   line-height: 18px;
   cursor: pointer;
 }
-@media (hover: hover) {
-  .dshc-textBtn:hover:not(:disabled) {
+@media (hover: hover) {.dshc-textBtn:hover:not(:disabled) {
     background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
     color: var(--dsw-alias-label-primary);
-  }
-}
+  }}
 .dshc-textBtn:disabled { opacity: 0.45; cursor: not-allowed; }
 .dshc-textBtn:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
 .dshc-formRow {
@@ -1132,106 +762,7 @@ window.__ModuleLoader__.load({
   padding: 0 16px;
   border-radius: 9px;
 }
-/* v1.7.0: the 接入 card — one address is the whole join flow. */
-.dshc-joinHint { margin: 9px 0 0; }
 .dshc-joinForm { margin-top: 10px; }
-.dshc-joinField { flex: 1 1 260px; }
-.dshc-joinToggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  margin-top: 10px;
-  padding: 2px 0;
-  border: none;
-  background: transparent;
-  color: var(--dsw-alias-label-secondary);
-  font: inherit;
-  font-size: 12px;
-  line-height: 18px;
-  text-align: left;
-  cursor: pointer;
-}
-.dshc-joinToggle::after { content: '\203A'; margin-left: 1px; }
-@media (hover: hover) {
-  .dshc-joinToggle:hover { color: var(--dsw-alias-label-primary); }
-}
-.dshc-joinToggle:focus-visible {
-  outline: 2px solid var(--dsw-alias-brand-primary);
-  outline-offset: 2px;
-  border-radius: 6px;
-}
-.dshc-joinLine {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  margin-top: 10px;
-}
-.dshc-joinText {
-  display: inline-flex;
-  align-items: baseline;
-  gap: 6px;
-  min-width: 0;
-  font-size: 13px;
-  line-height: 20px;
-  color: var(--dsw-alias-label-primary);
-}
-.dshc-joinAddress {
-  min-width: 0;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
-  line-height: 18px;
-  color: var(--dsw-alias-label-secondary);
-}
-.dshc-joinDisconnect { margin-left: auto; }
-
-/* 已连接的电脑 header: the hub's one copyable join address. */
-.dshc-groupHead {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  margin: 0 0 10px;
-}
-.dshc-groupHead .dshc-groupTitle { margin: 0; }
-.dshc-copyJoinBtn {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  flex: none;
-  padding: 3px 9px;
-  border: 1px solid var(--dsw-alias-border-l1);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--dsw-alias-label-secondary);
-  font: inherit;
-  font-size: 12px;
-  line-height: 18px;
-  cursor: pointer;
-}
-@media (hover: hover) {
-  .dshc-copyJoinBtn:hover {
-    border-color: var(--dsw-alias-border-l2);
-    background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
-    color: var(--dsw-alias-label-primary);
-  }
-}
-.dshc-copyJoinBtn:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
-.dshc-copyJoinBtn[data-copied="true"] { color: var(--dsw-alias-state-success-primary); }
-.dshc-emptyActions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  margin-top: 4px;
-}
-.dshc-emptyCli { margin-top: 2px; }
-
 /* v1.7.0: everything power users need, behind one muted 「高级」 line. */
 .dshc-advanced { margin-top: 2px; }
 .dshc-advancedToggle {
@@ -1249,9 +780,7 @@ window.__ModuleLoader__.load({
   text-align: left;
   cursor: pointer;
 }
-@media (hover: hover) {
-  .dshc-advancedToggle:hover { color: var(--dsw-alias-label-primary); }
-}
+@media (hover: hover) {.dshc-advancedToggle:hover { color: var(--dsw-alias-label-primary); }}
 .dshc-advancedToggle:focus-visible {
   outline: 2px solid var(--dsw-alias-brand-primary);
   outline-offset: 2px;
@@ -1273,10 +802,6 @@ window.__ModuleLoader__.load({
   opacity: 0.85;
 }
 .dshc-advancedBody { margin-top: 10px; }
-
-/* Account center (PROTOCOL account): the 接入 card's two modes, the signed-in
- * line and its read-only device list, plus the 高级 create form. */
-.dshc-accountModes { margin-bottom: 11px; }
 .dshc-accountHint { margin: 9px 0 0; }
 .dshc-accountForm .dshc-field { flex: 1 1 150px; }
 .dshc-accountForm .dshc-accountKeyField { flex: 1 1 220px; }
@@ -1285,6 +810,13 @@ window.__ModuleLoader__.load({
 /* v1.9.1: the account key is the only credential field; the shape hint is
  * advisory (the host still receives whatever was pasted). */
 .dshc-accountKeyShapeHint { margin: 7px 0 0; color: var(--dsw-alias-state-warn-primary); }
+.dshc-accountModeLabel {
+  margin-top: 9px;
+  font-size: 12.5px;
+  line-height: 18px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
 .dshc-accountLine {
   display: flex;
   flex-wrap: wrap;
@@ -1330,13 +862,6 @@ window.__ModuleLoader__.load({
   flex-direction: column;
   margin-top: 11px;
   border-top: 1px solid var(--dsw-alias-border-l1);
-}
-.dshc-deviceListHead {
-  padding: 9px 2px 3px;
-  color: var(--dsw-alias-label-secondary);
-  font-size: 11.5px;
-  line-height: 16px;
-  font-weight: 500;
 }
 .dshc-deviceRow {
   display: flex;
@@ -1423,11 +948,9 @@ window.__ModuleLoader__.load({
   white-space: nowrap;
   cursor: pointer;
 }
-@media (hover: hover) {
-  .dshc-accountCreateBtn:hover {
+@media (hover: hover) {.dshc-accountCreateBtn:hover {
     background: var(--dsw-alias-button-primary-hover, var(--dsw-alias-brand-primary));
-  }
-}
+  }}
 .dshc-accountCreateBtn:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
 .dshc-accountCreateCancel { margin-top: 9px; }
 .dshc-accountCreated {
@@ -1464,11 +987,9 @@ window.__ModuleLoader__.load({
 .dshc-accountKeyMissingHint { padding-left: 0; }
 .dshc-accountCreatedHint { margin: 9px 0 0; }
 .dshc-accountCenter { margin-top: 12px; }
-
 .dshc-dot[data-state="running"] { background: var(--dsw-alias-state-success-primary); }
 .dshc-dot[data-state="connecting"] { background: var(--dsw-alias-state-warn-primary); }
 .dshc-dot[data-state="failed"] { background: var(--dsw-alias-state-error-primary); }
-
 /* Composer target-computer chip + menu (slot conversation.input.left). */
 .dshc-targetWrap {
   display: inline-flex;
@@ -1493,12 +1014,10 @@ window.__ModuleLoader__.load({
   cursor: pointer;
 }
 .dshc-target svg { flex: none; }
-@media (hover: hover) {
-  .dshc-target:hover {
+@media (hover: hover) {.dshc-target:hover {
     background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
     color: var(--dsw-alias-label-primary);
-  }
-}
+  }}
 .dshc-target[data-open="true"] {
   background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
   color: var(--dsw-alias-label-primary);
@@ -1560,18 +1079,9 @@ window.__ModuleLoader__.load({
  * be read; a click is ignored by the handler. */
 .dshc-menuItem[aria-disabled="true"] { cursor: not-allowed; }
 .dshc-menuItem[aria-disabled="true"] .dshc-menuName { color: var(--dsw-alias-label-secondary); }
-.dshc-menuGroup {
-  padding: 6px 7px 2px;
-  color: var(--dsw-alias-label-secondary);
-  font-size: 11px;
-  line-height: 15px;
-  font-weight: 500;
-}
-@media (hover: hover) {
-  .dshc-menuItem:hover:not(:disabled) {
+@media (hover: hover) {.dshc-menuItem:hover:not(:disabled) {
     background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
-  }
-}
+  }}
 .dshc-menuItem:focus-visible {
   background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
   outline: none;
@@ -1600,15 +1110,6 @@ window.__ModuleLoader__.load({
 }
 .dshc-menuDot[data-offline="true"] { background: var(--dsw-alias-state-idle-primary); }
 .dshc-menuCheck { flex: none; color: var(--dsw-alias-brand-primary); }
-.dshc-menuFooter {
-  margin: 4px 2px 0;
-  padding: 6px 7px 2px;
-  border-top: 1px solid var(--dsw-alias-border-l1);
-  color: var(--dsw-alias-label-secondary);
-  font-size: 11.5px;
-  line-height: 16px;
-}
-
 .dshc-errorCard {
   display: flex;
   align-items: center;
@@ -1626,7 +1127,6 @@ window.__ModuleLoader__.load({
   color: var(--dsw-alias-state-error-primary);
   overflow-wrap: anywhere;
 }
-
 .dshc-ghost {
   display: inline-flex;
   align-items: center;
@@ -1643,12 +1143,9 @@ window.__ModuleLoader__.load({
   line-height: 20px;
   cursor: pointer;
 }
-@media (hover: hover) {
-  .dshc-ghost:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2)); }
-}
+@media (hover: hover) {.dshc-ghost:hover:not(:disabled) { background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2)); }}
 .dshc-ghost:disabled { opacity: 0.45; cursor: not-allowed; }
 .dshc-ghost:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
-
 .dshc-overlay {
   position: fixed;
   inset: 0;
@@ -1698,13 +1195,6 @@ window.__ModuleLoader__.load({
   line-height: 20px;
   color: var(--dsw-alias-label-secondary);
 }
-.dshc-dialogBody {
-  margin: 0;
-  font-size: 13px;
-  line-height: 20px;
-  color: var(--dsw-alias-label-secondary);
-  overflow-wrap: anywhere;
-}
 .dshc-closeBtn { margin: -4px -6px 0 0; }
 .dshc-footer {
   display: flex;
@@ -1714,7 +1204,6 @@ window.__ModuleLoader__.load({
   margin-top: 20px;
 }
 .dshc-footerSplit { justify-content: space-between; }
-
 /* Access dialogs (task-12): one row per computer / per Bot preset. */
 .dshc-accessList {
   max-height: min(320px, calc(100vh - 280px));
@@ -1775,188 +1264,12 @@ window.__ModuleLoader__.load({
   line-height: 18px;
 }
 .dshc-switch:disabled { opacity: 0.6; cursor: not-allowed; }
-
-/* Row capability chips + the amber upgrade chip (task-15). */
-.dshc-capChip {
-  flex: none;
-  padding: 0 5px;
-  border-radius: 5px;
-  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
-  color: var(--dsw-alias-label-secondary);
-  font-size: 10.5px;
-  line-height: 15px;
-  font-weight: 500;
-  white-space: nowrap;
-}
-.dshc-modeHint {
-  flex: none;
-  color: var(--dsw-alias-label-secondary);
-  font-size: 10.5px;
-  line-height: 15px;
-  white-space: nowrap;
-}
-.dshc-driftChip {
-  flex: none;
-  display: inline-flex;
-  align-items: center;
-  padding: 0 5px;
-  border: 1px solid currentColor;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--dsw-alias-state-warn-primary);
-  font: inherit;
-  font-size: 10.5px;
-  line-height: 15px;
-  font-weight: 500;
-  white-space: nowrap;
-  cursor: pointer;
-}
-@media (hover: hover) {
-  .dshc-driftChip:hover { background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2)); }
-}
-.dshc-driftChip:focus-visible { outline: 2px solid var(--dsw-alias-state-warn-primary); outline-offset: 1px; }
-.dshc-driftHint {
-  margin: 8px 0 0;
-  color: var(--dsw-alias-state-warn-primary);
-  font-size: 11.5px;
-  line-height: 16px;
-}
-.dshc-runtimeDirection {
-  margin-top: 2px;
-  color: var(--dsw-alias-label-secondary);
-  font-size: 11.5px;
-  line-height: 16px;
-}
-.dshc-runtimeAgent {
-  margin-top: 2px;
-  color: var(--dsw-alias-label-secondary);
-  font-size: 11.5px;
-  line-height: 16px;
-  overflow-wrap: anywhere;
-}
 .dshc-accessReason {
   margin: 2px 0 4px 25px;
   color: var(--dsw-alias-label-secondary);
   font-size: 11.5px;
   line-height: 16px;
 }
-
-/* The connect-modal combobox (task-18). The 本机地址 rows are gone; only the
- * picker's kind labels and dropdown remain. */
-.dshc-addrDot {
-  flex: none;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--dsw-alias-state-idle-primary);
-}
-.dshc-addrDot[data-recommended="true"] { background: var(--dsw-alias-state-success-primary); }
-.dshc-addrKind {
-  flex: none;
-  min-width: 44px;
-  color: var(--dsw-alias-label-secondary);
-  font-size: 11.5px;
-  line-height: 16px;
-  white-space: nowrap;
-}
-.dshc-addrComboUrl {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
-  line-height: 17px;
-  color: var(--dsw-alias-label-primary);
-  flex: 1 1 auto;
-  text-align: left;
-}
-.dshc-addrBadge {
-  flex: none;
-  padding: 0 5px;
-  border-radius: 5px;
-  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
-  color: var(--dsw-alias-label-secondary);
-  font-size: 10.5px;
-  line-height: 15px;
-  font-weight: 500;
-}
-.dshc-addrBadge.dshc-addrUnreachable {
-  border: 1px solid currentColor;
-  background: transparent;
-  color: var(--dsw-alias-state-warn-primary);
-}
-.dshc-addrOption[disabled] {
-  opacity: 0.62;
-  cursor: default;
-}
-@media (hover: hover) {
-  .dshc-addrOption[disabled]:hover { background: transparent; }
-}
-.dshc-addrCombo[aria-expanded="true"] { background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2)); }
-.dshc-addrInlineWarn {
-  margin: 6px 0 0;
-  color: var(--dsw-alias-state-warn-primary);
-  font-size: 11.5px;
-  line-height: 16px;
-}
-.dshc-addrCombo {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex: 1 1 auto;
-  min-width: 0;
-  height: 26px;
-  padding: 0 6px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 7px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-}
-@media (hover: hover) {
-  .dshc-addrCombo:hover { background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2)); }
-}
-.dshc-addrCombo:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
-.dshc-addrCombo .dshc-targetChevron { margin-left: auto; }
-.dshc-addrListbox {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin-top: 6px;
-  padding: 4px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 9px;
-  background: var(--dsw-alias-bg-layer-1);
-}
-.dshc-addrOption {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: 100%;
-  min-height: 28px;
-  padding: 3px 6px;
-  border: none;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--dsw-alias-label-primary);
-  font: inherit;
-  font-size: 12px;
-  line-height: 17px;
-  text-align: left;
-  cursor: pointer;
-}
-@media (hover: hover) {
-  .dshc-addrOption:hover { background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2)); }
-}
-.dshc-addrOption:focus-visible {
-  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
-  outline: none;
-}
-.dshc-addrOption[aria-selected="true"] { background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2)); }
-.dshc-addrOption .dshc-addrKind { min-width: 40px; }
-
 /* Relay link (中继): the status line on the 中继 card and the small card that
  * explains the public address. Muted while the link comes up, amber when it
  * failed (the line then carries the actionable hint). */
@@ -1987,7 +1300,109 @@ window.__ModuleLoader__.load({
 .dshc-relayForm { align-items: flex-end; }
 .dshc-relayFormActions { display: flex; flex: none; gap: 8px; }
 .dshc-relayCard .dshc-relayUpgrade { overflow-wrap: anywhere; }
-
+/* v1.9.2: 本机中继 — the plugin runs the relay process itself, so the card
+ * needs no service setup, no nginx and no root. A quiet sub-block at the top
+ * of the 中继 card: state line, one action, an optional port and the logs. */
+.dshc-relaySup {
+  margin-top: 10px;
+  padding: 10px 11px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 12px;
+  background: var(--dsw-alias-bg-layer-2);
+}
+.dshc-relaySupHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.dshc-relaySupTitle {
+  font-size: 12.5px;
+  line-height: 18px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+.dshc-relaySupState {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--dsw-alias-label-secondary);
+}
+.dshc-relaySupState[data-kind="failed"] { color: var(--dsw-alias-state-warn-primary); }
+.dshc-relaySupActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+}
+.dshc-relaySup .dshc-primary {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 12.5px;
+}
+.dshc-relayPortField {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+}
+.dshc-relayPortInput {
+  width: 76px;
+  height: 30px;
+  padding: 0 8px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 8px;
+  background: var(--dsw-alias-bg-layer-1);
+  color: var(--dsw-alias-label-primary);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 18px;
+  font-variant-numeric: tabular-nums;
+}
+.dshc-relayPortInput:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: -1px;
+  border-color: transparent;
+}
+.dshc-relaySupHint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+  overflow-wrap: anywhere;
+}
+.dshc-relayLogsWrap { margin-top: 8px; }
+.dshc-relayLogsHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.dshc-relayLogsToggle { margin-top: 0; }
+.dshc-relayLogsRefresh { margin-left: auto; }
+.dshc-relayLogs {
+  max-height: 168px;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 9px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-secondary);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 11.5px;
+  line-height: 16px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.dshc-relayLogsEmpty { margin: 8px 0 0; }
 /* Composer menu: the manage-access row replaces the old muted footer. */
 .dshc-menuSep {
   height: 1px;
@@ -1996,71 +1411,6 @@ window.__ModuleLoader__.load({
 }
 .dshc-menuManage { color: var(--dsw-alias-label-primary); }
 .dshc-targetError[data-kind="info"] { color: var(--dsw-alias-label-secondary); }
-
-.dshc-seg {
-  display: flex;
-  gap: 2px;
-  padding: 3px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 11px;
-  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-1));
-}
-.dshc-segBtn {
-  flex: 1 1 0;
-  min-width: 0;
-  height: 30px;
-  padding: 0 8px;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--dsw-alias-label-secondary);
-  font: inherit;
-  font-size: 12.5px;
-  line-height: 18px;
-  font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  cursor: pointer;
-}
-.dshc-segBtn[data-active="true"] {
-  background: var(--dsw-alias-bg-layer-3, var(--dsw-alias-bg-layer-1));
-  color: var(--dsw-alias-label-primary);
-  box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.1),
-    inset 0 0 0 0.5px var(--dsw-alias-border-l3, var(--dsw-alias-border-l2));
-}
-@media (hover: hover) {
-  .dshc-segBtn[data-active="false"]:hover { color: var(--dsw-alias-label-primary); }
-}
-.dshc-segBtn:focus-visible {
-  outline: 2px solid var(--dsw-alias-brand-primary);
-  outline-offset: -1px;
-}
-
-.dshc-switchRow {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  margin: 14px 0;
-  padding: 11px 14px;
-  border: 1px solid var(--dsw-alias-border-l2);
-  border-radius: 12px;
-}
-.dshc-switchText { min-width: 0; }
-.dshc-switchTitle {
-  font-size: 13px;
-  line-height: 20px;
-  font-weight: 500;
-  color: var(--dsw-alias-label-primary);
-}
-.dshc-switchHint {
-  margin-top: 2px;
-  font-size: 12px;
-  line-height: 18px;
-  color: var(--dsw-alias-label-secondary);
-}
 .dshc-switch {
   position: relative;
   flex: none;
@@ -2087,94 +1437,6 @@ window.__ModuleLoader__.load({
   transform: translateX(16px);
   background: var(--dsw-alias-label-primary-foreground, #fff);
 }
-
-.dshc-cmd {
-  position: relative;
-  padding: 12px 44px 12px 14px;
-  border-radius: 10px;
-  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-1));
-}
-.dshc-cmdLabel {
-  display: block;
-  margin-bottom: 5px;
-  color: var(--dsw-alias-label-secondary);
-  font-size: 11px;
-  line-height: 16px;
-  font-weight: 500;
-  letter-spacing: 0.02em;
-  text-transform: uppercase;
-}
-.dshc-cmdText {
-  display: block;
-  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
-  font-size: 12.5px;
-  line-height: 19px;
-  color: var(--dsw-alias-label-primary);
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-.dshc-cmdText[data-placeholder="true"] { color: var(--dsw-alias-label-secondary); }
-.dshc-cmdCopy {
-  position: absolute;
-  top: 7px;
-  right: 7px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  border: none;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--dsw-alias-label-secondary);
-  cursor: pointer;
-}
-@media (hover: hover) {
-  .dshc-cmdCopy:hover:not(:disabled) {
-    background: var(--dsw-alias-bg-layer-2);
-    color: var(--dsw-alias-label-primary);
-  }
-}
-.dshc-cmdCopy:disabled { opacity: 0.4; cursor: not-allowed; }
-.dshc-cmdCopy:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
-.dshc-cmdCopy[data-copied="true"] { color: var(--dsw-alias-state-success-primary); }
-
-.dshc-strip {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 14px;
-  padding: 9px 12px;
-  border-radius: 10px;
-  background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-1));
-  color: var(--dsw-alias-label-secondary);
-  font-size: 12.5px;
-  line-height: 18px;
-}
-.dshc-strip svg { flex: none; }
-.dshc-stripText { min-width: 0; overflow-wrap: anywhere; }
-.dshc-strip[data-state="connected"] { color: var(--dsw-alias-state-success-primary); }
-.dshc-strip[data-state="expired"] { color: var(--dsw-alias-state-warn-primary); }
-.dshc-strip[data-state="used"] { color: var(--dsw-alias-state-warn-primary); }
-.dshc-strip[data-state="error"] { color: var(--dsw-alias-state-error-primary); }
-.dshc-stripAction {
-  margin-left: auto;
-  flex: none;
-  padding: 3px 9px;
-  border: 1px solid currentColor;
-  border-radius: 7px;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  font-size: 12px;
-  line-height: 16px;
-  font-weight: 500;
-  cursor: pointer;
-}
-.dshc-stripAction:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
-
 .dshc-spinner {
   flex: none;
   width: 13px;
@@ -2223,55 +1485,6 @@ window.__ModuleLoader__.load({
   color: var(--dsw-alias-state-error-primary);
   overflow-wrap: anywhere;
 }
-/* Hub modal: the desktop-path block (address + key for the local runtime card). */
-.dshc-details { margin-top: 12px; }
-.dshc-detailsSummary {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 3px 0;
-  color: var(--dsw-alias-label-secondary);
-  font-size: 12.5px;
-  line-height: 18px;
-  cursor: pointer;
-  list-style: none;
-}
-.dshc-detailsLabel {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-@media (hover: hover) {
-  .dshc-detailsSummary:hover { color: var(--dsw-alias-label-primary); }
-}
-.dshc-detailsSummary::-webkit-details-marker { display: none; }
-.dshc-detailsSummary::marker { content: ''; }
-.dshc-detailsSummary::after {
-  content: '\203A';
-  display: inline-block;
-  margin-left: 4px;
-  transition: transform 120ms ease;
-}
-.dshc-details[open] > .dshc-detailsSummary::after { transform: rotate(90deg); }
-.dshc-detailsSummary:focus-visible {
-  outline: 2px solid var(--dsw-alias-brand-primary);
-  outline-offset: 2px;
-  border-radius: 6px;
-}
-.dshc-detailsBody {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  margin-top: 8px;
-}
-.dshc-cliBody {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin-top: 10px;
-}
-.dshc-cliBody .dshc-switchRow { margin: 0; }
 .dshc-copyStack {
   display: flex;
   flex-direction: column;
@@ -2344,16 +1557,13 @@ window.__ModuleLoader__.load({
   color: var(--dsw-alias-label-secondary);
   cursor: pointer;
 }
-@media (hover: hover) {
-  .dshc-copyRowBtn:hover:not(:disabled) {
+@media (hover: hover) {.dshc-copyRowBtn:hover:not(:disabled) {
     background: var(--dsw-alias-bg-layer-2);
     color: var(--dsw-alias-label-primary);
-  }
-}
+  }}
 .dshc-copyRowBtn:disabled { opacity: 0.4; cursor: not-allowed; }
 .dshc-copyRowBtn:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 1px; }
 .dshc-copyRowBtn[data-copied="true"] { color: var(--dsw-alias-state-success-primary); }
-
 .dshc-sr {
   position: absolute;
   width: 1px;
@@ -2367,31 +1577,19 @@ window.__ModuleLoader__.load({
 }
 @keyframes dshc-spin { to { transform: rotate(360deg); } }
 @keyframes dshc-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.45; } }
-@media (prefers-reduced-motion: reduce) {
-  .dshc-spinner { animation-duration: 2.4s; }
-  .dshc-skeletonBar { animation: none; }
-  .dshc-switchThumb { transition: none; }
-}
+@media (prefers-reduced-motion: reduce) {.dshc-spinner { animation-duration: 2.4s; }
+.dshc-switchThumb { transition: none; }}
 @media (max-width: 480px) {
-  .dshc-badge, .dshc-capChip, .dshc-modeHint { display: none; }
   .dshc-overlay { padding: 16px; }
   .dshc-card { padding: 20px 16px; border-radius: 14px; }
-  .dshc-row { padding-left: 13px; }
   .dshc-formSubmit { flex: 1 1 100%; }
-  /* 420px: the joined line stacks instead of pushing 断开 off the edge. */
-  .dshc-joinLine { align-items: flex-start; }
-  .dshc-joinText { flex: 1 1 100%; }
-  .dshc-joinDisconnect { margin-left: 0; }
-  .dshc-groupHead { flex-wrap: wrap; }
   .dshc-accountLine { align-items: flex-start; }
   .dshc-accountLogout { margin-left: 0; }
   /* 420px: the 被控 label + switch must not push 在线/离线 off the row. */
   .dshc-devicePlatform { display: none; }
   .dshc-deviceControl { gap: 5px; }
 }
-@media (prefers-reduced-motion: reduce) {
-  .dshc-detailsSummary::after { transition: none; }
-}
+
 `;
 
     let styleRefs = 0;
@@ -2492,32 +1690,18 @@ window.__ModuleLoader__.load({
 
     const api = {
       readState: (signal) => requestJson(API.state, { signal }),
-      createKey: (os, replace, signal) => requestJson(API.keys, {
-        method: 'POST',
-        body: { os, replace, label: null },
-        signal,
-      }),
-      readKeyStatus: (key, signal) => requestJson(`${API.keyStatus}?key=${encodeURIComponent(key)}`, { signal }),
-      rename: (id, name, signal) => requestJson(API.rename, { method: 'POST', body: { id, name }, signal }),
-      remove: (id, signal) => requestJson(API.remove, { method: 'POST', body: { id }, signal }),
-      readRuntime: (signal) => requestJson(API.runtime, { signal }),
-      /* One address (`{ serverUrl: '<url>#join=<token>' }`, handed over
-       * verbatim) or the legacy pair (`{ serverUrl, key }`). */
-      runtimeConnect: (payload, signal) => requestJson(API.runtimeConnect, {
-        method: 'POST',
-        body: payload,
-        signal,
-      }),
-      runtimeEnable: (enabled, signal) => requestJson(API.runtimeEnable, {
-        method: 'POST',
-        body: { enabled },
-        signal,
-      }),
-      runtimeDisconnect: (signal) => requestJson(API.runtimeDisconnect, { method: 'POST', body: {}, signal }),
       /* The 中继 card's whole setup path: `{ enabled }` flips the switch,
        * `{ url }` persists a UI override (and re-dials), and
        * `{ enabled: true, url }` is the one-click first setup. */
       relayEnable: (payload, signal) => requestJson(API.relayEnable, {
+        method: 'POST',
+        body: payload,
+        signal,
+      }),
+      /* Local relay supervisor (v1.9.2). Both directions answer the same
+       * `{ supervisor, localUrl }` shape, so one action reconciles the block. */
+      readRelaySupervisor: (signal) => requestJson(API.relaySupervisor, { signal }),
+      relaySupervisorAction: (payload, signal) => requestJson(API.relaySupervisor, {
         method: 'POST',
         body: payload,
         signal,
@@ -2562,84 +1746,10 @@ window.__ModuleLoader__.load({
         body: { sessionId, allowedComputers },
         signal,
       }),
-      readComputerAccess: (computerId, signal) => requestJson(
-        `${API.accessComputer}?computerId=${encodeURIComponent(computerId)}`,
-        { signal },
-      ),
-      setComputerAccess: (computerId, allowedPresets, signal) => requestJson(API.accessComputer, {
-        method: 'POST',
-        body: { computerId, allowedPresets },
-        signal,
-      }),
     };
 
     /* Address kind ids → localized labels (task-17 serverUrls[].kind). */
-    const ADDRESS_KIND_KEYS = {
-      public: 'addr.kind.public',
-      forwarded: 'addr.kind.forwarded',
-      host: 'addr.kind.host',
-      tailscale: 'addr.kind.tailscale',
-      lan: 'addr.kind.lan',
-      mdns: 'addr.kind.mdns',
-      loopback: 'addr.kind.loopback',
-      tunnel: 'addr.kind.tunnel',
-      relay: 'addr.kind.relay',
-    };
-
     /** @param {string} kind - serverUrls[].kind. @returns {string} short label. */
-    function addressKindLabel(kind) {
-      const key = ADDRESS_KIND_KEYS[kind];
-      return key === undefined ? t('addr.kind.other') : t(key);
-    }
-
-    /**
-     * Whether another machine can actually reach this candidate.
-     * Old hosts send no flag; treat a missing flag as reachable.
-     * @param {object} entry - serverUrls[] item.
-     * @returns {boolean} reachable.
-     */
-    function isReachableAddress(entry) {
-      return !(entry === null || typeof entry !== 'object' || entry.reachable === false);
-    }
-
-    /**
-     * Order candidates for display: a reachable recommended one first, other
-     * reachable ones next, unreachable ones after them, loopback last.
-     * @param {Array} urls - serverUrls.
-     * @returns {Array} display order.
-     */
-    function orderServerUrls(urls) {
-      const rank = (entry) => {
-        if (entry === null || typeof entry !== 'object') return 50;
-        if (!isReachableAddress(entry)) return entry.kind === 'loopback' ? 95 : 80;
-        if (entry.kind === 'loopback') return 90;
-        if (entry.recommended === true) return 0;
-        return 10;
-      };
-      return urls
-        .filter((entry) => entry && typeof entry.url === 'string' && entry.url !== '')
-        .slice()
-        .sort((a, b) => rank(a) - rank(b));
-    }
-
-    /**
-     * The address that should be copied/used: the recommended reachable one,
-     * else any reachable one, else the first candidate. A relay candidate only
-     * becomes the address to hand out once its link is up — the host sets
-     * `recommended` exactly then — so while it connects it stays informational
-     * and the local candidates keep the preference.
-     * @param {Array} urls - serverUrls.
-     * @returns {string} url or ''.
-     */
-    function preferredServerUrl(urls) {
-      const ordered = orderServerUrls(urls);
-      const reachable = ordered.filter((entry) => isReachableAddress(entry));
-      const usable = reachable.find((entry) => entry.kind !== 'relay' || entry.recommended === true);
-      if (usable !== undefined) return usable.url;
-      if (reachable.length > 0) return reachable[0].url;
-      return ordered.length > 0 ? ordered[0].url : '';
-    }
-
     /* Relay link states the host reports in `state.relay.state` (PROTOCOL
      * relay): the browser only needs "up", "coming up" or "broken". */
     const RELAY_PHASES = ['disabled', 'idle', 'connecting', 'connected', 'failed'];
@@ -2670,60 +1780,164 @@ window.__ModuleLoader__.load({
       return error === '' ? t('relay.unknownError') : error;
     }
 
-    /**
-     * Whether the connect modal may hand this candidate out. A relay
-     * candidate is always selectable: its URL is stable and the link may
-     * still be coming up, so the user can copy the address ahead of time.
-     * @param {object} entry - serverUrls[] item.
-     * @returns {boolean} selectable.
-     */
-    function isSelectableAddress(entry) {
-      if (isReachableAddress(entry)) return true;
-      return entry !== null && typeof entry === 'object' && entry.kind === 'relay';
-    }
-
-    /* Capability ids → localized chip labels; unknown ids render raw. */
-    const CAPABILITY_KEYS = { exec: 'cap.exec', fs: 'cap.fs', jobs: 'cap.jobs', pty: 'cap.pty' };
-
-    /* R2: user-facing chips, in a stable order. `tunnel` is deliberately not
-     * a chip (it is relay plumbing, not something the machine can do). */
-    const CAPABILITY_CHIPS = [
-      { id: 'exec', label: 'cap.exec', title: 'cap.exec.title' },
-      { id: 'fs', label: 'cap.fs', title: 'cap.fs.title' },
-      { id: 'jobs', label: 'cap.jobs', title: 'cap.jobs.title' },
-      { id: 'pty', label: 'cap.pty', title: 'cap.pty.title' },
-    ];
-
-    /** @param {string} capability - capability id. @returns {string} chip text. */
-    function capabilityLabel(capability) {
-      const key = CAPABILITY_KEYS[capability];
-      return key === undefined ? String(capability) : t(key);
-    }
+    /** Default port of the relay the plugin starts for this machine. */
+    const RELAY_LOCAL_PORT = 8445;
+    /** The supervisor states the card knows (anything else reads as stopped). */
+    const SUPERVISOR_STATES = ['stopped', 'starting', 'running', 'failed'];
 
     /**
-     * Derive the capability chips for a computer (or a runtime status).
-     * Prefers the host's boolean `caps` (R2); older hosts only send the
-     * legacy `capabilities` id array, so that stays as the fallback.
-     * @param {object|null} source - computer or runtime status.
-     * @returns {Array<{id: string, label: string, title: string|null}>} chips.
+     * Normalize the supervisor status the host reports. The contract is
+     * `{ state, pid, port, since, lastError, logs }`; a host that sends a
+     * string `logs` or a non-numeric pid must not break the card.
+     * @param {object|null} raw - `supervisor` from the route or `/state`.
+     * @returns {object|null} normalized status, or null when absent.
      */
-    function derivedCapabilityChips(source) {
-      const caps = source !== null && typeof source === 'object' ? source.caps : null;
-      if (caps !== null && typeof caps === 'object') {
-        return CAPABILITY_CHIPS
-          .filter((chip) => caps[chip.id] === true)
-          .map((chip) => ({ id: chip.id, label: t(chip.label), title: t(chip.title) }));
+    function normalizeSupervisor(raw) {
+      if (raw === null || typeof raw !== 'object') return null;
+      const state = typeof raw.state === 'string' && SUPERVISOR_STATES.includes(raw.state) ? raw.state : 'stopped';
+      const port = Number(raw.port);
+      const pid = Number(raw.pid);
+      const logs = Array.isArray(raw.logs)
+        ? raw.logs.filter((line) => typeof line === 'string')
+        : (typeof raw.logs === 'string' ? raw.logs.split('\n').filter((line) => line !== '') : []);
+      return {
+        state,
+        pid: Number.isFinite(pid) && pid > 0 ? pid : null,
+        port: Number.isFinite(port) && port > 0 ? port : RELAY_LOCAL_PORT,
+        since: typeof raw.since === 'string' ? raw.since : null,
+        lastError: typeof raw.lastError === 'string' && raw.lastError.trim() !== '' ? raw.lastError.trim() : null,
+        logs,
+      };
+    }
+
+    /**
+     * The `{ supervisor, localUrl }` answer both supervisor routes share.
+     * @param {object|null} payload - route body.
+     * @returns {{supervisor: object, localUrl: string}|null} normalized answer.
+     */
+    function supervisorPayloadOf(payload) {
+      if (payload === null || typeof payload !== 'object') return null;
+      const supervisor = normalizeSupervisor(payload.supervisor);
+      if (supervisor === null) return null;
+      const localUrl = typeof payload.localUrl === 'string' && payload.localUrl !== ''
+        ? payload.localUrl
+        : `http://127.0.0.1:${supervisor.port}`;
+      return { supervisor, localUrl };
+    }
+
+    /**
+     * The relay address the card fills in after a local start: the known
+     * public address (as a socket URL) when there is one, else the loopback
+     * relay the plugin just started (`ws://127.0.0.1:<port>`).
+     * @param {string} localUrl - `localUrl` from the supervisor answer.
+     * @param {number} port - relay port.
+     * @param {string} publicUrl - `state.relay.publicUrl`.
+     * @returns {string} the address to pre-fill.
+     */
+    function relayAddressForLocal(localUrl, port, publicUrl) {
+      if (typeof publicUrl === 'string' && publicUrl !== '') {
+        const socketUrl = publicUrl.replace(/^http(s?):\/\//i, (match, secure) => `ws${secure}://`);
+        if (/^wss?:\/\//i.test(socketUrl)) return socketUrl;
       }
-      const legacy = source !== null && typeof source === 'object' && Array.isArray(source.capabilities)
-        ? source.capabilities.filter((capability) => typeof capability === 'string' && capability !== '')
-        : [];
-      return legacy.map((capability) => {
-        const meta = CAPABILITY_CHIPS.find((chip) => chip.id === capability);
-        return {
-          id: capability,
-          label: capabilityLabel(capability),
-          title: meta === undefined ? null : t(meta.title),
-        };
+      const base = typeof localUrl === 'string' && localUrl !== ''
+        ? localUrl
+        : `http://127.0.0.1:${port}`;
+      return base.replace(/^http(s?):\/\//i, (match, secure) => `ws${secure}://`).replace(/\/+$/, '');
+    }
+
+    /** Display name of a registry computer (never the raw id unless nothing else exists). */
+    function computerNameOf(computer) {
+      if (computer === null || typeof computer !== 'object') return '';
+      if (typeof computer.name === 'string' && computer.name !== '') return computer.name;
+      if (typeof computer.hostname === 'string' && computer.hostname !== '') return computer.hostname;
+      return typeof computer.id === 'string' ? computer.id : '';
+    }
+
+    /**
+     * The registry computer id the host uses for THIS machine's own runtime
+     * (`/self.runtime.computerId`, mirrored at `/state.account.self`). The
+     * self-runtime is how 本地电脑 becomes executable, so its record must never
+     * be listed as a remote machine.
+     * @param {object|null} account - account status.
+     * @returns {string} `cmp_…` or ''.
+     */
+    function accountSelfComputerId(account) {
+      if (account === null || typeof account !== 'object') return '';
+      /* The composer chip keeps the id flat; `/state.account` nests it. */
+      if (typeof account.selfComputerId === 'string' && account.selfComputerId !== '') {
+        return account.selfComputerId;
+      }
+      const self = account.self !== null && typeof account.self === 'object' ? account.self : null;
+      const runtime = self !== null && self.runtime !== null && typeof self.runtime === 'object' ? self.runtime : null;
+      return runtime !== null && typeof runtime.computerId === 'string' ? runtime.computerId : '';
+    }
+
+    /**
+     * THIS machine's own device row in the account directory (matched by
+     * `account.machineId`), or null when unknown.
+     * @param {object|null} account - account status.
+     * @returns {object|null} the device row.
+     */
+    function accountOwnDevice(account) {
+      if (account === null || typeof account !== 'object' || account.loggedIn !== true) return null;
+      const machineId = typeof account.machineId === 'string' ? account.machineId : '';
+      const devices = Array.isArray(account.devices) ? account.devices : [];
+      if (machineId === '') return null;
+      return devices.find((device) => deviceMachineId(device) === machineId) || null;
+    }
+
+    /**
+     * Whether a registry computer is THIS machine. The host may flag it
+     * (`self: true`); otherwise the self-runtime computer id, the account's
+     * machine id and the machine's own directory name are the fallbacks.
+     * @param {object|null} computer - `/state.computers[]` entry.
+     * @param {object|null} account - account status.
+     * @returns {boolean} whether it is the local machine.
+     */
+    function isSelfComputer(computer, account) {
+      if (computer === null || typeof computer !== 'object') return false;
+      if (computer.self === true) return true;
+      const selfId = accountSelfComputerId(account);
+      if (selfId !== '' && String(computer.id || '') === selfId) return true;
+      const accountMachineId = account !== null && typeof account === 'object'
+        && typeof account.machineId === 'string' ? account.machineId : '';
+      if (accountMachineId !== '' && typeof computer.machineId === 'string'
+        && computer.machineId === accountMachineId) return true;
+      const own = accountOwnDevice(account);
+      if (own !== null) {
+        const name = computerNameOf(computer);
+        const ownName = typeof own.name === 'string' ? own.name : '';
+        if (name !== '' && ownName !== '' && name === ownName) return true;
+      }
+      return false;
+    }
+
+    /**
+     * Whether a registry computer is already represented in the account
+     * directory (so the registry card must not repeat it). Matching is by
+     * machine id, hub id, entry URL, then name — the relay directory and the
+     * hub registry are separate sources that only share those fields.
+     * @param {object|null} computer - `/state.computers[]` entry.
+     * @param {object|null} account - account status.
+     * @returns {boolean} whether the account already lists it.
+     */
+    function registryComputerInAccount(computer, account) {
+      if (account === null || typeof account !== 'object' || account.loggedIn !== true) return false;
+      if (isSelfComputer(computer, account)) return true;
+      const devices = Array.isArray(account.devices) ? account.devices : [];
+      const machineId = typeof computer.machineId === 'string' ? computer.machineId : '';
+      const hubId = typeof computer.hubId === 'string' ? computer.hubId : '';
+      const entryUrl = typeof computer.entryUrl === 'string' ? computer.entryUrl : '';
+      const name = computerNameOf(computer);
+      return devices.some((device) => {
+        const deviceId = deviceMachineId(device);
+        if (machineId !== '' && deviceId !== '' && machineId === deviceId) return true;
+        const deviceHub = typeof device.hubId === 'string' ? device.hubId : '';
+        if (hubId !== '' && deviceHub !== '' && hubId === deviceHub) return true;
+        const deviceEntry = typeof device.entryUrl === 'string' ? device.entryUrl : '';
+        if (entryUrl !== '' && deviceEntry !== '' && entryUrl === deviceEntry) return true;
+        const deviceLabel = typeof device.name === 'string' ? device.name : '';
+        return name !== '' && deviceLabel !== '' && name === deviceLabel;
       });
     }
 
@@ -2860,27 +2074,8 @@ window.__ModuleLoader__.load({
     }
 
     /* Nested Escape owners: the topmost layer consumes Escape before the
-     * dialog that contains it (a combobox inside the connect modal). */
+     * dialog that contains it (e.g. the access dialog over the picker). */
     const escapeLayers = [];
-
-    /**
-     * Register an Escape handler that wins over the enclosing dialog's.
-     * @param {boolean} active - whether this layer currently owns Escape.
-     * @param {Function} handler - called on Escape.
-     */
-    function useEscapeLayer(active, handler) {
-      const handlerRef = React.useRef(handler);
-      handlerRef.current = handler;
-      React.useEffect(() => {
-        if (!active) return undefined;
-        const entry = { handler: () => handlerRef.current() };
-        escapeLayers.push(entry);
-        return () => {
-          const index = escapeLayers.indexOf(entry);
-          if (index >= 0) escapeLayers.splice(index, 1);
-        };
-      }, [active]);
-    }
 
     const FOCUSABLE = 'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), a[href], [tabindex="0"]';
 
@@ -3017,36 +2212,6 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Empty 已连接的电脑 list. When the hub publishes a fleet join address
-     * (`/state.fleet.joinUrl`) the primary action is copying it — that is the
-     * string the user pastes on the other machine. The connect dialog is
-     * demoted to the command-line fallback for machines that cannot run DSH.
-     * @param {object} props - `joinUrl`, `joinBlocked`, optional `onCliFallback()`.
-     * @returns {object} empty card.
-     */
-    function EmptyState(props) {
-      const joinUrl = typeof props.joinUrl === 'string' ? props.joinUrl : '';
-      const joinBlocked = props.joinBlocked === true;
-      return h('div', { className: 'dshc-empty' },
-        h('div', { className: 'dshc-emptyIcon', 'aria-hidden': 'true' }, h(IconMonitor, { size: 20 })),
-        h('div', { className: 'dshc-emptyTitle' }, t('empty.title')),
-        h('p', { className: 'dshc-emptyHint' }, t('empty.hint')),
-        joinUrl !== ''
-          ? h('div', { className: 'dshc-emptyActions' }, h(CopyJoinButton, { value: joinUrl }))
-          : null,
-        joinBlocked
-          ? h('p', { className: 'dshc-emptyHint dshc-joinBlocked' }, t('join.blocked'))
-          : null,
-        typeof props.onCliFallback === 'function'
-          ? h('button', {
-            type: 'button',
-            className: 'dshc-joinToggle dshc-emptyCli',
-            onClick: props.onCliFallback,
-          }, t('empty.cliAction'))
-          : null);
-    }
-
-    /**
      * Clipboard state for one value (check feedback for 1.6 s).
      * @param {string} value - text to copy.
      * @returns {{copied: boolean, failed: boolean, copy: Function}} copy state.
@@ -3074,9 +2239,9 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * One copyable value row — the primary content of the connect modal
-     * (server URL and enrollment key).
-     * @param {object} props - `label`, `value`, optional `hint`.
+     * One copyable value row — used by the 中继 card for the relay address and
+     * the public address.
+     * @param {object} props - `label`, `value`, optional `hint`, `stacked`.
      * @returns {object} row element.
      */
     function CopyRow(props) {
@@ -3106,30 +2271,8 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 「复制接入地址」 — copies the hub's fleet join URL verbatim (it is the
-     * credential the other machine pastes, so nothing is appended or stripped).
-     * @param {object} props - `value` (`/state.fleet.joinUrl`).
-     * @returns {object} copy button with check feedback.
-     */
-    function CopyJoinButton(props) {
-      const state = useCopyText(props.value);
-      const label = state.copied ? t('connect.copied') : t('fleet.copy');
-      /* The visible label is the accessible name on purpose: it changes to
-       * 已复制, so the copy is announced without a second hidden status. */
-      return h('button', {
-        type: 'button',
-        className: 'dshc-copyJoinBtn',
-        'data-copied': state.copied ? 'true' : 'false',
-        title: label,
-        onClick: () => { void state.copy(); },
-      },
-      state.copied ? h(IconCheck, { size: 13 }) : h(IconCopy, { size: 13 }),
-      h('span', null, label));
-    }
-
-    /**
-     * 「高级」 disclosure at the bottom of the page: exactly the two hub-side
-     * surfaces live inside it — the 中继 card and the 账号中心 card — collapsed
+     * 「高级」 disclosure at the bottom of the page: the hub-side surfaces live
+     * inside it — the 中继 card (with 本机中继) and the 账号中心 card — collapsed
      * by default behind one muted summary line.
      * @param {object} props - `children` (the relay + account cards).
      * @returns {object} disclosure element.
@@ -3150,80 +2293,6 @@ window.__ModuleLoader__.load({
         open
           ? h('div', { id: 'dshc-advanced-body', className: 'dshc-advancedBody' }, props.children)
           : null);
-    }
-
-    function Skeleton() {
-      return h('div', { className: 'dshc-skeleton', 'aria-hidden': 'true' },
-        h('div', { className: 'dshc-skeletonRow' },
-          h('span', { className: 'dshc-skeletonBar', 'data-wide': 'true' }),
-          h('span', { className: 'dshc-skeletonBar', 'data-narrow': 'true' })),
-        h('div', { className: 'dshc-skeletonRow', key: 'second' },
-          h('span', { className: 'dshc-skeletonBar', 'data-wide': 'true' }),
-          h('span', { className: 'dshc-skeletonBar', 'data-narrow': 'true' })));
-    }
-
-    function ComputerRow(props) {
-      const computer = props.computer;
-      const online = computer.online === true;
-      const bots = props.counts
-        || (computer.bots && typeof computer.bots === 'object' ? computer.bots : null);
-      const used = bots && typeof bots.used === 'number' ? bots.used : 1;
-      const total = bots && typeof bots.total === 'number' ? bots.total : 1;
-      const name = typeof computer.name === 'string' && computer.name !== ''
-        ? computer.name
-        : (typeof computer.hostname === 'string' ? computer.hostname : '');
-      const capabilities = derivedCapabilityChips(computer);
-      /* How this machine is connected decides the upgrade path (v1.3.2). */
-      const modeLabel = computer.mode === 'embedded'
-        ? t('mode.embedded')
-        : (computer.mode === 'service' ? t('mode.service') : null);
-      const drift = computer.updateRequired === true || computer.drift === true;
-      return h('div', { className: 'dshc-row', 'data-online': online ? 'true' : 'false' },
-        h('div', { className: 'dshc-rowMain' },
-          h('span', { className: 'dshc-name', title: name }, name),
-          h('button', {
-            type: 'button',
-            className: 'dshc-badge dshc-badgeBtn',
-            'aria-label': t('access.badgeAria', { name }),
-            title: t('access.badgeAria', { name }),
-            onClick: () => props.onAccess(computer),
-          }, t('badge.bots', { used, total })),
-          capabilities.map((capability) => h('span', {
-            key: `cap-${capability.id}`,
-            className: 'dshc-capChip',
-            title: capability.title === null ? undefined : capability.title,
-          }, capability.label)),
-          modeLabel !== null
-            ? h('span', { key: 'mode', className: 'dshc-modeHint' }, modeLabel)
-            : null,
-          drift
-            ? h('button', {
-              key: 'drift',
-              type: 'button',
-              className: 'dshc-driftChip',
-              'aria-label': t('drift.title'),
-              title: t('drift.title'),
-              onClick: () => props.onUpgrade(computer),
-            }, t('drift.chip'))
-            : null),
-        h('span', { className: 'dshc-status' },
-          h('span', { className: 'dshc-dot', 'aria-hidden': 'true' }),
-          online ? t('online') : t('offline')),
-        h('div', { className: 'dshc-rowActions' },
-          h('button', {
-            type: 'button',
-            className: 'dshc-iconBtn',
-            'aria-label': t('rename.action'),
-            title: t('rename.action'),
-            onClick: () => props.onRename(computer),
-          }, h(IconGear, { size: 16 })),
-          h('button', {
-            type: 'button',
-            className: 'dshc-iconBtn dshc-trash',
-            'aria-label': t('delete.action'),
-            title: t('delete.action'),
-            onClick: () => props.onDelete(computer),
-          }, h(IconTrash, { size: 16 }))));
     }
 
     /**
@@ -3277,450 +2346,6 @@ window.__ModuleLoader__.load({
         footer.length > 0
           ? h('div', { className: props.footerClassName ? `dshc-footer ${props.footerClassName}` : 'dshc-footer' }, footer)
           : null)));
-    }
-
-    function RenameDialog(props) {
-      const computer = props.computer;
-      const [value, setValue] = React.useState(typeof computer.name === 'string' ? computer.name : '');
-      const [busy, setBusy] = React.useState(false);
-      const [failure, setFailure] = React.useState(null);
-      const scope = React.useRef(null);
-      if (scope.current === null) scope.current = createScope();
-      React.useEffect(() => () => scope.current.abortAll(), []);
-
-      const submit = async () => {
-        const name = value.trim();
-        if (name === '' || busy) return;
-        setBusy(true);
-        setFailure(null);
-        try {
-          const result = await scope.current.run((signal) => api.rename(computer.id, name, signal));
-          props.onRenamed(result && typeof result.name === 'string' ? result.name : name);
-        } catch (error) {
-          if (error && error.name === 'AbortError') return;
-          setFailure(messageOf(error));
-          setBusy(false);
-        }
-      };
-
-      return h(Dialog, {
-        title: t('rename.title'),
-        size: 'sm',
-        onClose: () => { if (!busy) props.onClose(); },
-        footer: [
-          h('button', {
-            key: 'cancel',
-            type: 'button',
-            className: 'dshc-ghost',
-            disabled: busy,
-            onClick: props.onClose,
-          }, t('cancel')),
-          h('button', {
-            key: 'save',
-            type: 'button',
-            className: 'dshc-primary',
-            disabled: busy || value.trim() === '',
-            onClick: () => { void submit(); },
-          }, busy ? t('saving') : t('save')),
-        ],
-      },
-      h('label', { className: 'dshc-fieldLabel', htmlFor: 'dshc-rename-input' }, t('rename.field')),
-      h('input', {
-        id: 'dshc-rename-input',
-        className: 'dshc-input',
-        'data-dshc-autofocus': '',
-        type: 'text',
-        value,
-        maxLength: 64,
-        placeholder: t('rename.placeholder'),
-        disabled: busy,
-        onChange: (event) => setValue(event.target.value),
-        onKeyDown: (event) => {
-          if (event.key === 'Enter') {
-            event.preventDefault();
-            void submit();
-          }
-        },
-      }),
-      h('p', { className: 'dshc-hint' }, t('rename.hint')),
-      failure !== null ? h('p', { className: 'dshc-formError', role: 'alert' }, t('rename.failed', { message: failure })) : null);
-    }
-
-    function DeleteDialog(props) {
-      const computer = props.computer;
-      const [busy, setBusy] = React.useState(false);
-      const [failure, setFailure] = React.useState(null);
-      const scope = React.useRef(null);
-      if (scope.current === null) scope.current = createScope();
-      React.useEffect(() => () => scope.current.abortAll(), []);
-
-      const confirm = async () => {
-        if (busy) return;
-        setBusy(true);
-        setFailure(null);
-        try {
-          await scope.current.run((signal) => api.remove(computer.id, signal));
-          props.onDeleted(computer.name || '');
-        } catch (error) {
-          if (error && error.name === 'AbortError') return;
-          setFailure(messageOf(error));
-          setBusy(false);
-        }
-      };
-
-      return h(Dialog, {
-        title: t('delete.title'),
-        size: 'sm',
-        onClose: () => { if (!busy) props.onClose(); },
-        footer: [
-          h('button', {
-            key: 'cancel',
-            type: 'button',
-            className: 'dshc-ghost',
-            disabled: busy,
-            onClick: props.onClose,
-          }, t('cancel')),
-          h('button', {
-            key: 'delete',
-            type: 'button',
-            className: 'dshc-primary',
-            disabled: busy,
-            onClick: () => { void confirm(); },
-          }, busy ? t('deleting') : t('delete.confirm')),
-        ],
-      },
-      h('p', { className: 'dshc-dialogBody' }, t('delete.body', { name: computer.name || '' })),
-      failure !== null ? h('p', { className: 'dshc-formError', role: 'alert' }, t('delete.failed', { message: failure })) : null);
-    }
-
-    /**
-     * The connect-computer modal: mint a key, show the installer, poll until the
-     * machine appears (PROTOCOL §4.2–§4.3).
-     * @param {object} props - `serverUrl`, `onClose`, `onConnected(computer|null)`.
-     * @returns {object} dialog layer.
-     */
-    function ConnectModal(props) {
-      const [os, setOs] = React.useState('macos');
-      const [replace, setReplace] = React.useState(false);
-      const [nonce, setNonce] = React.useState(0);
-      const [keyInfo, setKeyInfo] = React.useState(null);
-      const [creating, setCreating] = React.useState(true);
-      const [createFailure, setCreateFailure] = React.useState(null);
-      const [status, setStatus] = React.useState('waiting');
-      const [copied, setCopied] = React.useState(false);
-      const [copyFailure, setCopyFailure] = React.useState(false);
-      const alive = React.useRef(true);
-      const message = React.useRef(props.onConnected);
-      message.current = props.onConnected;
-
-      React.useEffect(() => () => { alive.current = false; }, []);
-
-      /* One key per (os, replace, regenerate). A newer request supersedes the
-       * older one; the switcher aborts the in-flight request entirely. */
-      React.useEffect(() => {
-        let cancelled = false;
-        let controller = null;
-        try {
-          if (typeof AbortController === 'function') controller = new AbortController();
-        } catch (error) {
-          controller = null;
-        }
-        setCreating(true);
-        setCreateFailure(null);
-        setKeyInfo(null);
-        setCopied(false);
-        setCopyFailure(false);
-        setStatus('waiting');
-        api.createKey(os, replace, controller === null ? undefined : controller.signal)
-          .then((info) => {
-            if (cancelled || !alive.current) return;
-            if (!info || typeof info.key !== 'string') {
-              setCreating(false);
-              setCreateFailure(t('error.badResponse'));
-              return;
-            }
-            setKeyInfo(info);
-            setCreating(false);
-          })
-          .catch((error) => {
-            if (cancelled || !alive.current) return;
-            if (error && error.name === 'AbortError') return;
-            setCreating(false);
-            setCreateFailure(messageOf(error));
-          });
-        return () => {
-          cancelled = true;
-          if (controller !== null) {
-            try {
-              controller.abort();
-            } catch (error) {
-              /* ignore */
-            }
-          }
-        };
-      }, [os, replace, nonce]);
-
-      /* Poll the minted key every 2 s until connected / expired / used. */
-      React.useEffect(() => {
-        if (keyInfo === null || typeof keyInfo.key !== 'string') return undefined;
-        const key = keyInfo.key;
-        let cancelled = false;
-        let timer = null;
-        let controller = null;
-        const tick = async () => {
-          timer = null;
-          try {
-            if (typeof AbortController === 'function') controller = new AbortController();
-          } catch (error) {
-            controller = null;
-          }
-          try {
-            const result = await api.readKeyStatus(key, controller === null ? undefined : controller.signal);
-            if (cancelled || !alive.current) return;
-            controller = null;
-            const next = result && typeof result.status === 'string' ? result.status : 'unknown';
-            if (next === 'connected') {
-              setStatus('connected');
-              message.current(result && result.computer ? result.computer : null);
-              return;
-            }
-            if (next === 'expired' || next === 'used' || next === 'unknown') {
-              setStatus(next);
-              return;
-            }
-            timer = setTimeout(() => { void tick(); }, KEY_POLL_MS);
-          } catch (error) {
-            if (cancelled || !alive.current) return;
-            controller = null;
-            if (error && error.name === 'AbortError') return;
-            timer = setTimeout(() => { void tick(); }, KEY_POLL_MS * 2);
-          }
-        };
-        timer = setTimeout(() => { void tick(); }, 900);
-        return () => {
-          cancelled = true;
-          if (timer !== null) {
-            clearTimeout(timer);
-            timer = null;
-          }
-          if (controller !== null) {
-            try {
-              controller.abort();
-            } catch (error) {
-              /* ignore */
-            }
-          }
-        };
-      }, [keyInfo]);
-
-      /* /keys carries the candidates it minted against; the live /state may
-       * already know a relay candidate the key does not (the link can come up
-       * after the key). Merge that in so the dropdown always matches /state
-       * and the relay stays selectable. */
-      const stateCandidates = Array.isArray(props.serverUrls) ? props.serverUrls : [];
-      const mintedCandidates = Array.isArray(keyInfo && keyInfo.serverUrls)
-        ? keyInfo.serverUrls.slice()
-        : stateCandidates.slice();
-      for (const entry of stateCandidates) {
-        if (entry === null || typeof entry !== 'object' || entry.kind !== 'relay') continue;
-        if (!mintedCandidates.some((candidate) => candidate && candidate.url === entry.url)) {
-          mintedCandidates.push(entry);
-        }
-      }
-      const allCandidates = orderServerUrls(mintedCandidates);
-      /* Every candidate stays visible so the list matches the settings block,
-       * but the picker only lets a reachable one be chosen, and the command
-       * base prefers the recommended reachable address. */
-      const urlCandidates = allCandidates;
-      const baseServerUrl = keyInfo && typeof keyInfo.serverUrl === 'string' ? keyInfo.serverUrl : '';
-      const [selectedUrl, setSelectedUrl] = React.useState('');
-      React.useEffect(() => {
-        const preferred = preferredServerUrl(urlCandidates);
-        setSelectedUrl(preferred !== '' ? preferred : baseServerUrl);
-      }, [keyInfo]);
-
-      const rawCommand = keyInfo === null
-        ? ''
-        : (os === 'windows'
-          ? (typeof keyInfo.windowsCommand === 'string' ? keyInfo.windowsCommand : '')
-          : (typeof keyInfo.command === 'string' ? keyInfo.command : ''));
-      /* /keys mints the command for the recommended address; switching the
-       * candidate rewrites that base in the string we already have. */
-      const command = (typeof rawCommand === 'string' && rawCommand !== '' && baseServerUrl !== ''
-        && selectedUrl !== '' && selectedUrl !== baseServerUrl)
-        ? rawCommand.split(baseServerUrl).join(selectedUrl)
-        : (typeof rawCommand === 'string' ? rawCommand : '');
-
-      const copy = async () => {
-        if (command === '') return;
-        try {
-          await copyText(command);
-          if (!alive.current) return;
-          setCopied(true);
-          setCopyFailure(false);
-          setTimeout(() => {
-            if (alive.current) setCopied(false);
-          }, 1600);
-        } catch (error) {
-          if (!alive.current) return;
-          setCopyFailure(true);
-        }
-      };
-
-      const regenerate = () => {
-        setCopyFailure(false);
-        setNonce((value) => value + 1);
-      };
-
-      let stripText;
-      let stripState = status;
-      if (createFailure !== null) {
-        stripText = t('connect.createFailed', { message: createFailure });
-        stripState = 'error';
-      } else if (creating) {
-        stripText = t('connect.creating');
-        stripState = 'waiting';
-      } else if (status === 'connected') stripText = t('connect.connected');
-      else if (status === 'expired') stripText = t('connect.expired');
-      else if (status === 'used') stripText = t('connect.used');
-      else if (status === 'unknown') stripText = t('connect.unknown');
-      else stripText = t('connect.waiting');
-      const canRegenerate = !creating
-        && (status === 'expired' || status === 'used' || status === 'unknown' || createFailure !== null);
-
-      const osOptions = [
-        { id: 'windows', label: t('connect.os.windows') },
-        { id: 'macos', label: t('connect.os.macos') },
-        { id: 'linux', label: t('connect.os.linux') },
-      ];
-
-      const primaryServerUrl = selectedUrl !== ''
-        ? selectedUrl
-        : (keyInfo && typeof keyInfo.serverUrl === 'string' && keyInfo.serverUrl !== ''
-          ? keyInfo.serverUrl
-          : (typeof props.serverUrl === 'string' ? props.serverUrl : ''));
-      const primaryKey = keyInfo && typeof keyInfo.key === 'string' ? keyInfo.key : '';
-
-      return h(Dialog, {
-        title: t('connect.title'),
-        subtitle: t('connect.subtitle'),
-        onClose: props.onClose,
-        footer: [
-          h('button', {
-            key: 'cancel',
-            type: 'button',
-            className: 'dshc-ghost',
-            onClick: props.onClose,
-          }, t('cancel')),
-        ],
-      },
-      /* The demoted key path: this dialog and the 接入 card's 「用加入密钥」
-       * hand over the same server URL + one-time key pair. */
-      h('div', { className: 'dshc-copyStack' },
-        urlCandidates.length > 1
-          ? h(AddressPicker, {
-            key: 'server',
-            urls: urlCandidates,
-            value: primaryServerUrl,
-            loopbackOnly: (keyInfo && keyInfo.loopbackOnly === true) || props.loopbackOnly === true,
-            onChange: (url) => setSelectedUrl(url),
-          })
-          : h(CopyRow, {
-            key: 'server',
-            label: t('connect.serverUrl'),
-            hint: t('connect.serverUrlHint'),
-            value: primaryServerUrl,
-          }),
-        h(CopyRow, {
-          key: 'key',
-          label: t('connect.enrollmentKey'),
-          hint: t('connect.enrollmentKeyHint'),
-          value: primaryKey,
-        })),
-      /* Waiting / connected / expired — the 2 s key-status poll drives it. */
-      h('div', { className: 'dshc-strip', 'data-state': stripState, role: 'status', 'aria-live': 'polite' },
-        stripState === 'waiting' ? h(Spinner) : null,
-        stripState === 'connected' ? h(IconCheck, { size: 14 }) : null,
-        h('span', { className: 'dshc-stripText' }, stripText),
-        canRegenerate
-          ? h('button', { type: 'button', className: 'dshc-stripAction', onClick: regenerate }, t('connect.regenerate'))
-          : null),
-      /* SECONDARY: machines without DSH — the terminal one-liner, collapsed. */
-      h('details', { className: 'dshc-details' },
-        h('summary', { className: 'dshc-detailsSummary' },
-          h('span', { className: 'dshc-detailsLabel' }, t('connect.cliToggle'))),
-        h('div', { className: 'dshc-cliBody' },
-          h('p', { className: 'dshc-hint', style: { margin: '0' } }, t('connect.cliHint')),
-          h('div', { className: 'dshc-seg', role: 'group', 'aria-label': t('connect.osGroup') },
-            osOptions.map((option) => h('button', {
-              key: option.id,
-              type: 'button',
-              className: 'dshc-segBtn',
-              'data-active': option.id === os ? 'true' : 'false',
-              'aria-pressed': option.id === os ? 'true' : 'false',
-              onClick: () => setOs(option.id),
-            }, option.label))),
-          h('div', { className: 'dshc-switchRow' },
-            h('div', { className: 'dshc-switchText' },
-              h('div', { className: 'dshc-switchTitle' }, t('connect.replace.title')),
-              h('div', { className: 'dshc-switchHint' }, t('connect.replace.hint'))),
-            h('button', {
-              type: 'button',
-              className: 'dshc-switch',
-              role: 'switch',
-              'aria-checked': replace ? 'true' : 'false',
-              'aria-label': t('connect.replace.title'),
-              onClick: () => setReplace((value) => !value),
-            }, h('span', { className: 'dshc-switchThumb' }))),
-          h('div', { className: 'dshc-cmd' },
-            h('span', { className: 'dshc-cmdLabel' }, t('connect.command.label')),
-            h('button', {
-              type: 'button',
-              className: 'dshc-cmdCopy',
-              'data-copied': copied ? 'true' : 'false',
-              'aria-label': copied ? t('connect.copied') : t('connect.copy'),
-              title: copied ? t('connect.copied') : t('connect.copy'),
-              disabled: command === '',
-              onClick: () => { void copy(); },
-            }, copied ? h(IconCheck, { size: 15 }) : h(IconCopy, { size: 15 })),
-            h('code', {
-              className: 'dshc-cmdText',
-              'data-placeholder': command === '' ? 'true' : 'false',
-            }, command === '' ? t('connect.pendingCommand') : command),
-            h('span', { className: 'dshc-sr', role: 'status', 'aria-live': 'polite' },
-              copied ? t('connect.copied') : (copyFailure ? t('connect.copyFailed') : ''))),
-          copyFailure ? h('p', { className: 'dshc-formError', role: 'alert' }, t('connect.copyFailed')) : null)));
-    }
-
-    /**
-     * Which of the four §10.6 runtime states the status object describes.
-     * @param {object|null} status - §10.3 status() plus serverUrl.
-     * @returns {string} 'running' | 'stopped' | 'connecting' | 'failed'.
-     */
-    function runtimePhaseOf(status) {
-      if (!status || status.configured !== true) return 'stopped';
-      if (status.connected === true) return 'running';
-      if (status.enabled === true) return status.lastError ? 'failed' : 'connecting';
-      return 'stopped';
-    }
-
-    /**
-     * Whether a pasted string carries a `#join=<token>` fragment — the
-     * one-address form (v1.7.0). The client only checks the shape: it hands
-     * the pasted string to the host verbatim, and the host's runtime manager
-     * parses the fragment, strips it from the stored URL and enrolls with the
-     * join token. The browser never re-assembles a credential.
-     * @param {string} value - the pasted 接入地址.
-     * @returns {boolean} whether a non-empty join token is present.
-     */
-    function hasJoinFragment(value) {
-      if (typeof value !== 'string') return false;
-      const at = value.indexOf('#');
-      if (at < 0) return false;
-      /* Same shape the host's runtime manager parses: a fragment that starts
-       * with `join=` and carries a non-empty token. */
-      const fragment = value.slice(at + 1);
-      return fragment.startsWith('join=') && fragment.slice('join='.length).trim() !== '';
     }
 
     /**
@@ -3835,27 +2460,23 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * 「接入」 card (PROTOCOL §10.6 + account): two ways in.
+     * 「接入」 card (PROTOCOL §10.6 + account): ONE way in — the account.
      *
-     * 「登录账号」 (primary): sign into the relay's account center by pasting
-     * ONE account key (`dshk_…`) and keeping the relay address. Every machine
-     * signed into the same account sees the others in the account's device
-     * directory, so there is no per-machine pairing. 「接入地址」 keeps the
-     * v1.7.0 one-address flow unchanged (the demoted 服务器地址 + 加入密钥 form
-     * included).
+     * Sign into the relay's account center by pasting ONE account key
+     * (`dshk_…`) and keeping the relay address. Every machine signed into the
+     * same account sees the others in the account's device directory, so there
+     * is no per-machine pairing and that directory IS the computer list.
      *
      * Logged in: one line — 已登录 <accountId> + the device count + 退出登录 —
-     * followed by the account's device list (read-only in this version).
-     * @param {object} props - `view` (runtime request state), `account`
-     *   (`{phase, data}`), `discover` (`{candidates, configuredRelayUrl}`),
-     *   `onStatus`, `onRetry`, `onNeedAccount`, `onNeedDiscover`, `onAccount`.
+     * followed by the account's machine list (the 被控 switch stays on THIS
+     * machine's row). There is no second way in: the old one-address form is
+     * gone, and the local registry is not rendered on this page at all.
+     * @param {object} props - `account` (`{phase, data}`), `discover`
+     *   (`{candidates, configuredRelayUrl}`), `onNeedAccount`,
+     *   `onNeedDiscover`, `onAccount`.
      * @returns {object} card element.
      */
     function JoinCard(props) {
-      const view = props.view;
-      const status = view.data;
-      const phase = runtimePhaseOf(status);
-      const configured = Boolean(status && status.configured === true);
       const accountView = props.account !== null && typeof props.account === 'object' ? props.account : null;
       const account = accountView !== null && accountView.data !== null && typeof accountView.data === 'object'
         ? accountView.data
@@ -3869,19 +2490,13 @@ window.__ModuleLoader__.load({
       const prefill = discover !== null && Array.isArray(discover.candidates) && discover.candidates.length > 0
         ? (typeof discover.candidates[0].url === 'string' ? discover.candidates[0].url : '')
         : (discover !== null && typeof discover.configuredRelayUrl === 'string' ? discover.configuredRelayUrl : '');
-      const [tab, setTab] = React.useState(null);
-      const [address, setAddress] = React.useState('');
-      const [serverUrl, setServerUrl] = React.useState('');
-      const [key, setKey] = React.useState('');
-      const [keyMode, setKeyMode] = React.useState(false);
-      /* v1.9.1: ONE pasted account key (`dshk_…`) replaces the old 账号 ID +
-       * 密码 pair. The host owns the format; the client only hints at it. */
+      /* v1.9.1: ONE pasted account key (`dshk_…`). The host owns the format;
+       * the client only hints at it. */
       const [accountKey, setAccountKey] = React.useState('');
       const [relayUrl, setRelayUrl] = React.useState('');
       const relayTouched = React.useRef(false);
       const [busy, setBusy] = React.useState(false);
       const [failure, setFailure] = React.useState(null);
-      const [confirming, setConfirming] = React.useState(false);
       /* 被控 toggle of THIS machine: `value` is the optimistic override while
        * the POST is in flight (null = trust the host's device row), `busy`
        * disables the switch, `error` is the inline revert message. */
@@ -3906,18 +2521,9 @@ window.__ModuleLoader__.load({
         setRelayUrl(prefill);
       }, [prefill]);
 
-      /* The account tab leads; an already-joined machine keeps showing its
-       * 接入地址 line first, so upgrading never hides the working state. */
-      const effectiveTab = tab !== null ? tab : (loggedIn || !configured ? 'account' : 'address');
-      /* The account key is the only credential: paste it, keep the relay, sign
-       * in. A value that does not start with `dshk_` is only a hint — the host
-       * is the one that decides (it still may accept another shape). */
       const accountKeyTrimmed = accountKey.trim();
       const accountKeyLooksValid = accountKeyTrimmed === '' || accountKeyTrimmed.startsWith('dshk_');
       const canSubmitLogin = accountKeyTrimmed !== '' && relayUrl.trim() !== '';
-      const canSubmitAddress = keyMode
-        ? (serverUrl.trim() !== '' && key.trim() !== '')
-        : address.trim() !== '';
 
       const submitLogin = async () => {
         if (busy || !canSubmitLogin) return;
@@ -3938,41 +2544,6 @@ window.__ModuleLoader__.load({
           if (!alive.current) return;
           if (error && error.name === 'AbortError') return;
           setFailure(t('account.login.failed', { message: messageOf(error) }));
-        } finally {
-          if (alive.current) setBusy(false);
-        }
-      };
-
-      const submitAddress = async () => {
-        if (busy || !canSubmitAddress) return;
-        let payload;
-        let server;
-        if (!keyMode) {
-          const raw = address.trim();
-          if (!hasJoinFragment(raw)) {
-            setFailure(t('join.invalid'));
-            return;
-          }
-          /* Verbatim: the host owns the fragment (see hasJoinFragment). */
-          payload = { serverUrl: raw };
-          server = raw.split('#')[0];
-        } else {
-          payload = { serverUrl: serverUrl.trim(), key: key.trim() };
-          server = serverUrl.trim();
-        }
-        setBusy(true);
-        setFailure(null);
-        try {
-          const next = await scope.current.run((signal) => api.runtimeConnect(payload, signal));
-          if (!alive.current) return;
-          setAddress('');
-          setServerUrl('');
-          setKey('');
-          props.onStatus(next, t('runtime.connected.notice', { server }));
-        } catch (error) {
-          if (!alive.current) return;
-          if (error && error.name === 'AbortError') return;
-          setFailure(t('runtime.connectFailed', { message: messageOf(error) }));
         } finally {
           if (alive.current) setBusy(false);
         }
@@ -4033,14 +2604,6 @@ window.__ModuleLoader__.load({
           void submit();
         }
       };
-      const toggleKeyMode = () => {
-        setFailure(null);
-        setKeyMode((current) => !current);
-      };
-      const selectTab = (next) => {
-        setFailure(null);
-        setTab(next);
-      };
       const markRelayTouched = (value) => {
         relayTouched.current = true;
         setRelayUrl(value);
@@ -4070,9 +2633,10 @@ window.__ModuleLoader__.load({
               disabled: busy,
               onClick: () => { void submitLogout(); },
             }, busy ? t('account.loggingOut') : t('account.logout'))),
+          /* v1.9.2: the account directory is the machine list — no second
+           * sub-header, exactly the rows with their 被控 switch. */
           devices.length > 0
             ? h('div', { className: 'dshc-deviceList' },
-              h('div', { className: 'dshc-deviceListHead' }, t('account.devices.title')),
               devices.map((device, index) => {
                 const machineId = deviceMachineId(device);
                 const isThisMachine = thisMachineId !== '' && machineId === thisMachineId;
@@ -4087,8 +2651,9 @@ window.__ModuleLoader__.load({
                 });
               }))
             : h('p', { className: 'dshc-hint dshc-accountEmpty' }, t('account.devices.empty')));
-      } else if (effectiveTab === 'account') {
+      } else {
         body = h('div', null,
+          h('div', { className: 'dshc-accountModeLabel' }, t('account.login.title')),
           h('p', { className: 'dshc-hint dshc-accountHint' }, t('account.login.hint')),
           h('div', { className: 'dshc-formRow dshc-joinForm dshc-accountForm' },
             /* v1.9.1: ONE field — the pasted account key. The account id and
@@ -4134,193 +2699,13 @@ window.__ModuleLoader__.load({
               className: 'dshc-hint dshc-accountKeyShapeHint',
               role: 'status',
             }, t('account.login.keyShape')));
-      } else {
-        let addressBody;
-        if (status === null && (view.phase === 'loading' || view.phase === 'idle')) {
-          addressBody = h('div', { className: 'dshc-runtimeMeta' }, h(Spinner), h('span', null, t('runtime.loading')));
-        } else if (status === null) {
-          addressBody = h('div', { className: 'dshc-errorCard', role: 'alert' },
-            h('span', { className: 'dshc-errorText' },
-              t('error.loadDetail', { title: t('runtime.loadFailed'), message: view.error ? messageOf(view.error) : '' })),
-            h('button', { type: 'button', className: 'dshc-ghost', onClick: props.onRetry }, t('retry')));
-        } else if (!configured) {
-          const fields = keyMode
-            ? [
-              h('label', { key: 'server', className: 'dshc-field' },
-                h('span', { className: 'dshc-fieldLabel' }, t('runtime.serverLabel')),
-                h('input', {
-                  className: 'dshc-input',
-                  type: 'url',
-                  inputMode: 'url',
-                  autoComplete: 'off',
-                  spellCheck: false,
-                  value: serverUrl,
-                  placeholder: t('runtime.serverPlaceholder'),
-                  disabled: busy,
-                  onChange: (event) => setServerUrl(event.target.value),
-                  onKeyDown: enterSubmits(submitAddress),
-                })),
-              h('label', { key: 'key', className: 'dshc-field' },
-                h('span', { className: 'dshc-fieldLabel' }, t('runtime.keyLabel')),
-                h('input', {
-                  className: 'dshc-input',
-                  type: 'text',
-                  autoComplete: 'off',
-                  spellCheck: false,
-                  value: key,
-                  placeholder: t('runtime.keyPlaceholder'),
-                  disabled: busy,
-                  onChange: (event) => setKey(event.target.value),
-                  onKeyDown: enterSubmits(submitAddress),
-                })),
-            ]
-            : h('label', { className: 'dshc-field dshc-joinField' },
-              h('span', { className: 'dshc-fieldLabel' }, t('join.addressLabel')),
-              h('input', {
-                className: 'dshc-input dshc-joinAddressInput',
-                type: 'url',
-                inputMode: 'url',
-                autoComplete: 'off',
-                spellCheck: false,
-                value: address,
-                placeholder: t('join.addressPlaceholder'),
-                disabled: busy,
-                onChange: (event) => setAddress(event.target.value),
-                onKeyDown: enterSubmits(submitAddress),
-              }));
-          addressBody = h('div', null,
-            h('p', { className: 'dshc-hint dshc-joinHint' },
-              keyMode ? t('runtime.hint') : t('join.hint')),
-            h('div', { className: 'dshc-formRow dshc-joinForm' },
-              fields,
-              h('button', {
-                type: 'button',
-                className: 'dshc-primary dshc-formSubmit dshc-joinSubmit',
-                disabled: busy || !canSubmitAddress,
-                onClick: () => { void submitAddress(); },
-              }, busy ? t('runtime.connecting') : t('runtime.connect'))),
-            h('button', {
-              type: 'button',
-              className: 'dshc-joinToggle dshc-joinModeToggle',
-              onClick: toggleKeyMode,
-            }, keyMode ? t('join.addressToggle') : t('join.keyToggle')));
-        } else {
-          const server = typeof status.serverUrl === 'string' ? status.serverUrl : '';
-          addressBody = h('div', { className: 'dshc-joinLine' },
-            h('span', { className: 'dshc-joinText' },
-              h('span', null, t('join.connected')),
-              h('code', { className: 'dshc-joinAddress', title: server }, server)),
-            h('span', { className: 'dshc-status', 'data-state': phase },
-              h('span', { className: 'dshc-dot', 'data-state': phase, 'aria-hidden': 'true' }),
-              t(`runtime.status.${phase}`)),
-            h('button', {
-              type: 'button',
-              className: 'dshc-textBtn dshc-joinDisconnect',
-              disabled: busy,
-              onClick: () => setConfirming(true),
-            }, t('runtime.disconnect')));
-        }
-        body = addressBody;
       }
-
-      const tabBar = loggedIn
-        ? null
-        : h('div', {
-          className: 'dshc-seg dshc-accountModes',
-          role: 'tablist',
-          'aria-label': t('account.modesLabel'),
-        },
-        h('button', {
-          key: 'account',
-          type: 'button',
-          role: 'tab',
-          className: 'dshc-segBtn dshc-accountModeBtn',
-          'data-mode': 'account',
-          'data-active': effectiveTab === 'account' ? 'true' : 'false',
-          'aria-selected': effectiveTab === 'account' ? 'true' : 'false',
-          disabled: busy,
-          onClick: () => selectTab('account'),
-        }, t('account.mode.account')),
-        h('button', {
-          key: 'address',
-          type: 'button',
-          role: 'tab',
-          className: 'dshc-segBtn dshc-accountModeBtn',
-          'data-mode': 'address',
-          'data-active': effectiveTab === 'address' ? 'true' : 'false',
-          'aria-selected': effectiveTab === 'address' ? 'true' : 'false',
-          disabled: busy,
-          onClick: () => selectTab('address'),
-        }, t('account.mode.address')));
 
       return h('div', { className: 'dshc-card2 dshc-joinCard' },
         h('div', { className: 'dshc-card2Head' },
           h('span', { className: 'dshc-card2Title' }, t('join.title'))),
-        tabBar,
         body,
-        failure !== null ? h('p', { className: 'dshc-formError', role: 'alert' }, failure) : null,
-        confirming
-          ? h(RuntimeDisconnectDialog, {
-            runtime: status,
-            onClose: () => setConfirming(false),
-            onDone: (next) => {
-              setConfirming(false);
-              props.onStatus(next, t('runtime.disconnected.notice'));
-            },
-          })
-          : null);
-    }
-
-    /**
-     * Confirm + perform §10.5 disconnect for the local runtime.
-     * @param {object} props - `runtime`, `onClose`, `onDone(status)`.
-     * @returns {object} dialog layer.
-     */
-    function RuntimeDisconnectDialog(props) {
-      const [busy, setBusy] = React.useState(false);
-      const [failure, setFailure] = React.useState(null);
-      const scope = React.useRef(null);
-      if (scope.current === null) scope.current = createScope();
-      React.useEffect(() => () => scope.current.abortAll(), []);
-
-      const confirm = async () => {
-        if (busy) return;
-        setBusy(true);
-        setFailure(null);
-        try {
-          const next = await scope.current.run((signal) => api.runtimeDisconnect(signal));
-          props.onDone(next && typeof next === 'object' ? next : { configured: false });
-        } catch (error) {
-          if (error && error.name === 'AbortError') return;
-          setFailure(t('runtime.disconnectFailed', { message: messageOf(error) }));
-          setBusy(false);
-        }
-      };
-
-      const server = props.runtime && typeof props.runtime.serverUrl === 'string' ? props.runtime.serverUrl : '';
-      return h(Dialog, {
-        title: t('runtime.disconnectTitle'),
-        size: 'sm',
-        onClose: () => { if (!busy) props.onClose(); },
-        footer: [
-          h('button', {
-            key: 'cancel',
-            type: 'button',
-            className: 'dshc-ghost',
-            disabled: busy,
-            onClick: props.onClose,
-          }, t('cancel')),
-          h('button', {
-            key: 'disconnect',
-            type: 'button',
-            className: 'dshc-primary',
-            disabled: busy,
-            onClick: () => { void confirm(); },
-          }, t('runtime.disconnect')),
-        ],
-      },
-      h('p', { className: 'dshc-dialogBody' }, t('runtime.disconnectBody', { server })),
-      failure !== null ? h('p', { className: 'dshc-formError', role: 'alert' }, failure) : null);
+        failure !== null ? h('p', { className: 'dshc-formError', role: 'alert' }, failure) : null);
     }
 
     /**
@@ -4556,15 +2941,28 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The page body: the 接入 card, the 已连接的电脑 list and the collapsed
-     * 高级 block, plus their states.
+     * The 电脑 page (v1.9.2): the 账号 card — login form, or 已登录 + the
+     * account's machines with the 被控 switch — and, on a hub, the collapsed
+     * 高级 block with 中继 (including 本机中继) and 账号中心.
+     *
+     * The local computer registry is an internal detail now: no 已连接的电脑
+     * list, no join address, no manual join. Accounts are the only way in.
      * @returns {object} the 电脑 page.
      */
     function ComputersBoard() {
       useStyles();
       useLocaleRevision();
       const [view, setView] = React.useState({ phase: 'loading', data: null });
-      const [runtime, setRuntime] = React.useState({ phase: 'idle', data: null });
+      /* Local relay supervisor (v1.9.2): the plugin runs the relay itself.
+       * `data` is the normalized `{ state, pid, port, since, lastError, logs }`
+       * from `/state.relay.supervisor` (or the GET route on a host that only
+       * has the route); `supported: false` hides the block on an old host. */
+      const [supervisor, setSupervisor] = React.useState({
+        phase: 'idle', data: null, localUrl: '', error: null, supported: false,
+      });
+      const [supervisorBusy, setSupervisorBusy] = React.useState(false);
+      const supervisorBusyRef = React.useRef(false);
+      const supervisorRequested = React.useRef(false);
       /* Relay setup state: `pending` is the optimistic overlay for the POST
        * in flight (`enabled` and/or `url`), `error` is the inline failure
        * line. One state drives the switch, 启用 and 修改 alike. */
@@ -4575,23 +2973,18 @@ window.__ModuleLoader__.load({
        * response whose request began under an older epoch is stale for the
        * switch: applying it would flicker the optimistic value back. */
       const relayEpoch = React.useRef(0);
-      const [dialog, setDialog] = React.useState(null);
       const [notice, setNotice] = React.useState(null);
       /* Account center (PROTOCOL account): the account this machine is signed
        * into, the relay discovered on this machine, and the credentials of an
-       * account center created in this page session (shown once). */
+       * account center created in this page session. */
       const [account, setAccount] = React.useState({ phase: 'idle', data: null, error: null });
       const [discover, setDiscover] = React.useState({ candidates: [], configuredRelayUrl: '' });
       const [createdAccount, setCreatedAccount] = React.useState(null);
       const alive = React.useRef(true);
       const scope = React.useRef(null);
       const noticeTimer = React.useRef(null);
-      const runtimeRequested = React.useRef(false);
       const accountRequested = React.useRef(false);
       const discoverRequested = React.useRef(false);
-      const accessCounts = React.useRef(new Map());
-      const accessRequested = React.useRef(new Set());
-      const [, setCountsVersion] = React.useState(0);
       if (scope.current === null) scope.current = createScope();
 
       /* The account routes are new: a host that predates them answers 404 (or
@@ -4639,17 +3032,95 @@ window.__ModuleLoader__.load({
       const needAccount = React.useCallback(() => { void loadAccount(); }, [loadAccount]);
       const needDiscover = React.useCallback(() => { void loadDiscover(); }, [loadDiscover]);
 
-      const loadRuntime = React.useCallback(async () => {
+      /**
+       * Read the local relay supervisor (v1.9.2). `/state.relay.supervisor`
+       * rides the 5 s poll; this route is the fallback for a host that only
+       * exposes the route, plus the block's 刷新. A 404/network failure means
+       * "this host cannot run the relay", so the block hides instead of
+       * offering a button that cannot work.
+       * @param {boolean} force - re-read even after the first successful call.
+       * @returns {Promise<void>} resolves when the read settled.
+       */
+      const loadSupervisor = React.useCallback(async (force) => {
+        if (!force && supervisorRequested.current) return;
+        supervisorRequested.current = true;
         try {
-          const data = await scope.current.run((signal) => api.readRuntime(signal));
+          const payload = await scope.current.run((signal) => api.readRelaySupervisor(signal));
           if (!alive.current) return;
-          setRuntime({ phase: 'ready', data: data && typeof data === 'object' ? data : null });
+          const parsed = supervisorPayloadOf(payload);
+          if (parsed === null) {
+            setSupervisor((current) => (current.data === null
+              ? { phase: 'ready', data: null, localUrl: '', error: null, supported: false }
+              : current));
+            return;
+          }
+          setSupervisor({
+            phase: 'ready',
+            data: parsed.supervisor,
+            localUrl: parsed.localUrl,
+            error: null,
+            supported: true,
+          });
         } catch (error) {
           if (!alive.current) return;
           if (error && error.name === 'AbortError') return;
-          setRuntime((current) => ({ phase: current.data === null ? 'error' : 'ready', data: current.data, error }));
+          setSupervisor((current) => (current.data === null
+            ? { phase: 'ready', data: null, localUrl: '', error: null, supported: false }
+            : current));
         }
       }, []);
+
+      /**
+       * Start/stop/restart the relay the plugin runs itself (v1.9.2). The
+       * answer carries the same `{ supervisor, localUrl }` shape, so the block
+       * reconciles at once; a rejection keeps the server's message inline.
+       * @param {string} action - 'start' | 'stop' | 'restart'.
+       * @param {string|number} port - port for start/restart.
+       * @returns {Promise<{ok: boolean, localUrl: string, port: number}>} outcome.
+       */
+      const submitSupervisor = React.useCallback(async (action, port) => {
+        if (supervisorBusyRef.current) return { ok: false, localUrl: '', port: 0 };
+        const body = { action };
+        const parsedPort = Number(port);
+        if ((action === 'start' || action === 'restart') && Number.isFinite(parsedPort) && parsedPort > 0) {
+          body.port = parsedPort;
+        }
+        supervisorBusyRef.current = true;
+        setSupervisorBusy(true);
+        setSupervisor((current) => ({ ...current, error: null }));
+        try {
+          const payload = await scope.current.run((signal) => api.relaySupervisorAction(body, signal));
+          if (!alive.current) return { ok: false, localUrl: '', port: 0 };
+          const parsed = supervisorPayloadOf(payload);
+          if (parsed === null) {
+            setSupervisor((current) => ({
+              ...current,
+              error: t('relay.local.startFailed', { message: t('error.badResponse') }),
+            }));
+            return { ok: false, localUrl: '', port: 0 };
+          }
+          setSupervisor({
+            phase: 'ready',
+            data: parsed.supervisor,
+            localUrl: parsed.localUrl,
+            error: null,
+            supported: true,
+          });
+          return { ok: true, localUrl: parsed.localUrl, port: parsed.supervisor.port };
+        } catch (error) {
+          if (error && error.name === 'AbortError') return { ok: false, localUrl: '', port: 0 };
+          const key = action === 'stop'
+            ? 'relay.local.stopFailed'
+            : (action === 'restart' ? 'relay.local.restartFailed' : 'relay.local.startFailed');
+          setSupervisor((current) => ({ ...current, error: t(key, { message: messageOf(error) }) }));
+          return { ok: false, localUrl: '', port: 0 };
+        } finally {
+          supervisorBusyRef.current = false;
+          if (alive.current) setSupervisorBusy(false);
+        }
+      }, []);
+
+      const refreshSupervisor = React.useCallback(() => { void loadSupervisor(true); }, [loadSupervisor]);
 
       const load = React.useCallback(async (options) => {
         const initial = options !== undefined && options !== null && options.initial === true;
@@ -4681,26 +3152,41 @@ window.__ModuleLoader__.load({
               ? current
               : { pending: null, error: null }));
           }
-          /* The local runtime card exists only where §10.5 routes do (§10.1). */
-          if (roleOf(next) !== 'hub' && !runtimeRequested.current) {
-            runtimeRequested.current = true;
-            void loadRuntime();
-          }
           /* /state may already carry the account (PROTOCOL account §4); when
            * it does not, ask the account route once. Runtime-only machines
            * have no account center at all. */
           if (next.account !== null && typeof next.account === 'object') {
             accountRequested.current = true;
             setAccount({ phase: 'ready', data: next.account, error: null });
-          } else if (roleOf(next) !== 'runtime') {
+          } else {
+            /* The account card is the only card now, so every role asks for
+             * it; a host without the route degrades to the login form. */
             void loadAccount();
+          }
+          /* The local relay supervisor (v1.9.2) rides `state.relay.supervisor`;
+           * a host that only has the route is asked once (and by 刷新). */
+          const relayState = next.relay !== null && typeof next.relay === 'object' ? next.relay : null;
+          const rawSupervisor = relayState !== null && relayState.supervisor !== null
+            && typeof relayState.supervisor === 'object' ? relayState.supervisor : null;
+          if (rawSupervisor !== null) {
+            const normalized = normalizeSupervisor(rawSupervisor);
+            supervisorRequested.current = true;
+            setSupervisor({
+              phase: 'ready',
+              data: normalized,
+              localUrl: `http://127.0.0.1:${normalized.port}`,
+              error: null,
+              supported: true,
+            });
+          } else if (roleOf(next) !== 'runtime') {
+            void loadSupervisor(false);
           }
         } catch (error) {
           if (!alive.current) return;
           if (error && error.name === 'AbortError') return;
           setView((current) => ({ phase: current.data === null ? 'error' : 'ready', data: current.data, error }));
         }
-      }, [loadRuntime, loadAccount]);
+      }, [loadAccount, loadSupervisor]);
 
       /**
        * Configure the relay (PROTOCOL relay): `{ enabled }` flips the switch,
@@ -4767,7 +3253,6 @@ window.__ModuleLoader__.load({
         const poll = setInterval(() => {
           if (!alive.current) return;
           void load({});
-          if (runtimeRequested.current) void loadRuntime();
         }, STATE_POLL_MS);
         return () => {
           alive.current = false;
@@ -4778,32 +3263,7 @@ window.__ModuleLoader__.load({
           }
           scope.current.abortAll();
         };
-      }, [load, loadRuntime]);
-
-      const handleConnected = React.useCallback((computer) => {
-        setDialog(null);
-        const name = computer && typeof computer.name === 'string' ? computer.name : '';
-        showNotice('success', name ? t('connect.connected.notice', { name }) : t('connect.connected.noticeAnonymous'));
-        void load({});
-      }, [load, showNotice]);
-
-      const handleRenamed = React.useCallback((name) => {
-        setDialog(null);
-        showNotice('success', t('renamed.notice', { name }));
-        void load({});
-      }, [load, showNotice]);
-
-      const handleDeleted = React.useCallback((name) => {
-        setDialog(null);
-        showNotice('success', t('deleted.notice', { name }));
-        void load({});
-      }, [load, showNotice]);
-
-      const handleRuntimeStatus = React.useCallback((status, message) => {
-        if (status && typeof status === 'object') setRuntime({ phase: 'ready', data: status });
-        else void loadRuntime();
-        if (typeof message === 'string' && message !== '') showNotice('success', message);
-      }, [loadRuntime, showNotice]);
+      }, [load]);
 
       /* The account POSTs answer with the full status, so the card and the
        * 账号中心 reconcile without waiting for a poll. */
@@ -4822,7 +3282,6 @@ window.__ModuleLoader__.load({
 
       const data = view.data;
       const role = data === null ? null : roleOf(data);
-      const computers = data && Array.isArray(data.computers) ? data.computers : null;
       const baseRelay = data !== null && data.relay !== null && typeof data.relay === 'object'
         ? data.relay
         : null;
@@ -4859,124 +3318,8 @@ window.__ModuleLoader__.load({
             : {}),
         }
         : baseRelay;
-
-      const countsFor = (computer) => {
-        const id = computer && computer.id ? String(computer.id) : '';
-        return id === '' ? null : (accessCounts.current.get(id) || null);
-      };
       const showRuntime = role !== null && role !== 'hub';
       const showComputers = role !== 'runtime';
-      const canConnect = role !== 'runtime';
-      const serverUrls = data && Array.isArray(data.serverUrls) ? data.serverUrls : null;
-      const loopbackOnly = data !== null && data.loopbackOnly === true;
-      /* The hub's one copyable string (v1.7.0): `<advertised>#join=<token>`.
-       * It is copied verbatim — the other machine pastes it into 接入. */
-      const fleet = data !== null && data.fleet !== null && typeof data.fleet === 'object' ? data.fleet : null;
-      const joinUrl = fleet !== null && typeof fleet.joinUrl === 'string' ? fleet.joinUrl : '';
-      // v1.7.2: a loopback-only machine cannot publish a join address; the host
-      // says why so we can tell the user what to do instead of showing one.
-      const joinBlocked = fleet !== null && fleet.joinUrl === '' && fleet.hasToken === true;
-
-      let body;
-      if (view.phase === 'loading' && computers === null) body = h(Skeleton);
-      else if (view.phase === 'error') {
-        body = h('div', { className: 'dshc-errorCard', role: 'alert' },
-          h('span', { className: 'dshc-errorText' },
-            t('error.loadDetail', { title: t('error.load'), message: view.error ? messageOf(view.error) : '' })),
-          h('button', {
-            type: 'button',
-            className: 'dshc-ghost',
-            onClick: () => { void load({ initial: true }); },
-          }, t('retry')));
-      } else if (computers === null || computers.length === 0) {
-        body = h(EmptyState, {
-          joinUrl,
-          joinBlocked,
-          onCliFallback: canConnect ? () => setDialog({ kind: 'connect' }) : undefined,
-        });
-      }
-      else {
-        body = h('div', { className: 'dshc-list' }, computers.map((computer) => h(ComputerRow, {
-          key: computer.id || computer.name,
-          computer,
-          counts: countsFor(computer),
-          onRename: (target) => setDialog({ kind: 'rename', computer: target }),
-          onDelete: (target) => setDialog({ kind: 'delete', computer: target }),
-          onAccess: (target) => setDialog({ kind: 'access', computer: target }),
-          onUpgrade: (target) => setDialog({ kind: 'upgrade', computer: target }),
-        })));
-      }
-
-      let layer = null;
-      if (dialog !== null && dialog.kind === 'connect') {
-        layer = h(ConnectModal, {
-          serverUrl: data && typeof data.serverUrl === 'string' ? data.serverUrl : '',
-          serverUrls,
-          loopbackOnly,
-          onClose: () => setDialog(null),
-          onConnected: handleConnected,
-        });
-      } else if (dialog !== null && dialog.kind === 'rename' && dialog.computer) {
-        layer = h(RenameDialog, {
-          computer: dialog.computer,
-          onClose: () => setDialog(null),
-          onRenamed: handleRenamed,
-        });
-      } else if (dialog !== null && dialog.kind === 'access' && dialog.computer) {
-        layer = h(ComputerAccessDialog, {
-          computer: dialog.computer,
-          onClose: () => setDialog(null),
-          onChanged: (counts) => {
-            const id = dialog.computer && dialog.computer.id ? String(dialog.computer.id) : '';
-            if (id === '' || !counts) return;
-            accessCounts.current.set(id, counts);
-            setCountsVersion((value) => value + 1);
-          },
-        });
-      } else if (dialog !== null && dialog.kind === 'upgrade' && dialog.computer) {
-        layer = h(UpgradeDialog, {
-          computer: dialog.computer,
-          serverUrl: data && typeof data.serverUrl === 'string' ? data.serverUrl : '',
-          expectedVersion: data && typeof data.agentVersion === 'string' ? data.agentVersion : '',
-          pluginVersion: data && typeof data.pluginVersion === 'string'
-            ? data.pluginVersion
-            : (data && typeof data.serverVersion === 'string' ? data.serverVersion : ''),
-          onClose: () => setDialog(null),
-        });
-      } else if (dialog !== null && dialog.kind === 'delete' && dialog.computer) {
-        layer = h(DeleteDialog, {
-          computer: dialog.computer,
-          onClose: () => setDialog(null),
-          onDeleted: handleDeleted,
-        });
-      }
-
-      /* Real badge counts: one light GET per computer, cached for the life of
-       * the page and refreshed by the access dialog. /state's sugar stays as
-       * the fallback until the first read lands. Keyed by the id list so the
-       * 5 s /state poll does not re-request. */
-      React.useEffect(() => {
-        if (computers === null) return;
-        for (const computer of computers) {
-          const id = computer && computer.id ? String(computer.id) : '';
-          if (id === '' || accessCounts.current.has(id) || accessRequested.current.has(id)) continue;
-          accessRequested.current.add(id);
-          void (async () => {
-            try {
-              const payload = await scope.current.run((signal) => api.readComputerAccess(id, signal));
-              const presets = payload && Array.isArray(payload.presets) ? payload.presets : null;
-              if (presets === null || !alive.current) return;
-              accessCounts.current.set(id, {
-                used: presets.filter((preset) => preset.allowed === true).length,
-                total: presets.length,
-              });
-              setCountsVersion((value) => value + 1);
-            } catch (error) {
-              /* Keep the /state fallback count for this computer. */
-            }
-          })();
-        }
-      }, [computers === null ? '' : computers.map((computer) => (computer && computer.id ? computer.id : '')).join(',')]);
 
       return h('section', { className: 'dshc-root', 'aria-label': t('nav') },
         h('div', { className: 'dshc-head' },
@@ -4984,33 +3327,28 @@ window.__ModuleLoader__.load({
             h('h2', { className: 'dshc-title' }, t('title')),
             h('p', { className: 'dshc-desc' }, t('description')))),
         notice !== null ? h(Notice, { kind: notice.kind, text: notice.text }) : null,
-        /* PRIMARY (v1.7.0, v1.8.0): 登录账号 or one address joins this
-         * machine. Everything else about being a hub is secondary and lives
-         * in 高级 at the bottom. */
+        /* A failed /state must surface, never blank the page. */
+        view.phase === 'error'
+          ? h('div', { className: 'dshc-errorCard', role: 'alert' },
+            h('span', { className: 'dshc-errorText' },
+              t('error.loadDetail', { title: t('error.loadTitle'), message: view.error ? messageOf(view.error) : '' })),
+            h('button', {
+              type: 'button',
+              className: 'dshc-ghost',
+              onClick: () => { void load({ initial: true }); },
+            }, t('retry')))
+          : null,
+        /* PRIMARY (v1.9.2): the account is the only way in. */
         showRuntime
           ? h(JoinCard, {
-            view: runtime,
             account,
             discover,
-            onStatus: handleRuntimeStatus,
-            onRetry: () => { void loadRuntime(); },
             onNeedAccount: needAccount,
             onNeedDiscover: needDiscover,
             onAccount: handleAccountStatus,
           })
           : null,
-        showComputers
-          ? h('div', null,
-            h('div', { className: 'dshc-groupHead' },
-              h('div', { className: 'dshc-groupTitle' }, t('computers.group')),
-              joinUrl !== '' ? h(CopyJoinButton, { value: joinUrl }) : null),
-            body)
-          : null,
-        /* ADVANCED (v1.7.3, v1.8.0): exactly two cards — the relay setup and
-         * the account center. The 本机地址 rows (relay/public/Tailscale/LAN/
-         * loopback candidates, listener line and the loopback banner) were
-         * removed from the UI on request: the copyable join address and the
-         * blocked hint already say everything a user needs. */
+        /* ADVANCED (v1.9.2): 中继 (with 本机中继) + 账号中心, collapsed. */
         showComputers && data !== null
           ? h(AdvancedSection, null,
             h(RelayCard, {
@@ -5022,6 +3360,11 @@ window.__ModuleLoader__.load({
               onEnable: (url) => submitRelay({ enabled: true, url }),
               onSaveUrl: (url) => submitRelay({ url }),
               onDismissError: () => setRelayAction({ pending: null, error: null }),
+              /* v1.9.2: the plugin runs the relay itself. */
+              supervisor,
+              supervisorBusy,
+              onSupervisor: (action, port) => submitSupervisor(action, port),
+              onSupervisorRefresh: refreshSupervisor,
             }),
             h(AccountCenterCard, {
               key: 'account',
@@ -5033,8 +3376,7 @@ window.__ModuleLoader__.load({
               onCreated: handleAccountCreated,
               onAccount: handleAccountStatus,
             }))
-          : null,
-        layer);
+          : null);
     }
 
     // #endregion
@@ -5083,209 +3425,6 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * Agent upgrade dialog: the manual one-liner for a machine whose agent is
-     * behind the server (task-14 drift flag).
-     * @param {object} props - `computer`, `serverUrl`, `expectedVersion`, `onClose`.
-     * @returns {object} dialog layer.
-     */
-    function UpgradeDialog(props) {
-      const computer = props.computer || {};
-      const serverUrl = typeof props.serverUrl === 'string' && props.serverUrl !== '' ? props.serverUrl : '';
-      const command = `node ~/.dsh-computers/agent.mjs service stop && curl -fsSL '${serverUrl}/api/dsh-computers/agent.mjs' -o ~/.dsh-computers/agent.mjs && node ~/.dsh-computers/agent.mjs service start`;
-      const current = typeof computer.agentVersion === 'string' && computer.agentVersion !== ''
-        ? computer.agentVersion
-        : t('drift.unknownVersion');
-      const expected = typeof props.expectedVersion === 'string' && props.expectedVersion !== ''
-        ? props.expectedVersion
-        : '';
-      const pluginVersion = typeof props.pluginVersion === 'string' && props.pluginVersion !== ''
-        ? props.pluginVersion
-        : '';
-      const cliCommand = pluginVersion === ''
-        ? 'dsh plugin install dsh-computers'
-        : `dsh plugin install dsh-computers@${pluginVersion}`;
-      const footer = [
-        h('button', {
-          key: 'close',
-          type: 'button',
-          className: 'dshc-primary',
-          onClick: props.onClose,
-        }, t('drift.close')),
-      ];
-
-      /* A machine connected through the plugin's own runtime has no
-       * ~/.dsh-computers/agent.mjs: the upgrade is a plugin update. */
-      if (computer.mode === 'embedded') {
-        return h(Dialog, {
-          title: t('drift.title'),
-          size: 'sm',
-          onClose: props.onClose,
-          footer,
-        },
-        h('p', { className: 'dshc-dialogBody' }, t('drift.embedded.body')),
-        h('p', { className: 'dshc-dialogBody', style: { marginTop: '6px' } }, t('drift.embedded.steps')),
-        h('div', { className: 'dshc-copyStack', style: { marginTop: '12px' } },
-          h(CopyRow, { label: t('drift.embedded.cliLabel'), value: cliCommand, stacked: true })));
-      }
-
-      return h(Dialog, {
-        title: t('drift.title'),
-        size: 'sm',
-        onClose: props.onClose,
-        footer,
-      },
-      h('p', { className: 'dshc-dialogBody' }, t('drift.body', { current })),
-      expected !== ''
-        ? h('p', { className: 'dshc-dialogBody', style: { marginTop: '4px' } }, t('drift.expected', { version: expected }))
-        : null,
-      h('div', { className: 'dshc-copyStack', style: { marginTop: '12px' } },
-        h(CopyRow, { label: t('drift.commandLabel'), value: command, stacked: true })),
-      h('p', { className: 'dshc-hint' }, t('drift.hint')));
-    }
-
-    /**
-     * Connect-modal address selector: a combobox over the reachable
-     * candidates, so nobody copies a loopback address by accident.
-     * @param {object} props - `urls`, `value`, `onChange`, `loopbackOnly`.
-     * @returns {object} row element.
-     */
-    function AddressPicker(props) {
-      const options = orderServerUrls(Array.isArray(props.urls) ? props.urls : []);
-      const choices = options.some((entry) => isSelectableAddress(entry))
-        ? options.filter((entry) => isSelectableAddress(entry))
-        : options;
-      const [open, setOpen] = React.useState(false);
-      const listRef = React.useRef(null);
-      const state = useCopyText(props.value);
-      useEscapeLayer(open, () => setOpen(false));
-      const current = choices.find((entry) => entry.url === props.value) || choices[0] || { url: '', kind: '' };
-
-      React.useEffect(() => {
-        if (!open) return undefined;
-        const list = listRef.current;
-        if (list === null || typeof list.querySelectorAll !== 'function') return undefined;
-        const focusOption = (offset) => {
-          let items = [];
-          try {
-            items = Array.prototype.slice.call(list.querySelectorAll('[role="option"]:not([disabled])'));
-          } catch (error) {
-            return;
-          }
-          if (items.length === 0) return;
-          const active = typeof document !== 'undefined' ? document.activeElement : null;
-          const index = items.indexOf(active);
-          const next = offset === 'first'
-            ? 0
-            : (offset === 'last'
-              ? items.length - 1
-              : (index < 0 ? 0 : (index + offset + items.length) % items.length));
-          try {
-            items[next].focus();
-          } catch (error) {
-            /* ignore */
-          }
-        };
-        focusOption(0);
-        const onKeyDown = (event) => {
-          if (event.key === 'ArrowDown') {
-            event.preventDefault();
-            event.stopPropagation();
-            focusOption(1);
-          } else if (event.key === 'ArrowUp') {
-            event.preventDefault();
-            event.stopPropagation();
-            focusOption(-1);
-          } else if (event.key === 'Home') {
-            event.preventDefault();
-            event.stopPropagation();
-            focusOption('first');
-          } else if (event.key === 'End') {
-            event.preventDefault();
-            event.stopPropagation();
-            focusOption('last');
-          }
-        };
-        list.addEventListener('keydown', onKeyDown);
-        return () => list.removeEventListener('keydown', onKeyDown);
-      }, [open]);
-
-      const action = t('connect.copyField', { field: props.value });
-      return h('div', { className: 'dshc-copyRow dshc-copyRow--stacked dshc-addrPicker' },
-        h('div', { className: 'dshc-copyRowTop' },
-          h('span', { className: 'dshc-copyRowKey' }, t('connect.serverUrl')),
-          h('button', {
-            type: 'button',
-            className: 'dshc-addrCombo',
-            role: 'combobox',
-            'aria-haspopup': 'listbox',
-            'aria-expanded': open ? 'true' : 'false',
-            'aria-controls': 'dshc-addr-listbox',
-            'aria-label': t('addr.listLabel'),
-            onClick: () => setOpen((value) => !value),
-            onKeyDown: (event) => {
-              if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-                event.preventDefault();
-                setOpen(true);
-              } else if ((event.key === 'Enter' || event.key === ' ') && open) {
-                event.preventDefault();
-                setOpen(false);
-              }
-            },
-          },
-            h('span', { className: 'dshc-addrKind' }, addressKindLabel(current.kind)),
-            h('code', { className: 'dshc-addrComboUrl', title: current.url }, current.url),
-            h(IconChevron, { size: 12, className: 'dshc-targetChevron' })),
-          h('button', {
-            type: 'button',
-            className: 'dshc-copyRowBtn',
-            'data-copied': state.copied ? 'true' : 'false',
-            'aria-label': action,
-            title: state.copied ? t('connect.copied') : action,
-            disabled: typeof props.value !== 'string' || props.value === '',
-            onClick: () => { void state.copy(); },
-          }, state.copied ? h(IconCheck, { size: 13 }) : h(IconCopy, { size: 13 }))),
-        open
-          ? h('div', {
-            ref: listRef,
-            id: 'dshc-addr-listbox',
-            className: 'dshc-addrListbox',
-            role: 'listbox',
-            'aria-label': t('addr.listLabel'),
-          }, options.map((entry) => {
-            const reachable = isReachableAddress(entry);
-            const selectable = choices.some((choice) => choice.url === entry.url);
-            return h('button', {
-              key: entry.url,
-              type: 'button',
-              role: 'option',
-              'aria-selected': entry.url === props.value ? 'true' : 'false',
-              'aria-disabled': selectable ? 'false' : 'true',
-              'data-unreachable': reachable ? 'false' : 'true',
-              className: 'dshc-addrOption',
-              tabIndex: -1,
-              disabled: !selectable,
-              onClick: () => {
-                if (!selectable) return;
-                props.onChange(entry.url);
-                setOpen(false);
-              },
-            },
-            h('span', { className: 'dshc-addrDot', 'data-recommended': entry.url === preferredServerUrl(options) ? 'true' : 'false', 'aria-hidden': 'true' }),
-            h('span', { className: 'dshc-addrKind' }, addressKindLabel(entry.kind)),
-            h('code', { className: 'dshc-addrComboUrl', title: entry.url }, entry.url),
-            !reachable
-              ? h('span', { className: 'dshc-addrBadge dshc-addrUnreachable' }, t('addr.unreachable'))
-              : null,
-            entry.url === props.value ? h(IconCheck, { size: 12, className: 'dshc-menuCheck' }) : null);
-          }))
-          : null,
-        props.loopbackOnly === true
-          ? h('p', { className: 'dshc-addrInlineWarn' }, t('addr.loopbackOnlyShort'))
-          : null,
-        h('p', { className: 'dshc-copyRowHint' }, t('connect.serverUrlHint')));
-    }
-
-    /**
      * Which source the effective relay url came from, when the host reports
      * it: `'ui'` is the override this card saved, `'config'` is the file
      * default. Hosts that predate the url override send nothing.
@@ -5329,6 +3468,27 @@ window.__ModuleLoader__.load({
        * POST so the user can correct it in place. */
       const [editing, setEditing] = React.useState(false);
       const [draft, setDraft] = React.useState('');
+      /* Port of the relay the plugin starts (v1.9.2). */
+      const [port, setPort] = React.useState(String(RELAY_LOCAL_PORT));
+      const supervisorView = props.supervisor !== null && typeof props.supervisor === 'object'
+        ? props.supervisor
+        : null;
+      const supervisorStatus = supervisorView !== null && supervisorView.data !== null
+        && typeof supervisorView.data === 'object' ? supervisorView.data : null;
+      /* A relay that is already running (started earlier, or adopted from a
+       * previous plugin run) also fills the empty address field, so the
+       * one-click path works after a page reload. */
+      React.useEffect(() => {
+        const currentRelay = props.relay;
+        if (currentRelay === null || typeof currentRelay !== 'object') return;
+        if (relayUrlSourceOf(currentRelay) === null) return;
+        const currentUrl = typeof currentRelay.url === 'string' ? currentRelay.url.trim() : '';
+        if (currentUrl !== '') return;
+        if (supervisorStatus === null || supervisorStatus.state !== 'running') return;
+        if (draft !== '') return;
+        const knownPublic = typeof currentRelay.publicUrl === 'string' ? currentRelay.publicUrl : '';
+        setDraft(relayAddressForLocal(supervisorView.localUrl, supervisorStatus.port, knownPublic));
+      }, [props.relay, supervisorStatus, supervisorView, draft]);
       if (!relayCardVisible(relay)) return null;
       const phase = relayPhaseOf(relay);
       const enabled = relay.enabled === true;
@@ -5406,6 +3566,20 @@ window.__ModuleLoader__.load({
       const submitForm = () => {
         void (formMode === 'edit' ? submitSave() : submitEnable());
       };
+      /* Start/stop/restart the relay the plugin runs itself (v1.9.2). A
+       * successful start pre-fills the address field with the local relay, so
+       * enabling it is one more click (the muted line below says so). */
+      const runSupervisor = async (action) => {
+        if (typeof props.onSupervisor !== 'function' || props.supervisorBusy === true) return;
+        const result = await props.onSupervisor(action, port);
+        if (result === null || typeof result !== 'object' || result.ok !== true) return;
+        if (action !== 'start' && action !== 'restart') return;
+        const suggested = relayAddressForLocal(result.localUrl, result.port, publicUrl);
+        if (urlCapable && !hasUrl && suggested !== '') {
+          setEditing(false);
+          setDraft(suggested);
+        }
+      };
 
       return h('div', {
         className: 'dshc-card2 dshc-relayCard',
@@ -5419,6 +3593,21 @@ window.__ModuleLoader__.load({
           h('span', { className: 'dshc-status', 'data-state': dotState },
             h('span', { className: 'dshc-dot', 'data-state': dotState, 'aria-hidden': 'true' }),
             t(statusKey))),
+        /* v1.9.2: 本机中继 at the TOP of the card — the plugin runs the relay
+         * itself, so there is no service to install. */
+        h(RelaySupervisorBlock, {
+          status: supervisorStatus,
+          supported: supervisorView !== null && supervisorView.supported === true,
+          busy: props.supervisorBusy === true,
+          error: supervisorView !== null && typeof supervisorView.error === 'string' ? supervisorView.error : null,
+          port,
+          onPortChange: (value) => setPort(value),
+          relayEnabled: enabled,
+          onAction: (action) => { void runSupervisor(action); },
+          onRefresh: () => {
+            if (typeof props.onSupervisorRefresh === 'function') props.onSupervisorRefresh();
+          },
+        }),
         hubId !== ''
           ? h('div', { className: 'dshc-runtimeMeta' },
             h('span', { className: 'dshc-runtimeMetaKey' }, t('relay.hubLabel')),
@@ -5501,6 +3690,135 @@ window.__ModuleLoader__.load({
           ? h('p', { className: 'dshc-hint dshc-relayHint dshc-relayUpgrade' }, t('relay.upgradeHint'))
           : null,
         h('p', { className: 'dshc-hint dshc-relayHint' }, t('relay.hint')),
+        /* v1.9.2: the only sentence about running the relay elsewhere. No
+         * nginx, no systemd, no config file — just an address. */
+        h('p', { className: 'dshc-hint dshc-relayRemote' }, t('relay.local.remote')),
+        error !== null ? h('p', { className: 'dshc-formError', role: 'alert' }, error) : null);
+    }
+
+    /**
+     * 「本机中继」 block at the top of the 中继 card (v1.9.2): the plugin runs
+     * the relay process itself, so the user never installs a service.
+     *
+     * Stopped → 本机中继未运行 + a small port + 启动中继; running → the
+     * 127.0.0.1:<port> · PID line + 重启/停止 + a collapsible 日志 (capped,
+     * monospace) with 刷新; failed → the state + lastError + 重启; starting →
+     * the label with every action disabled. A rejected action leaves its
+     * message inline. An older host (`supported:false`) renders nothing.
+     * @param {object} props - `status` (normalized supervisor), `supported`,
+     *   `busy`, `error`, `port`, `onPortChange`, `relayEnabled`,
+     *   `onAction(action)`, `onRefresh()`.
+     * @returns {object|null} the block, or null when the host cannot run it.
+     */
+    function RelaySupervisorBlock(props) {
+      const [logsOpen, setLogsOpen] = React.useState(false);
+      const status = props.status;
+      if (props.supported !== true || status === null || typeof status !== 'object') return null;
+      const state = status.state;
+      const busy = props.busy === true;
+      const running = state === 'running';
+      const starting = state === 'starting';
+      const failed = state === 'failed';
+      const host = `127.0.0.1:${status.port}`;
+      const logs = Array.isArray(status.logs) ? status.logs.slice(-40) : [];
+      const statusText = running
+        ? (status.pid !== null
+          ? t('relay.local.running', { host, pid: String(status.pid) })
+          : t('relay.local.runningNoPid', { host }))
+        : (starting
+          ? t('relay.local.starting')
+          : (failed ? t('relay.local.failed') : t('relay.local.stopped')));
+      const dotState = running ? 'running' : (starting ? 'connecting' : (failed ? 'failed' : 'stopped'));
+      const error = typeof props.error === 'string' && props.error !== '' ? props.error : null;
+      const action = (name) => { if (!busy) props.onAction(name); };
+      const logsVisible = running || (failed && logs.length > 0);
+      return h('div', {
+        className: 'dshc-relaySup',
+        'data-state': state,
+        role: 'group',
+        'aria-label': t('relay.local.title'),
+      },
+        h('div', { className: 'dshc-relaySupHead' },
+          h('span', { className: 'dshc-relaySupTitle' }, t('relay.local.title')),
+          h('span', {
+            className: 'dshc-relaySupState',
+            'data-kind': failed ? 'failed' : 'muted',
+            role: 'status',
+            'aria-live': 'polite',
+          },
+            h('span', { className: 'dshc-dot', 'data-state': dotState, 'aria-hidden': 'true' }),
+            starting ? h(Spinner) : null,
+            h('span', null, statusText))),
+        failed && status.lastError !== null
+          ? h('p', { className: 'dshc-relayLine', 'data-kind': 'failed', role: 'alert' }, status.lastError)
+          : null,
+        h('div', { className: 'dshc-relaySupActions' },
+          running
+            ? h('button', {
+              type: 'button',
+              className: 'dshc-textBtn dshc-relayRestart',
+              disabled: busy,
+              onClick: () => action('restart'),
+            }, t('relay.local.restart'))
+            : null,
+          running
+            ? h('button', {
+              type: 'button',
+              className: 'dshc-textBtn dshc-relayStop',
+              disabled: busy,
+              onClick: () => action('stop'),
+            }, t('relay.local.stop'))
+            : null,
+          !running
+            ? h('label', { className: 'dshc-relayPortField' },
+              h('span', null, t('relay.local.port')),
+              h('input', {
+                className: 'dshc-relayPortInput',
+                type: 'number',
+                inputMode: 'numeric',
+                min: 1,
+                max: 65535,
+                value: props.port,
+                disabled: busy || starting,
+                'aria-label': t('relay.local.port'),
+                onChange: (event) => props.onPortChange(event.target.value),
+              }))
+            : null,
+          !running
+            ? h('button', {
+              type: 'button',
+              className: 'dshc-primary dshc-relayStart',
+              disabled: busy || starting,
+              onClick: () => action(failed ? 'restart' : 'start'),
+            }, failed ? t('relay.local.restart') : t('relay.local.start'))
+            : null),
+        running && props.relayEnabled !== true
+          ? h('p', { className: 'dshc-relaySupHint dshc-relayNextStep' },
+            t('relay.local.readyHint'))
+          : null,
+        logsVisible
+          ? h('div', { className: 'dshc-relayLogsWrap' },
+            h('div', { className: 'dshc-relayLogsHead' },
+              h('button', {
+                type: 'button',
+                className: 'dshc-textBtn dshc-relayLogsToggle',
+                'aria-expanded': logsOpen ? 'true' : 'false',
+                onClick: () => setLogsOpen((value) => !value),
+              }, t('relay.local.logs')),
+              h('button', {
+                type: 'button',
+                className: 'dshc-textBtn dshc-relayLogsRefresh',
+                disabled: busy,
+                onClick: () => {
+                  if (typeof props.onRefresh === 'function') props.onRefresh();
+                },
+              }, t('relay.local.logsRefresh'))),
+            logsOpen
+              ? (logs.length > 0
+                ? h('pre', { className: 'dshc-relayLogs' }, logs.join('\n'))
+                : h('p', { className: 'dshc-hint dshc-relayLogsEmpty' }, t('relay.local.logsEmpty')))
+              : null)
+          : null,
         error !== null ? h('p', { className: 'dshc-formError', role: 'alert' }, error) : null);
     }
 
@@ -5648,136 +3966,6 @@ window.__ModuleLoader__.load({
       failure !== null ? h('p', { className: 'dshc-formError', role: 'alert' }, failure) : null);
     }
 
-    /**
-     * Computer access dialog — which agent presets ("Bots") may use this
-     * computer (PROTOCOL access/computer, task-11).
-     * @param {object} props - `computer`, `onClose`, `onChanged(counts)`.
-     * @returns {object} dialog layer.
-     */
-    function ComputerAccessDialog(props) {
-      const computerId = props.computer && props.computer.id ? String(props.computer.id) : '';
-      const [view, setView] = React.useState({ phase: 'loading', data: null });
-      const [busy, setBusy] = React.useState(false);
-      const [failure, setFailure] = React.useState(null);
-      const alive = React.useRef(true);
-      const scope = React.useRef(null);
-      if (scope.current === null) scope.current = createScope();
-
-      const report = (payload) => {
-        if (typeof props.onChanged !== 'function') return;
-        const list = payload && Array.isArray(payload.presets) ? payload.presets : null;
-        if (list === null) return;
-        props.onChanged({
-          used: list.filter((entry) => entry.allowed === true).length,
-          total: list.length,
-        });
-      };
-
-      React.useEffect(() => {
-        alive.current = true;
-        scope.current.run((signal) => api.readComputerAccess(computerId, signal))
-          .then((payload) => {
-            if (!alive.current) return;
-            if (payload && typeof payload === 'object') {
-              setView({ phase: 'ready', data: payload });
-              report(payload);
-            } else {
-              setView({ phase: 'error', data: null });
-            }
-          })
-          .catch((error) => {
-            if (!alive.current || (error && error.name === 'AbortError')) return;
-            setView({ phase: 'error', data: null, error });
-          });
-        return () => {
-          alive.current = false;
-          scope.current.abortAll();
-        };
-      }, [computerId]);
-
-      const presets = view.data && Array.isArray(view.data.presets) ? view.data.presets : null;
-
-      const toggle = async (preset) => {
-        if (presets === null || busy) return;
-        const previous = view.data;
-        const rawRule = Array.isArray(previous.allowedPresets)
-          ? previous.allowedPresets
-          : presets.map((entry) => entry.id);
-        const ruleSet = new Set(rawRule);
-        if (ruleSet.has(preset.id)) ruleSet.delete(preset.id);
-        else ruleSet.add(preset.id);
-        const nextIds = Array.from(ruleSet).sort();
-        /* All presets on posts null ("all, including presets added later"). */
-        const allOn = presets.length > 0 && nextIds.length === presets.length;
-        const optimistic = {
-          ...previous,
-          allowedPresets: allOn ? null : nextIds,
-          presets: presets.map((entry) => ({ ...entry, allowed: ruleSet.has(entry.id) })),
-        };
-        setFailure(null);
-        setView({ phase: 'ready', data: optimistic });
-        setBusy(true);
-        try {
-          const result = await scope.current.run((signal) => api.setComputerAccess(computerId, allOn ? null : nextIds, signal));
-          if (!alive.current) return;
-          const next = result && typeof result === 'object' ? result : optimistic;
-          setView({ phase: 'ready', data: next });
-          report(next);
-        } catch (error) {
-          if (!alive.current) return;
-          if (error && error.name === 'AbortError') return;
-          setView({ phase: 'ready', data: previous });
-          setFailure(t('access.saveFailed', { message: messageOf(error) }));
-        } finally {
-          if (alive.current) setBusy(false);
-        }
-      };
-
-      let body;
-      if (presets === null && view.phase === 'loading') {
-        body = h('div', { className: 'dshc-accessRow' }, h(Spinner), h('span', { className: 'dshc-accessHint' }, t('access.loading')));
-      } else if (presets === null) {
-        body = h('div', { className: 'dshc-errorCard', role: 'alert' },
-          h('span', { className: 'dshc-errorText' },
-            t('error.loadDetail', { title: t('access.loadFailed'), message: view.error ? messageOf(view.error) : '' })));
-      } else if (presets.length === 0) {
-        body = h('p', { className: 'dshc-accessEmpty' }, t('access.presetsEmpty'));
-      } else {
-        body = h('div', { className: 'dshc-accessList' }, presets.map((preset) => {
-          const name = preset.id === 'default'
-            ? t('access.defaultPreset')
-            : (typeof preset.name === 'string' && preset.name !== '' ? preset.name : String(preset.id || ''));
-          return h(AccessRow, {
-            key: preset.id || preset.name,
-            name,
-            switch: h(SwitchControl, {
-              checked: preset.allowed === true,
-              disabled: busy,
-              label: t('access.badgeAria', { name }),
-              onChange: () => { void toggle(preset); },
-            }),
-          });
-        }));
-      }
-
-      return h(Dialog, {
-        title: (props.computer && (props.computer.name || props.computer.hostname)) || t('access.computer.titleFallback', { id: computerId }),
-        subtitle: t('access.computer.subtitle'),
-        size: 'sm',
-        onClose: props.onClose,
-        footer: [
-          h('button', {
-            key: 'done',
-            type: 'button',
-            className: 'dshc-primary',
-            onClick: props.onClose,
-          }, t('access.done')),
-        ],
-      },
-      body,
-      failure !== null ? h('p', { className: 'dshc-formError', role: 'alert' }, failure) : null);
-    }
-
     // #endregion
 
     // #region main panel
@@ -5827,7 +4015,9 @@ window.__ModuleLoader__.load({
       /* Account directory: the other machines signed into the same account are
        * selectable targets (`acct:<machineId>`). `known` stays false until the
        * host answers, so an older host simply offers the local computers. */
-      const [account, setAccount] = React.useState({ known: false, loggedIn: false, machineId: '', devices: [] });
+      const [account, setAccount] = React.useState({
+        known: false, loggedIn: false, machineId: '', selfComputerId: '', devices: [],
+      });
       const [selection, setSelection] = React.useState({ computerId: null, computer: null });
       const [open, setOpen] = React.useState(false);
       const [anchor, setAnchor] = React.useState(null);
@@ -5880,6 +4070,10 @@ window.__ModuleLoader__.load({
           known: true,
           loggedIn: payload.loggedIn === true,
           machineId: typeof payload.machineId === 'string' ? payload.machineId : '',
+          /* `/state.account.self.runtime.computerId`: the registry record of
+           * THIS machine's own runtime, so the local row can name it and the
+           * registry never repeats it (v1.9.2). */
+          selfComputerId: accountSelfComputerId(payload),
           devices: Array.isArray(payload.devices)
             ? payload.devices.filter((device) => device !== null && typeof device === 'object')
             : [],
@@ -6020,41 +4214,55 @@ window.__ModuleLoader__.load({
           })
         : [];
 
+      /* v1.9.2: the local row is 本地电脑 with the real machine name as its
+       * hint (豆包 style), so it can never be confused with — or duplicated
+       * by — the registry/account row of the same machine. */
+      const localMachineName = (() => {
+        if (account.selfComputerId !== '') {
+          const record = computers.find((computer) => String(computer.id || '') === account.selfComputerId);
+          const name = computerNameOf(record);
+          if (name !== '') return name;
+        }
+        const own = accountOwnDevice(account);
+        if (own !== null && typeof own.name === 'string' && own.name !== '') return own.name;
+        const flagged = computers.find((computer) => computer.self === true);
+        return computerNameOf(flagged);
+      })();
+      /* Registry machines that are neither THIS machine nor already listed in
+       * the account directory: no group header, just the remaining rows. */
+      const seenRegistryKeys = new Set();
+      const registryRows = computers
+        .filter((computer) => allowedIds === null || allowedIds.indexOf(computer.id) >= 0)
+        .filter((computer) => !isSelfComputer(computer, account))
+        .filter((computer) => !registryComputerInAccount(computer, account))
+        .map((computer) => {
+          const name = computerNameOf(computer);
+          return {
+            key: String(computer.id || name || ''),
+            id: computer.id,
+            label: name !== '' ? name : String(computer.id || ''),
+            hint: typeof computer.platformLabel === 'string' ? computer.platformLabel : '',
+            computer,
+            offline: computer.online !== true,
+          };
+        })
+        .filter((row) => {
+          if (seenRegistryKeys.has(row.key)) return false;
+          seenRegistryKeys.add(row.key);
+          return true;
+        });
+
       const menuRows = [
         {
           key: 'cloud',
           id: null,
           label: t('target.cloud'),
-          hint: t('target.cloudHint'),
+          hint: localMachineName !== '' ? localMachineName : t('target.cloudHint'),
           computer: null,
           offline: false,
         },
-      ].concat(computers
-        .filter((computer) => allowedIds === null || allowedIds.indexOf(computer.id) >= 0)
-        .map((computer) => ({
-        key: String(computer.id || computer.name || ''),
-        id: computer.id,
-        label: typeof computer.name === 'string' && computer.name !== ''
-          ? computer.name
-          : (typeof computer.hostname === 'string' && computer.hostname !== '' ? computer.hostname : String(computer.id || '')),
-        hint: typeof computer.platformLabel === 'string' ? computer.platformLabel : '',
-        computer,
-        offline: computer.online !== true,
-      })))
-        .concat(accountRows.length === 0
-          ? []
-          : [{ key: 'account-group', groupHeader: true, label: t('target.accountGroup') }].concat(accountRows));
-
-      /* DOM menuitem index of a row: group headers are not focusable items. */
-      const menuItemIndex = (row) => {
-        let index = 0;
-        for (const entry of menuRows) {
-          if (entry === row) return index;
-          if (entry.groupHeader !== true) index += 1;
-        }
-        return 0;
-      };
-      const menuItemCount = menuRows.filter((row) => row.groupHeader !== true).length;
+      ].concat(accountRows, registryRows);
+      const menuItemCount = menuRows.length;
 
       const menuItems = () => {
         if (menuRef.current === null || typeof menuRef.current.querySelectorAll !== 'function') return [];
@@ -6084,7 +4292,7 @@ window.__ModuleLoader__.load({
         const checked = menuRows.findIndex((row) => (row.id === null ? selectedId === null : row.id === selectedId));
         initialFocus.current = preferLast
           ? Math.max(0, menuItemCount - 1)
-          : (checked >= 0 ? menuItemIndex(menuRows[checked]) : 0);
+          : (checked >= 0 ? checked : 0);
         setFailure(null);
         setOpen(true);
       };
@@ -6291,14 +4499,6 @@ window.__ModuleLoader__.load({
           onMouseDown: (event) => event.stopPropagation(),
         },
           menuRows.map((row) => {
-            if (row.groupHeader === true) {
-              return h('div', {
-                key: row.key,
-                className: 'dshc-menuGroup',
-                role: 'group',
-                'aria-label': row.label,
-              }, row.label);
-            }
             const checked = row.id === null ? selectedId === null : row.id === selectedId;
             const disabled = row.disabled === true;
             const isAccount = typeof row.id === 'string' && row.id.slice(0, 5) === 'acct:';
