@@ -1,5 +1,0 @@
-{
-  "private": true,
-  "type": "module",
-  "main": "wire-mux.test.mjs"
-}
