@@ -20,6 +20,7 @@ import { PREFER_ADDRESS_VALUES } from './lib/addresses.js'
 import { createTunnel } from './lib/tunnel.js'
 import { createRelay, normalizeRelayUrl } from './lib/relay-manager.js'
 import { HUB_ID_PATTERN, isHubId, readRelayIdentity, writeRelayIdentity } from './lib/relay-identity.js'
+import { createFleetIdentity } from './lib/fleet-identity.js'
 import { createSelectionStore } from './lib/selection.js'
 import { majorMinor } from './lib/version.js'
 import { resolveStateDir, createStore } from './lib/state.js'
@@ -32,7 +33,7 @@ export const name = 'dsh-computers'
 export const inject = ['tools', 'webServer']
 
 /** Version reported by `/api/dsh-computers/health` (and asserted by the smoke harness). */
-export const PLUGIN_VERSION = '1.6.1'
+export const PLUGIN_VERSION = '1.7.0'
 
 /** The machine agent bundle, served at request time (never imported). */
 const AGENT_URL = new URL('./agent/dsh-computers-agent.mjs', import.meta.url)
@@ -367,6 +368,15 @@ export function apply(ctx, config) {
     })
     const fsOps = createFsOps({ hub, onWarn })
 
+    // v1.7.0: the fleet join identity — the ONE credential a new machine needs.
+    // The hub publishes `<advertisedBase>#join=<token>` from /state.fleet and a
+    // pasted address enrolls without a one-time key. It lives in its own
+    // fleet.json (never state.json: resetting the computer registry must not
+    // invalidate an address already handed out). Created only for the hub
+    // surface, which is the only place that can serve enroll/join; no ctx read
+    // is involved (the state directory comes from the resolved config).
+    const fleet = createFleetIdentity({ stateDir, onWarn })
+
     // Routes first (the browser page and the agents can arrive immediately),
     // then the tools and the prompt section.
     createRoutes({
@@ -382,6 +392,7 @@ export function apply(ctx, config) {
       agentUrl: AGENT_URL,
       tunnel,
       relay,
+      fleet,
       onWarn,
     })
     createTools({ ctx, config: resolved, store, hub, selections, access, fsOps, version: PLUGIN_VERSION, onWarn })

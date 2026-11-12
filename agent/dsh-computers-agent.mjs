@@ -3,8 +3,12 @@
  * dsh-computers-agent — the machine-side half of dsh-computers.
  *
  * What it does (the whole trust story, so this file can be audited):
- *   1. `enroll` sends the one-time join key to the dsh-web server and stores the
+ *   1. `enroll` sends the join credential to the dsh-web server and stores the
  *      long-lived token it gets back in a 0600 JSON file under ~/.dsh-computers.
+ *      The credential is either the one-address form `<serverUrl>#join=<token>`
+ *      (v1.7.0; the token rides in the URL fragment, so it never reaches the
+ *      server, a proxy or an access log — this process parses it locally) or a
+ *      one-time `--key`.
  *   2. `run` keeps one outbound SSE stream open (GET .../agent/events) carrying
  *      `exec` / `cancel` / `ping` / `config` events, executes the commands the
  *      server sends with the local shell, and POSTs the result back.
@@ -32,7 +36,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 
 // Keep in sync with package.json. The server compares this for display only.
-export const AGENT_VERSION = '1.6.1'
+export const AGENT_VERSION = '1.7.0'
 
 const DEFAULT_EXEC_TIMEOUT_MS = 120_000
 const MAX_EXEC_TIMEOUT_MS = 24 * 60 * 60 * 1000
@@ -382,7 +386,7 @@ async function loadConfig() {
     raw = await fsp.readFile(file, 'utf8')
   } catch (error) {
     if (error?.code === 'ENOENT') {
-      throw new CliError(`尚未注册：找不到配置文件 ${file}\n请先运行 enroll --server <url> --key <key>（或使用服务器给出的安装命令）。`)
+      throw new CliError(`尚未注册：找不到配置文件 ${file}\n请先运行 enroll --server '<url>#join=<token>'（或 enroll --server <url> --key <key>）。`)
     }
     throw new CliError(`无法读取配置文件 ${file}：${describeError(error)}`)
   }
@@ -414,6 +418,10 @@ async function loadConfig() {
     name: parsed.name,
     enrolledAt: typeof parsed.enrolledAt === 'string' ? parsed.enrolledAt : '',
     workspaceBase: normalizeWorkspaceBase(parsed.workspaceBase),
+    // v1.7.0: the fleet join token from a one-address enroll. It is only ever
+    // used for a later enroll (never on the stream / heartbeat), so an old
+    // config without it is still valid.
+    joinToken: typeof parsed.joinToken === 'string' ? parsed.joinToken.trim() : '',
   }
 }
 
@@ -525,7 +533,7 @@ function fsResultUrl(serverUrl) {
 
 function normalizeServerUrl(value) {
   if (typeof value !== 'string' || !value.trim()) {
-    throw new CliError('缺少 --server <url>（dsh-web 的地址，例如 http://127.0.0.1:3000）')
+    throw new CliError('缺少 --server <url>（dsh-web 的地址，例如 http://127.0.0.1:3000，或带 #join=<token> 的接入地址）')
   }
   let url
   try {
@@ -536,9 +544,61 @@ function normalizeServerUrl(value) {
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw new CliError('--server 必须是 http:// 或 https:// 地址')
   }
+  // The fragment carries the one-address join token (v1.7.0) and must never be
+  // part of a stored or dialled URL. `parseJoinAddress()` reads it first.
   url.search = ''
   url.hash = ''
   return trimTrailingSlash(url.toString())
+}
+
+const JOIN_FRAGMENT_PREFIX = 'join='
+
+/**
+ * Read a fleet join token out of a URL fragment: `#join=dshf_…` -> `dshf_…`.
+ * Returns '' when the fragment is absent or is not ours; never throws.
+ * The token is never logged and never sent on the SSE stream — only in the
+ * enroll body.
+ */
+function joinTokenFromFragment(hash) {
+  if (typeof hash !== 'string' || hash.length === 0) return ''
+  const fragment = hash.startsWith('#') ? hash.slice(1) : hash
+  if (!fragment.startsWith(JOIN_FRAGMENT_PREFIX)) return ''
+  let token = fragment.slice(JOIN_FRAGMENT_PREFIX.length)
+  const ampersand = token.indexOf('&')
+  if (ampersand !== -1) token = token.slice(0, ampersand)
+  try {
+    token = decodeURIComponent(token)
+  } catch {
+    // keep the raw value; the hub decides whether it is valid
+  }
+  return token.trim()
+}
+
+/**
+ * Parse the one-address join form `<serverUrl>#join=<fleetToken>` (v1.7.0).
+ *
+ * The fragment never leaves this process: `serverUrl` is always the
+ * fragment-free URL that gets stored/dialled, and `joinToken` is used exactly
+ * once, in the enroll body. `--key` / `options.token` remain the alternative
+ * credential and win when both are present.
+ *
+ * @param {string} value raw `--server` flag / `options.serverUrl` value
+ * @returns {{ serverUrl: string, joinToken: string }}
+ */
+function parseJoinAddress(value) {
+  const serverUrl = normalizeServerUrl(value)
+  let fragment = ''
+  try {
+    fragment = new URL(String(value).trim()).hash
+  } catch {
+    fragment = ''
+  }
+  if (!fragment.startsWith(`#${JOIN_FRAGMENT_PREFIX}`)) return { serverUrl, joinToken: '' }
+  const joinToken = joinTokenFromFragment(fragment)
+  if (joinToken === '') {
+    throw new CliError(`接入地址里的 #join= 后面没有令牌（应为 #join=<token>）：${value}\n\n${ENROLL_USAGE}`)
+  }
+  return { serverUrl, joinToken }
 }
 
 function requestHeaders(token, extra = {}) {
@@ -1755,17 +1815,31 @@ function createRuntime(options) {
   if (!options || typeof options !== 'object' || Array.isArray(options)) {
     throw new TypeError('startRuntime(options) requires an options object')
   }
-  let serverUrl
+  let address
   try {
-    serverUrl = normalizeServerUrl(requireOptionString(options.serverUrl, 'serverUrl'))
+    address = parseJoinAddress(requireOptionString(options.serverUrl, 'serverUrl'))
   } catch (error) {
     if (error instanceof TypeError) throw error
-    throw new TypeError(`startRuntime: options.serverUrl is not a valid http(s) URL (${describeError(error)})`)
+    throw new TypeError(`startRuntime: options.serverUrl is not a valid http(s) URL or <url>#join=<token> address (${describeError(error)})`)
+  }
+  // v1.7.0: the plugin hands over the pasted address verbatim, so a `#join=`
+  // fragment may replace token+computerId. When credentials are present they
+  // win and the fragment is ignored, exactly like `--key` on the CLI.
+  const token = typeof options.token === 'string' ? options.token.trim() : ''
+  const computerId = typeof options.computerId === 'string' ? options.computerId.trim() : ''
+  if ((token === '') !== (computerId === '')) {
+    throw new TypeError('startRuntime: options.token and options.computerId must be provided together')
+  }
+  if (token === '' && address.joinToken === '') {
+    throw new TypeError('startRuntime: options.token is required, or pass options.serverUrl as <url>#join=<token>')
   }
   const config = {
-    serverUrl,
-    token: requireOptionString(options.token, 'token'),
-    computerId: requireOptionString(options.computerId, 'computerId'),
+    serverUrl: address.serverUrl,
+    token,
+    computerId,
+    // Only used by the first enroll POST; cleared once it succeeded and never
+    // sent on the stream, in a heartbeat or in any result POST.
+    joinToken: token === '' ? address.joinToken : '',
     name: typeof options.name === 'string' ? options.name.trim() : '',
     workspaceBase: normalizeWorkspaceBase(options.workspaceBase),
     mode: normalizeRuntimeMode(options.mode),
@@ -1778,6 +1852,11 @@ function createRuntime(options) {
     config,
     log: typeof options.log === 'function' ? options.log : defaultRuntimeLog,
     onState: typeof options.onState === 'function' ? options.onState : null,
+    // v1.7.0: reports credentials obtained from a `#join=` enroll so an
+    // embedder can persist them (the runtime itself never writes config files).
+    onEnrolled: typeof options.onEnrolled === 'function' ? options.onEnrolled : null,
+    /** Set while a one-address enroll still has to happen. */
+    pendingJoin: config.joinToken,
     jobs: new Map(),
     controller: new AbortController(),
     stopping: false,
@@ -1811,16 +1890,23 @@ function createRuntime(options) {
 /**
  * Start an embedded runtime (PROTOCOL §10.4).
  *
+ * `serverUrl` accepts the one-address join form `<url>#join=<fleetToken>`
+ * (v1.7.0). In that form `token`/`computerId` may be omitted: the runtime
+ * enrolls once with `{ join }`, adopts the credentials in memory and reports
+ * them through `onEnrolled` so the embedder can persist them. The fragment is
+ * never stored, dialled or sent on the stream.
+ *
  * @param {{
- *   serverUrl: string,
- *   token: string,
- *   computerId: string,
+ *   serverUrl: string,               // <url> or <url>#join=<token>
+ *   token?: string,                  // required unless serverUrl carries #join=
+ *   computerId?: string,             // required unless serverUrl carries #join=
  *   name?: string,
  *   heartbeatMs?: number,
  *   mode?: 'embedded' | 'service',   // default 'service'; the plugin passes 'embedded'
  *   fs?: boolean,                    // default true; false = simulate an agent without fs handlers (tests)
  *   log?: (level: 'info'|'warn'|'error', message: string) => void,
  *   onState?: (state: object) => void,
+ *   onEnrolled?: (info: { serverUrl: string, computerId: string, token: string, name: string }) => void,
  * }} options
  * @returns {{ stop: () => Promise<void>, status: () => object }}
  *
@@ -1832,6 +1918,7 @@ function createRuntime(options) {
  *
  * A fatal `{"error":"invalid-token"}` 401 does NOT throw: the loop ends, sets
  * `lastError: 'invalid-token'`, `exitCode: 1`, and reports through `onState()`.
+ * A rejected `#join=` enroll behaves the same way (`lastError: 'invalid-join'`).
  */
 export function startRuntime(options) {
   const runtime = createRuntime(options)
@@ -1966,12 +2053,98 @@ function reconnectDelay(attempt) {
 }
 
 /**
+ * One-address enroll for the embedded runtime (v1.7.0).
+ *
+ * POSTs the fleet join token ONCE (the only place it is ever sent), adopts the
+ * returned machine credentials in memory and reports them through `onEnrolled`.
+ * The runtime never writes `~/.dsh-computers`, so an embedder that wants the
+ * enrollment to survive a restart must persist `onEnrolled` itself.
+ *
+ * Returns one of:
+ *   { kind: 'joined' }
+ *   { kind: 'rejected', code, reason }   -> 401/403: retrying cannot heal it
+ *   { kind: 'failed', reason }           -> transient; the loop retries
+ * Never throws (an abort is reported as `{ kind: 'failed', reason: 'aborted' }`
+ * and the caller checks the runtime signal).
+ */
+async function enrollPendingJoin(runtime) {
+  const config = runtime.config
+  const joinToken = runtime.pendingJoin
+  if (!joinToken) return { kind: 'joined' }
+  const body = {
+    join: joinToken,
+    agentVersion: AGENT_VERSION,
+    capabilities: [...AGENT_CAPABILITIES],
+    machine: machineInfo(config.name),
+    metadata: handshakeMetadata(config.workspaceBase, config.mode, config.caps),
+  }
+  let response
+  try {
+    response = await requestJson(enrollUrl(config.serverUrl), {
+      method: 'POST',
+      body,
+      timeoutMs: 30_000,
+      signal: runtime.controller.signal,
+    })
+  } catch (error) {
+    if (runtime.controller.signal.aborted) return { kind: 'failed', reason: 'aborted' }
+    return { kind: 'failed', reason: `无法连接 ${config.serverUrl}：${describeError(error)}` }
+  }
+  if (response.status !== 200) {
+    const code = (response.json && response.json.error) || `http-${response.status}`
+    const message = (response.json && response.json.message) || (response.text || '').trim()
+    const reason = `注册失败（${code}）${message ? `：${message}` : ''}`
+    // A rejected join token is the enroll-side twin of `invalid-token`: the
+    // server regenerated the address, so retrying the same token is pointless.
+    if (response.status === 401 || response.status === 403) return { kind: 'rejected', code, reason }
+    return { kind: 'failed', reason }
+  }
+  const data = response.json
+  if (
+    !data ||
+    typeof data.computerId !== 'string' ||
+    typeof data.token !== 'string' ||
+    typeof data.name !== 'string'
+  ) {
+    return { kind: 'failed', reason: '服务器返回的注册响应缺少 computerId / token / name' }
+  }
+  config.computerId = data.computerId
+  config.token = data.token
+  if (data.name !== '') {
+    config.name = data.name
+    runtime.state.name = data.name
+  }
+  if (typeof data.serverUrl === 'string' && data.serverUrl.trim() !== '') {
+    try {
+      config.serverUrl = normalizeServerUrl(data.serverUrl)
+    } catch {
+      // keep the pasted (fragment-free) address
+    }
+  }
+  // Sent once: clear it before anything else can retry.
+  runtime.pendingJoin = ''
+  if (runtime.onEnrolled) {
+    try {
+      runtime.onEnrolled({
+        serverUrl: config.serverUrl,
+        computerId: config.computerId,
+        token: config.token,
+        name: config.name,
+      })
+    } catch {
+      // A broken embedder callback must not break the loop.
+    }
+  }
+  return { kind: 'joined' }
+}
+
+/**
  * The reconnect loop. Never throws for a fatal token rejection: it returns the
  * exit code (1 for invalid-token), and the caller (`startRuntime`) reports it.
  */
 async function runRuntimeLoop(runtime) {
   const config = runtime.config
-  runtimeLog(runtime, 'info', `dsh-computers-agent ${AGENT_VERSION} 启动 · ${config.serverUrl} · computer=${config.computerId}`)
+  runtimeLog(runtime, 'info', `dsh-computers-agent ${AGENT_VERSION} 启动 · ${config.serverUrl} · computer=${config.computerId || '(待接入地址注册)'}`)
 
   let failures = 0
   let lastTransientWarnAt = 0
@@ -1980,7 +2153,27 @@ async function runRuntimeLoop(runtime) {
     runtime.state.attempts += 1
     let outcome
     try {
-      outcome = await runOneSession(runtime, runtime.controller.signal)
+      if (runtime.pendingJoin) {
+        // v1.7.0: the pasted address is the whole credential — enroll first,
+        // then connect with the machine token the hub just minted.
+        const enrolled = await enrollPendingJoin(runtime)
+        if (runtime.controller.signal.aborted) break
+        if (enrolled.kind === 'joined') {
+          runtimeLog(runtime, 'info', `✓ 已用接入地址完成注册：${config.name}（${config.computerId}）`)
+          continue
+        }
+        if (enrolled.kind === 'rejected') {
+          runtime.state.connected = false
+          runtime.state.since = null
+          runtime.state.lastError = enrolled.code || 'invalid-join'
+          emitRuntimeState(runtime)
+          runtimeLog(runtime, 'error', `✗ ${enrolled.reason}。接入地址可能已被重新生成，请重新粘贴地址。`)
+          return 1
+        }
+        outcome = { kind: 'closed', reason: enrolled.reason, gotHello: false, transientServer: true }
+      } else {
+        outcome = await runOneSession(runtime, runtime.controller.signal)
+      }
     } catch (error) {
       if (runtime.controller.signal.aborted) break
       outcome = { kind: 'closed', reason: describeError(error), gotHello: false }
@@ -2271,6 +2464,21 @@ async function cmdRun(argv) {
 // enroll
 // ---------------------------------------------------------------------------
 
+/**
+ * The fleet join token saved by a previous one-address enroll, if it belongs to
+ * `serverUrl`. Returns '' when there is no usable config — this is a
+ * convenience, never an error path.
+ */
+async function savedJoinToken(serverUrl) {
+  try {
+    const saved = await loadConfig()
+    if (saved.serverUrl !== serverUrl) return ''
+    return saved.joinToken || ''
+  } catch {
+    return ''
+  }
+}
+
 async function cmdEnroll(argv) {
   let values
   try {
@@ -2295,9 +2503,25 @@ async function cmdEnroll(argv) {
     return 0
   }
 
-  const serverUrl = normalizeServerUrl(values.server)
+  // One address is enough (v1.7.0): `<url>#join=<fleetToken>`. The fragment is
+  // parsed here, locally, and never stored or dialled.
+  const address = parseJoinAddress(values.server)
+  const serverUrl = address.serverUrl
   const key = typeof values.key === 'string' ? values.key.trim() : ''
-  if (!key) throw new CliError(`缺少 --key <key>（服务器生成的加入密钥）\n\n${ENROLL_USAGE}`)
+  // `--key` is unchanged and wins when both credentials are present.
+  let joinToken = key ? '' : address.joinToken
+  if (!key && !joinToken) {
+    // A previous one-address enroll left the fleet token on disk (0600). Reuse
+    // it so `enroll --server <url>` can re-register after the machine token was
+    // revoked, without asking the user to paste the address again.
+    joinToken = await savedJoinToken(serverUrl)
+    if (joinToken) console.error(`提示：使用 ${configFile()} 里保存的接入令牌重新注册。`)
+  }
+  if (!key && !joinToken) {
+    throw new CliError(
+      `缺少加入凭据：请把服务器给的接入地址整串传给 --server '<url>#join=<token>'，或用一次性加入密钥 --key <key>。\n\n${ENROLL_USAGE}`,
+    )
+  }
   const requestedName = typeof values.name === 'string' ? values.name.trim() : ''
 
   if (fs.existsSync(configFile())) {
@@ -2306,13 +2530,16 @@ async function cmdEnroll(argv) {
 
   const workspaceBase = normalizeWorkspaceBase(values['workspace-base'])
   const body = {
-    key,
     agentVersion: AGENT_VERSION,
     // PROTOCOL §11.1 (top-level capabilities) + §11.6 (handshake metadata).
     capabilities: [...AGENT_CAPABILITIES],
     machine: machineInfo(requestedName),
     metadata: handshakeMetadata(workspaceBase, 'service', agentCaps()),
   }
+  // Exactly one credential: the one-time key when present, else the fleet join
+  // token from the address fragment. The token is sent ONLY here.
+  if (key) body.key = key
+  else body.join = joinToken
   if (values.replace) body.replace = true
 
   let response
@@ -2340,6 +2567,8 @@ async function cmdEnroll(argv) {
 
   const config = {
     version: 1,
+    // Never store or dial the fragment: the hub may answer with its advertised
+    // address, which is normalized the same way.
     serverUrl: normalizeServerUrl(typeof data.serverUrl === 'string' && data.serverUrl ? data.serverUrl : serverUrl),
     computerId: data.computerId,
     token: data.token,
@@ -2347,6 +2576,10 @@ async function cmdEnroll(argv) {
     enrolledAt: new Date().toISOString(),
     workspaceBase,
   }
+  // v1.7.0: keep the fleet join token (0600, same file) so a later `enroll
+  // --server <url>` can re-register without the user pasting the address again.
+  // It is never sent on the stream, in a heartbeat or in a result POST.
+  if (!key) config.joinToken = joinToken
   await saveConfig(config)
   console.log(`✓ 凭据已保存到 ${configFile()}（仅本机可读，权限 0600）`)
   console.log(`工作目录：${workspaceBase}（exec 默认 cwd，glob/grep 的相对基准）`)
@@ -2888,10 +3121,13 @@ async function cmdStatus(argv) {
 // CLI plumbing
 // ---------------------------------------------------------------------------
 
-const ENROLL_USAGE = `用法：dsh-computers-agent enroll --server <url> --key <key> [--name <name>] [--workspace-base <path>] [--replace]
+const ENROLL_USAGE = `用法：dsh-computers-agent enroll --server '<url>#join=<token>' [--name <name>] [--workspace-base <path>] [--replace]
+       dsh-computers-agent enroll --server <url> --key <key> [--name <name>] [--workspace-base <path>] [--replace]
 
-  --server <url>          dsh-web 的地址，例如 http://127.0.0.1:3000
-  --key <key>             服务器生成的加入密钥（dshc_…），只能使用一次
+  推荐：把服务器「复制接入地址」得到的整串（形如 https://dsh.example.com#join=dshf_…）直接传给 --server。
+        片段（#join=…）只在本机解析，不会写进配置、不会发到服务器，也不会出现在访问日志里。
+  --server <url>          服务器地址；也可以直接是 <url>#join=<token> 接入地址
+  --key <key>             一次性加入密钥（dshc_…），只能使用一次；与 #join= 同时存在时优先使用 --key
   --name <name>           显示在服务器电脑列表里的名称，默认使用主机名
   --workspace-base <path> 默认工作目录（exec 默认 cwd，glob/grep 的相对基准），默认 $HOME
   --replace               让服务器用这台电脑的新凭据替换同名记录`
@@ -2909,8 +3145,10 @@ const HELP_TEXT = `dsh-computers-agent ${AGENT_VERSION}
 把本机接入 dsh-web，让服务器上的 agent 通过 computer_exec 在这台电脑执行命令。
 
 用法 / Usage:
+  dsh-computers-agent enroll --server '<url>#join=<token>' [--name <name>] [--workspace-base <path>] [--replace]
+      推荐：一个地址即可接入。把服务器「复制接入地址」得到的整串（含 #join=）直接传给 --server。
   dsh-computers-agent enroll --server <url> --key <key> [--name <name>] [--workspace-base <path>] [--replace]
-      用服务器给出的加入密钥注册这台电脑，并把凭据保存到本机。
+      用服务器生成的一次性加入密钥注册这台电脑（与 #join= 同时存在时优先使用 --key）。
   dsh-computers-agent run
       前台运行：保持 SSE 连接并执行服务器发来的命令（Ctrl-C 退出）。
   dsh-computers-agent service install|uninstall|start|stop|restart|status
@@ -2927,6 +3165,7 @@ const HELP_TEXT = `dsh-computers-agent ${AGENT_VERSION}
 凭据与安全:
   · 配置文件 ${configFile()} 权限 0600，原子写入。
   · token 只保存在本机，不会写入日志；status 只显示末 6 位。
+  · 接入地址的 #join= 片段只在本机解析，配置里只保存去掉片段后的服务器地址；join 令牌只在 enroll 时发送，绝不带上 SSE 流、心跳或结果上报。
   · 本程序只发起对外连接（enroll / SSE / 结果上报 / 心跳），不监听任何端口。
   · 命令以当前用户身份在 /bin/sh -lc 中执行，因此拥有与终端相同的权限。
   · 能力：exec（远程命令）+ fs（远程文件读写/glob/grep），默认工作目录可在 enroll 时指定。`

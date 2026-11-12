@@ -173,6 +173,8 @@ test('enroll happy path: saves 0600 config atomically, proves SSE, hides token',
 
   // The machine block matched PROTOCOL §3.1.
   const enrollment = await mock.waitForEnrollment()
+  assert.equal(enrollment.key, key)
+  assert.equal(enrollment.join, null, 'the --key path must not send a join token')
   assert.equal(enrollment.agentVersion, AGENT_VERSION)
   assert.equal(enrollment.machine.os, process.platform)
   assert.equal(enrollment.machine.arch, process.arch)
@@ -200,6 +202,214 @@ test('re-enroll with --replace keeps the same computer id and rotates the token'
   const enrollments = mock.enrollments
   assert.equal(enrollments.at(-1).replace, true, '--replace should be sent to the server')
 })
+
+test('enroll from one address: #join= posts { join } and stores a fragment-free serverUrl', async (t) => {
+  const { mock, home } = await setup(t)
+  const result = await runCli(['enroll', '--server', mock.joinAddress, '--name', 'Join Mac'], { home })
+  assert.equal(result.code, 0, `stderr:\n${result.stderr}\nstdout:\n${result.stdout}`)
+  assert.ok(result.stdout.includes('✓ 已连接'), result.stdout)
+  // The join token is a credential: never printed (same rule as the agent token).
+  assert.ok(!result.stdout.includes(mock.joinToken), 'join token must not be printed')
+  assert.ok(!result.stderr.includes(mock.joinToken), 'join token must not be printed')
+
+  // Stored URL has no fragment; the join token is kept in the same 0600 file so
+  // a later re-enroll is possible.
+  const config = await readConfig(home)
+  assert.equal(config.serverUrl, mock.url)
+  assert.equal(config.joinToken, mock.joinToken)
+  const raw = await fs.readFile(path.join(home, 'config.json'), 'utf8')
+  assert.ok(!raw.includes('#join='), 'the fragment must never be written to config.json')
+  assert.ok(!raw.includes('#'))
+  const info = await fs.stat(path.join(home, 'config.json'))
+  assert.equal(info.mode & 0o777, 0o600, 'config.json must stay 0600')
+
+  // The enroll body carried `{ join }` (and no key), with the §11.6 metadata.
+  const enrollment = await mock.waitForEnrollment()
+  assert.equal(enrollment.join, mock.joinToken)
+  assert.equal(enrollment.key, null)
+  assert.equal(enrollment.metadata.mode, 'service')
+  assert.equal(enrollment.machine.name, 'Join Mac')
+  assert.equal(mock.computers.size, 1)
+
+  // The token is sent ONLY on enroll: the SSE stream (probe included) must not
+  // carry it in any header.
+  assert.ok(mock.eventsRequests.length >= 1)
+  for (const request of mock.eventsRequests) {
+    assert.ok(
+      !JSON.stringify(request.headers).includes(mock.joinToken),
+      'the join token must never be sent on the stream',
+    )
+  }
+  assert.equal(mock.openStreamCount, 0)
+})
+
+test('enroll --key wins over a #join= fragment and behaves exactly as before', async (t) => {
+  const { mock, home } = await setup(t)
+  const key = mock.createEnrollKey({ replace: true })
+  const result = await runCli(['enroll', '--server', `${mock.url}#join=${mock.joinToken}`, '--key', key], { home })
+  assert.equal(result.code, 0, result.stderr)
+
+  const config = await readConfig(home)
+  assert.equal(config.serverUrl, mock.url)
+  assert.equal('joinToken' in config, false, 'the ignored fragment must not be persisted')
+
+  const enrollment = await mock.waitForEnrollment()
+  assert.equal(enrollment.key, key)
+  assert.equal(enrollment.join, null, '--key wins; the join token is not sent')
+})
+
+test('enroll without --key or #join= names both accepted forms', async (t) => {
+  const { mock, home } = await setup(t)
+  const result = await runCli(['enroll', '--server', mock.url], { home })
+  assert.equal(result.code, 1)
+  assert.ok(result.stderr.includes('#join='), result.stderr)
+  assert.ok(result.stderr.includes('--key'), result.stderr)
+  assert.ok(!existsSync(path.join(home, 'config.json')))
+  assert.equal(mock.enrollments.length, 0)
+
+  // A fragment that is there but empty is a mistake, not a silent fallback.
+  const empty = await runCli(['enroll', '--server', `${mock.url}#join=`], { home })
+  assert.equal(empty.code, 1)
+  assert.ok(empty.stderr.includes('#join='), empty.stderr)
+  assert.ok(!existsSync(path.join(home, 'config.json')))
+})
+
+test('enroll with a rejected join token fails clearly with the server message (401 invalid-join)', async (t) => {
+  const { mock, home } = await setup(t)
+  const result = await runCli(['enroll', '--server', `${mock.url}#join=dshf_${'0'.repeat(32)}`], { home })
+  assert.equal(result.code, 1)
+  assert.ok(result.stderr.includes('invalid-join'), result.stderr)
+  assert.ok(result.stderr.includes('unknown join token'), result.stderr)
+  assert.ok(!existsSync(path.join(home, 'config.json')))
+  assert.equal(mock.computers.size, 0)
+})
+
+test('a saved join token lets a later enroll --server re-register without the fragment', async (t) => {
+  const { mock, home } = await setup(t)
+  const first = await runCli(['enroll', '--server', mock.joinAddress], { home })
+  assert.equal(first.code, 0, first.stderr)
+  const firstConfig = await readConfig(home)
+
+  // The machine token was revoked on the hub (the computer record was deleted):
+  // the stored fleet token is what makes recovery possible.
+  mock.tokens.delete(firstConfig.token)
+  const again = await runCli(['enroll', '--server', mock.url], { home })
+  assert.equal(again.code, 0, again.stderr)
+  assert.ok(again.stderr.includes('保存的接入令牌'), again.stderr)
+
+  const enrollment = await mock.waitForEnrollment()
+  assert.equal(enrollment.join, mock.joinToken)
+  assert.equal(enrollment.key, null)
+  assert.equal(mock.computers.size, 1, 're-joining from the same machine replaces its record')
+
+  const config = await readConfig(home)
+  assert.equal(config.serverUrl, mock.url)
+  assert.equal(config.joinToken, mock.joinToken)
+  assert.notEqual(config.token, firstConfig.token)
+})
+
+test('startRuntime accepts the one-address form and enrolls with { join }', async (t) => {
+  const { mock, home } = await setup(t)
+  const script = [
+    `const { startRuntime } = await import(${JSON.stringify(agentPath)})`,
+    'const options = JSON.parse(process.env.DSHC_JOIN_OPTIONS)',
+    'const runtime = startRuntime({',
+    '  serverUrl: options.address,',
+    '  mode: "embedded",',
+    '  log: () => {},',
+    '  onEnrolled: (info) => process.stdout.write("ENROLLED " + JSON.stringify(info) + String.fromCharCode(10)),',
+    '})',
+    'const initial = runtime.status()',
+    'process.stdout.write("INITIAL " + JSON.stringify({ running: initial.running, serverUrl: initial.serverUrl, computerId: initial.computerId }) + String.fromCharCode(10))',
+    'const deadline = Date.now() + 15000',
+    'while (!runtime.status().connected && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25))',
+    'const connected = runtime.status()',
+    'process.stdout.write("CONNECTED " + JSON.stringify({ connected: connected.connected, serverUrl: connected.serverUrl, computerId: connected.computerId, lastError: connected.lastError }) + String.fromCharCode(10))',
+    'await runtime.stop()',
+    'process.exit(0)',
+  ].join('\n')
+  const child = spawnNodeEval(script, {
+    home,
+    env: { DSHC_JOIN_OPTIONS: JSON.stringify({ address: mock.joinAddress }) },
+  })
+  t.after(() => child.stop())
+
+  await child.waitForOutput(/CONNECTED /)
+  // The runtime returns before enrolling, and even then it only ever holds the
+  // fragment-free URL.
+  const initial = readJsonLine(child.stdout, 'INITIAL ')
+  assert.equal(initial.running, true)
+  assert.equal(initial.serverUrl, mock.url)
+  assert.equal(initial.computerId, '')
+
+  const enrollment = await mock.waitForEnrollment()
+  assert.equal(enrollment.join, mock.joinToken)
+  assert.equal(enrollment.key, null)
+  assert.equal(enrollment.metadata.mode, 'embedded')
+  assert.equal(mock.enrollments.length, 1, 'the join token is sent once')
+
+  // The embedder gets the minted credentials to persist; the fragment is gone.
+  const enrolled = readJsonLine(child.stdout, 'ENROLLED ')
+  assert.equal(enrolled.serverUrl, mock.url)
+  assert.match(enrolled.computerId, /^cmp_/)
+  assert.match(enrolled.token, /^dshc_/)
+  assert.equal(enrolled.name, os.hostname(), 'no name given: the hub names it after the hostname')
+
+  const connected = readJsonLine(child.stdout, 'CONNECTED ')
+  assert.equal(connected.connected, true, child.output)
+  assert.equal(connected.serverUrl, mock.url)
+  assert.equal(connected.computerId, enrolled.computerId)
+  assert.equal(connected.lastError, null)
+  assert.ok(!child.output.includes('#join='), 'the fragment must never surface in status/output')
+  for (const request of mock.eventsRequests) {
+    assert.ok(!JSON.stringify(request.headers).includes(mock.joinToken))
+  }
+})
+
+
+test('startRuntime reports a rejected join token as fatal instead of retrying', async (t) => {
+  const { mock, home } = await setup(t)
+  const script = [
+    `const { startRuntime } = await import(${JSON.stringify(agentPath)})`,
+    'const options = JSON.parse(process.env.DSHC_JOIN_OPTIONS)',
+    'const runtime = startRuntime({ serverUrl: options.address, log: () => {}, onState: () => {} })',
+    'const deadline = Date.now() + 10000',
+    'while (runtime.status().running && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 25))',
+    'const status = runtime.status()',
+    'process.stdout.write("FINAL " + JSON.stringify({ running: status.running, connected: status.connected, lastError: status.lastError, exitCode: status.exitCode }) + String.fromCharCode(10))',
+    'await runtime.stop()',
+    'process.exit(0)',
+  ].join('\n')
+  const child = spawnNodeEval(script, {
+    home,
+    env: {
+      DSHC_JOIN_OPTIONS: JSON.stringify({ address: `${mock.url}#join=dshf_${'1'.repeat(32)}` }),
+    },
+  })
+  t.after(() => child.stop())
+
+  await child.waitForOutput(/FINAL /)
+  const final = readJsonLine(child.stdout, 'FINAL ')
+  assert.equal(final.running, false)
+  assert.equal(final.connected, false)
+  assert.equal(final.lastError, 'invalid-join')
+  assert.equal(final.exitCode, 1)
+  assert.equal(mock.enrollments.length, 0)
+})
+
+test('startRuntime requires credentials or a #join= fragment', async (t) => {
+  const { home } = await setup(t)
+  const script = [
+    `const { startRuntime } = await import(${JSON.stringify(agentPath)})`,
+    'try { startRuntime({ serverUrl: "http://127.0.0.1:1" }); console.log("NO-THROW") }',
+    'catch (error) { console.log("THREW " + error.name + " " + error.message) }',
+  ].join('\n')
+  const result = await runNodeEval(script, { home })
+  assert.equal(result.code, 0, result.stderr)
+  assert.match(result.stdout, /THREW TypeError/)
+  assert.match(result.stdout, /#join=/)
+})
+
 
 test('status shows redacted token, server and service state', async (t) => {
   const { mock, home } = await setup(t)

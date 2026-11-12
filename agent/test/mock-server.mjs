@@ -64,6 +64,12 @@ export class MockComputerServer {
     this.heartbeatAttempts = 0
     /** How many leading heartbeat POSTs to answer 503 (liveness-miss tests). */
     this.heartbeatFailuresRemaining = options.heartbeatFailures ?? 0
+    /**
+     * v1.7.0 one-address join: the hub's long-lived fleet token. `enroll` with
+     * `{ join }` matching this creates/replaces a computer record; anything else
+     * answers 401 `invalid-join`.
+     */
+    this.joinToken = typeof options.joinToken === 'string' ? options.joinToken : `dshf_${randomBytes(16).toString('hex')}`
 
     /** key -> { key, expiresAt, usedAt, replace, computerId } */
     this.keys = new Map()
@@ -185,6 +191,14 @@ export class MockComputerServer {
   /** Number of currently open SSE streams. */
   get openStreamCount() {
     return this.streams.size
+  }
+
+  /**
+   * The v1.7.0 one-address join string for this mock: `<url>#join=<token>`.
+   * Pasting it as `--server` is the whole enrollment.
+   */
+  get joinAddress() {
+    return `${this.url}#join=${this.joinToken}`
   }
 
   /** Every stream ever opened, in order. */
@@ -453,20 +467,41 @@ export class MockComputerServer {
     } catch {
       return this.sendJson(res, 400, { error: 'bad-request', message: 'body must be JSON under 16 KiB' })
     }
-    if (!body || typeof body.key !== 'string' || !body.key) {
-      return this.sendJson(res, 400, { error: 'bad-request', message: 'missing key' })
+    if (!body || typeof body !== 'object') {
+      return this.sendJson(res, 400, { error: 'bad-request', message: 'missing key or join' })
+    }
+
+    // v1.7.0 one-address join: `{ join }` is an alternative to `{ key }`.
+    if (typeof body.join === 'string' && body.join !== '') {
+      if (body.join !== this.joinToken) {
+        return this.sendJson(res, 401, { error: 'invalid-join', message: 'unknown join token' })
+      }
+      // A reusable fleet address: re-joining from the same machine replaces its
+      // record instead of adding a duplicate (the hub keys join enrolls off the
+      // machine hostname, exactly like the keyed path with `replace`).
+      return this.completeEnrollment(res, body, { viaJoin: true, replace: true })
+    }
+    if (typeof body.key !== 'string' || !body.key) {
+      return this.sendJson(res, 400, { error: 'bad-request', message: 'missing key or join' })
     }
     const key = this.keys.get(body.key)
     if (!key) return this.sendJson(res, 401, { error: 'invalid-key', message: 'unknown enrollment key' })
     if (key.usedAt) return this.sendJson(res, 409, { error: 'key-used', message: 'this enrollment key was already used' })
     if (Date.now() > key.expiresAt) return this.sendJson(res, 410, { error: 'key-expired', message: 'this enrollment key has expired' })
+    return this.completeEnrollment(res, body, { viaJoin: false, replace: key.replace })
+  }
 
+  /**
+   * Shared enroll tail (key and join paths): upsert the computer record, mint a
+   * token, mark the key used and answer §3.1's 200 payload.
+   */
+  completeEnrollment(res, body, { viaJoin, replace }) {
     const machine = body.machine && typeof body.machine === 'object' ? body.machine : {}
     const name = typeof machine.name === 'string' && machine.name ? machine.name : this.name
     const hostname = typeof machine.hostname === 'string' ? machine.hostname : 'mock.local'
 
     let computer
-    if (key.replace) {
+    if (replace) {
       computer = [...this.computers.values()].find((entry) => entry.hostname === hostname || entry.name === name)
     }
     if (!computer) {
@@ -495,12 +530,21 @@ export class MockComputerServer {
     computer.hostname = hostname
     computer.agentVersion = body.agentVersion ?? computer.agentVersion
     this.tokens.set(token, computer.id)
-    key.usedAt = Date.now()
-    key.computerId = computer.id
+    if (!viaJoin) {
+      const key = this.keys.get(body.key)
+      if (key) {
+        key.usedAt = Date.now()
+        key.computerId = computer.id
+      }
+    }
 
     this.enrollments.push({
       at: Date.now(),
-      key: body.key,
+      // Exactly one credential is sent: `key` for the one-time path, `join` for
+      // the one-address path (null when the other was used).
+      key: viaJoin ? null : body.key,
+      join: viaJoin ? body.join : null,
+      viaJoin,
       agentVersion: body.agentVersion,
       capabilities: body.capabilities,
       metadata: body.metadata,
@@ -708,6 +752,7 @@ if (isDirectRun()) {
   const key = mock.createEnrollKey({ replace: true })
   const script = fileURLToPath(new URL('../dsh-computers-agent.mjs', import.meta.url))
   console.log(`mock dsh-computers server listening on ${mock.url}`)
+  console.log(`join:    node "${script}" enroll --server '${mock.joinAddress}'`)
   console.log(`enroll:  node "${script}" enroll --server ${mock.url} --key ${key}`)
   console.log(`run:     DSH_COMPUTERS_HOME=${path.join(process.cwd(), 'tmp-agent-home')} node "${script}" run`)
   console.log('Ctrl-C to stop.')

@@ -75,7 +75,6 @@ window.__ModuleLoader__.load({
       nav: '电脑',
       title: '电脑',
       description: '把你自己电脑接进来，agent 就能在它上面直接执行命令。',
-      'connect.action': '连接电脑',
       'badge.bots': '{used}/{total} 个 Bot',
       online: '在线',
       offline: '离线',
@@ -83,7 +82,8 @@ window.__ModuleLoader__.load({
       'delete.action': '删除',
       loading: '正在加载电脑列表…',
       'empty.title': '还没有连接任何电脑',
-      'empty.hint': '点右上角「连接电脑」，把服务器地址和加入密钥填到另一台电脑的 设置 → 电脑 → 本机运行时；那台机器没有 DSH 时，再用弹窗里的命令行接入。',
+      'empty.hint': '把「复制接入地址」得到的地址粘贴到另一台电脑的 设置 → 电脑 → 接入；那台机器没有 DSH 时，用下面的命令行接入。',
+      'empty.cliAction': '没有 DSH 的机器？用命令行接入',
       'error.load': '无法读取电脑列表',
       'error.loadDetail': '{title}：{message}',
       'error.network': '无法连接到服务器，请检查网络后重试。',
@@ -114,7 +114,7 @@ window.__ModuleLoader__.load({
       deleting: '删除中…',
 
       'connect.title': '连接电脑',
-      'connect.subtitle': '在这台电脑的 DSH 里打开 设置 → 电脑 → 本机运行时，填入下面的服务器地址和加入密钥',
+      'connect.subtitle': '在另一台电脑的 设置 → 电脑 → 接入 里粘贴下面的服务器地址和加入密钥；没有 DSH 的机器用下面的命令行',
       'connect.osGroup': '选择电脑的系统',
       'connect.os.windows': 'Windows',
       'connect.os.macos': 'macOS',
@@ -137,7 +137,7 @@ window.__ModuleLoader__.load({
       'connect.connected.noticeAnonymous': '电脑已连接',
       'connect.pendingCommand': '命令准备中…',
       'connect.serverUrl': '服务器地址',
-      'connect.serverUrlHint': '本机运行时卡片里填这个地址',
+      'connect.serverUrlHint': '在另一台电脑的「接入」里填这个地址',
       'connect.enrollmentKey': '加入密钥',
       'connect.enrollmentKeyHint': '15 分钟内有效，只能用一次',
       'connect.copyField': '复制{field}',
@@ -145,33 +145,38 @@ window.__ModuleLoader__.load({
       'connect.cliHint': '在要连接的电脑上安装 Node.js 22+，然后在终端运行下方命令',
 
       'computers.group': '已连接的电脑',
-      'runtime.title': '本机运行时',
-      'runtime.desc': '把这台电脑接到一个 DSH 服务器，它就会出现在那台服务器的电脑列表里。',
-      'runtime.hint': '加入密钥来自服务器「连接电脑」弹窗里的命令。',
+      /* v1.7.0 one-field join: the 接入 card is the whole page up top. */
+      'join.title': '接入',
+      'join.addressLabel': '接入地址',
+      'join.addressPlaceholder': 'https://dsh-relay.nextai.show/r/hub_…',
+      'join.hint': '在另一台电脑的 设置 → 电脑 → 已连接的电脑 里点「复制接入地址」，把整串粘贴到这里。',
+      'join.keyToggle': '用加入密钥',
+      'join.addressToggle': '用接入地址',
+      'join.connected': '已连接',
+      'join.invalid': '这不像一个接入地址：它应该形如 https://…/r/hub_…#join=…',
+      'advanced.title': '高级',
+      'advanced.summary': '本机地址与中继状态',
+      'fleet.copy': '复制接入地址',
+      'runtime.hint': '加入密钥来自服务器「连接电脑」弹窗，只能用一次，15 分钟内有效。',
       'runtime.serverLabel': '服务器地址',
       'runtime.serverPlaceholder': 'https://dsh.example.com',
       'runtime.keyLabel': '加入密钥',
       'runtime.keyPlaceholder': 'dshc_…',
       'runtime.connect': '连接',
       'runtime.connecting': '连接中…',
-      'runtime.target': '目标服务器',
-      'runtime.enable': '启用',
       'runtime.disconnect': '断开',
       'runtime.disconnectTitle': '断开这台电脑？',
       'runtime.disconnectBody': '这台电脑会停止向 {server} 保持连接，并在那台服务器的电脑列表里变为离线。记录会保留（可在服务器上删除），之后也可以随时重新连接。',
       'runtime.disconnectFailed': '断开失败：{message}',
-      'runtime.enableFailed': '切换启用状态失败：{message}',
       'runtime.connectFailed': '连接失败：{message}',
       'runtime.loading': '正在读取本机状态…',
       'runtime.loadFailed': '无法读取本机状态',
-      'runtime.nameUnknown': '未命名的这台电脑',
       'runtime.status.running': '运行中',
       'runtime.status.stopped': '已停止',
       'runtime.status.connecting': '连接中…',
       'runtime.status.failed': '连接失败',
-      'runtime.lastError': '最近错误：{message}',
       'runtime.connected.notice': '本机已接入 {server}',
-      'runtime.disconnected.notice': '已断开本机运行时',
+      'runtime.disconnected.notice': '已断开接入',
 
       'target.label': '目标电脑',
       'target.cloud': '云端电脑',
@@ -255,8 +260,6 @@ window.__ModuleLoader__.load({
       'relay.enable': '启用',
       'relay.disabledHint': '先在配置里填 relay.url（例如 wss://dsh-relay.nextai.show）',
       'relay.enableFailed': '切换中继失败：{message}',
-      'upstream.title': '作为运行时',
-      'upstream.direction': '本机向这个服务器上报',
       'target.offline': '离线',
       'target.failed': '切换失败：{message}',
     };
@@ -265,7 +268,6 @@ window.__ModuleLoader__.load({
       nav: 'Computers',
       title: 'Computers',
       description: 'Bring your own machines in so the agent can run commands on them.',
-      'connect.action': 'Connect computer',
       'badge.bots': '{used}/{total} Bot',
       online: 'Online',
       offline: 'Offline',
@@ -273,7 +275,8 @@ window.__ModuleLoader__.load({
       'delete.action': 'Delete',
       loading: 'Loading computers…',
       'empty.title': 'No computers connected yet',
-      'empty.hint': 'Use “Connect computer” in the top right: paste the server URL and join key into Settings → Computers → This computer on the other machine. If that machine has no DSH, use the command line from the same dialog.',
+      'empty.hint': 'Paste the address from “Copy join address” into Settings → Computers → Join on the other computer. If that machine has no DSH, use the command line below.',
+      'empty.cliAction': 'No DSH on that machine? Use the command line',
       'error.load': 'Could not load the computer list',
       'error.loadDetail': '{title}: {message}',
       'error.network': 'Could not reach the server. Check the network and try again.',
@@ -304,7 +307,7 @@ window.__ModuleLoader__.load({
       deleting: 'Deleting…',
 
       'connect.title': 'Connect computer',
-      'connect.subtitle': 'Open Settings → Computers → This computer in the DSH on that machine and paste the server URL and join key below',
+      'connect.subtitle': 'Open Settings → Computers → Join on the other machine and paste the server URL and join key below; use the command line below for a machine without DSH',
       'connect.osGroup': 'Choose the system of that computer',
       'connect.os.windows': 'Windows',
       'connect.os.macos': 'macOS',
@@ -327,7 +330,7 @@ window.__ModuleLoader__.load({
       'connect.connected.noticeAnonymous': 'Computer connected',
       'connect.pendingCommand': 'Preparing the command…',
       'connect.serverUrl': 'Server URL',
-      'connect.serverUrlHint': 'Paste this into the “This computer” card',
+      'connect.serverUrlHint': 'Paste this into “Join” on the other computer',
       'connect.enrollmentKey': 'Join key',
       'connect.enrollmentKeyHint': 'Valid for 15 minutes, single use',
       'connect.copyField': 'Copy {field}',
@@ -335,33 +338,38 @@ window.__ModuleLoader__.load({
       'connect.cliHint': 'Install Node.js 22+ on that machine, then run the command below in a terminal',
 
       'computers.group': 'Connected computers',
-      'runtime.title': 'This computer',
-      'runtime.desc': 'Connect this machine to a DSH server and it shows up in that server’s computer list.',
-      'runtime.hint': 'The join key comes from the “Connect computer” dialog on that server.',
+      /* v1.7.0 one-field join: the Join card is the whole page up top. */
+      'join.title': 'Join',
+      'join.addressLabel': 'Join address',
+      'join.addressPlaceholder': 'https://dsh-relay.nextai.show/r/hub_…',
+      'join.hint': 'On the other computer open Settings → Computers → Connected computers and click “Copy join address”, then paste the whole string here.',
+      'join.keyToggle': 'Use a join key',
+      'join.addressToggle': 'Use a join address',
+      'join.connected': 'Connected to',
+      'join.invalid': 'That does not look like a join address; it should look like https://…/r/hub_…#join=…',
+      'advanced.title': 'Advanced',
+      'advanced.summary': 'This machine’s addresses and relay status',
+      'fleet.copy': 'Copy join address',
+      'runtime.hint': 'The join key comes from the server’s “Connect computer” dialog; single use, valid for 15 minutes.',
       'runtime.serverLabel': 'Server URL',
       'runtime.serverPlaceholder': 'https://dsh.example.com',
       'runtime.keyLabel': 'Join key',
       'runtime.keyPlaceholder': 'dshc_…',
       'runtime.connect': 'Connect',
       'runtime.connecting': 'Connecting…',
-      'runtime.target': 'Target server',
-      'runtime.enable': 'Enabled',
       'runtime.disconnect': 'Disconnect',
       'runtime.disconnectTitle': 'Disconnect this computer?',
       'runtime.disconnectBody': 'This machine stops connecting to {server} and goes offline in that server’s computer list. The record stays until you delete it there, and you can connect again at any time.',
       'runtime.disconnectFailed': 'Disconnect failed: {message}',
-      'runtime.enableFailed': 'Could not change the enabled state: {message}',
       'runtime.connectFailed': 'Connect failed: {message}',
       'runtime.loading': 'Reading this computer’s status…',
       'runtime.loadFailed': 'Could not read this computer’s status',
-      'runtime.nameUnknown': 'This computer',
       'runtime.status.running': 'Running',
       'runtime.status.stopped': 'Stopped',
       'runtime.status.connecting': 'Connecting…',
       'runtime.status.failed': 'Connection failed',
-      'runtime.lastError': 'Last error: {message}',
       'runtime.connected.notice': 'This computer joined {server}',
-      'runtime.disconnected.notice': 'This computer’s runtime is disconnected',
+      'runtime.disconnected.notice': 'Disconnected',
 
       'target.label': 'Target computer',
       'target.cloud': 'Cloud computer',
@@ -445,8 +453,6 @@ window.__ModuleLoader__.load({
       'relay.enable': 'Enabled',
       'relay.disabledHint': 'Add relay.url in the config first (for example wss://dsh-relay.nextai.show)',
       'relay.enableFailed': 'Could not change the relay: {message}',
-      'upstream.title': 'As a runtime',
-      'upstream.direction': 'This machine reports to this server',
       'target.offline': 'Offline',
       'target.failed': 'Could not switch: {message}',
     };
@@ -533,10 +539,6 @@ window.__ModuleLoader__.load({
         focusable: 'false',
         className: props.className,
       }, shapes.map((shape, index) => h(shape[0], Object.assign({ key: `s${index}` }, shape[1]))));
-    }
-
-    function IconPlus(props) {
-      return h(SvgIcon, { size: props.size, shapes: [['path', { d: 'M12 5v14' }], ['path', { d: 'M5 12h14' }]] });
     }
 
     function IconClose(props) {
@@ -995,6 +997,148 @@ window.__ModuleLoader__.load({
   padding: 0 16px;
   border-radius: 9px;
 }
+/* v1.7.0: the 接入 card — one address is the whole join flow. */
+.dshc-joinHint { margin: 9px 0 0; }
+.dshc-joinForm { margin-top: 10px; }
+.dshc-joinField { flex: 1 1 260px; }
+.dshc-joinToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 10px;
+  padding: 2px 0;
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  text-align: left;
+  cursor: pointer;
+}
+.dshc-joinToggle::after { content: '\203A'; margin-left: 1px; }
+@media (hover: hover) {
+  .dshc-joinToggle:hover { color: var(--dsw-alias-label-primary); }
+}
+.dshc-joinToggle:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+.dshc-joinLine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.dshc-joinText {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--dsw-alias-label-primary);
+}
+.dshc-joinAddress {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+}
+.dshc-joinDisconnect { margin-left: auto; }
+
+/* 已连接的电脑 header: the hub's one copyable join address. */
+.dshc-groupHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0 0 10px;
+}
+.dshc-groupHead .dshc-groupTitle { margin: 0; }
+.dshc-copyJoinBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+  padding: 3px 9px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .dshc-copyJoinBtn:hover {
+    border-color: var(--dsw-alias-border-l2);
+    background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
+    color: var(--dsw-alias-label-primary);
+  }
+}
+.dshc-copyJoinBtn:focus-visible { outline: 2px solid var(--dsw-alias-brand-primary); outline-offset: 2px; }
+.dshc-copyJoinBtn[data-copied="true"] { color: var(--dsw-alias-state-success-primary); }
+.dshc-emptyActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+.dshc-emptyCli { margin-top: 2px; }
+
+/* v1.7.0: everything power users need, behind one muted 「高级」 line. */
+.dshc-advanced { margin-top: 2px; }
+.dshc-advancedToggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 6px 0;
+  border: none;
+  background: transparent;
+  color: var(--dsw-alias-label-secondary);
+  font: inherit;
+  font-size: 12.5px;
+  line-height: 18px;
+  text-align: left;
+  cursor: pointer;
+}
+@media (hover: hover) {
+  .dshc-advancedToggle:hover { color: var(--dsw-alias-label-primary); }
+}
+.dshc-advancedToggle:focus-visible {
+  outline: 2px solid var(--dsw-alias-brand-primary);
+  outline-offset: 2px;
+  border-radius: 6px;
+}
+.dshc-advancedChevron {
+  flex: none;
+  opacity: 0.75;
+  transition: transform 120ms ease;
+}
+.dshc-advancedToggle[aria-expanded="true"] .dshc-advancedChevron { transform: rotate(180deg); }
+.dshc-advancedTitle { flex: none; }
+.dshc-advancedHint {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--dsw-alias-label-secondary);
+  opacity: 0.85;
+}
+.dshc-advancedBody { margin-top: 10px; }
+
 .dshc-dot[data-state="running"] { background: var(--dsw-alias-state-success-primary); }
 .dshc-dot[data-state="connecting"] { background: var(--dsw-alias-state-warn-primary); }
 .dshc-dot[data-state="failed"] { background: var(--dsw-alias-state-error-primary); }
@@ -1927,6 +2071,11 @@ window.__ModuleLoader__.load({
   .dshc-card { padding: 20px 16px; border-radius: 14px; }
   .dshc-row { padding-left: 13px; }
   .dshc-formSubmit { flex: 1 1 100%; }
+  /* 420px: the joined line stacks instead of pushing 断开 off the edge. */
+  .dshc-joinLine { align-items: flex-start; }
+  .dshc-joinText { flex: 1 1 100%; }
+  .dshc-joinDisconnect { margin-left: 0; }
+  .dshc-groupHead { flex-wrap: wrap; }
 }
 @media (prefers-reduced-motion: reduce) {
   .dshc-detailsSummary::after { transition: none; }
@@ -2040,9 +2189,11 @@ window.__ModuleLoader__.load({
       rename: (id, name, signal) => requestJson(API.rename, { method: 'POST', body: { id, name }, signal }),
       remove: (id, signal) => requestJson(API.remove, { method: 'POST', body: { id }, signal }),
       readRuntime: (signal) => requestJson(API.runtime, { signal }),
-      runtimeConnect: (serverUrl, key, signal) => requestJson(API.runtimeConnect, {
+      /* One address (`{ serverUrl: '<url>#join=<token>' }`, handed over
+       * verbatim) or the legacy pair (`{ serverUrl, key }`). */
+      runtimeConnect: (payload, signal) => requestJson(API.runtimeConnect, {
         method: 'POST',
-        body: { serverUrl, key },
+        body: payload,
         signal,
       }),
       runtimeEnable: (enabled, signal) => requestJson(API.runtimeEnable, {
@@ -2545,11 +2696,30 @@ window.__ModuleLoader__.load({
         h('span', null, props.text));
     }
 
-    function EmptyState() {
+    /**
+     * Empty 已连接的电脑 list. When the hub publishes a fleet join address
+     * (`/state.fleet.joinUrl`) the primary action is copying it — that is the
+     * string the user pastes on the other machine. The connect dialog is
+     * demoted to the command-line fallback for machines that cannot run DSH.
+     * @param {object} props - `joinUrl`, optional `onCliFallback()`.
+     * @returns {object} empty card.
+     */
+    function EmptyState(props) {
+      const joinUrl = typeof props.joinUrl === 'string' ? props.joinUrl : '';
       return h('div', { className: 'dshc-empty' },
         h('div', { className: 'dshc-emptyIcon', 'aria-hidden': 'true' }, h(IconMonitor, { size: 20 })),
         h('div', { className: 'dshc-emptyTitle' }, t('empty.title')),
-        h('p', { className: 'dshc-emptyHint' }, t('empty.hint')));
+        h('p', { className: 'dshc-emptyHint' }, t('empty.hint')),
+        joinUrl !== ''
+          ? h('div', { className: 'dshc-emptyActions' }, h(CopyJoinButton, { value: joinUrl }))
+          : null,
+        typeof props.onCliFallback === 'function'
+          ? h('button', {
+            type: 'button',
+            className: 'dshc-joinToggle dshc-emptyCli',
+            onClick: props.onCliFallback,
+          }, t('empty.cliAction'))
+          : null);
     }
 
     /**
@@ -2609,6 +2779,54 @@ window.__ModuleLoader__.load({
          * announced here, so a screen reader hears the confirmation too. */
         h('span', { className: 'dshc-sr', role: 'status', 'aria-live': 'polite' },
           copied ? t('connect.copied') : (failed ? t('connect.copyFailed') : '')));
+    }
+
+    /**
+     * 「复制接入地址」 — copies the hub's fleet join URL verbatim (it is the
+     * credential the other machine pastes, so nothing is appended or stripped).
+     * @param {object} props - `value` (`/state.fleet.joinUrl`).
+     * @returns {object} copy button with check feedback.
+     */
+    function CopyJoinButton(props) {
+      const state = useCopyText(props.value);
+      const label = state.copied ? t('connect.copied') : t('fleet.copy');
+      /* The visible label is the accessible name on purpose: it changes to
+       * 已复制, so the copy is announced without a second hidden status. */
+      return h('button', {
+        type: 'button',
+        className: 'dshc-copyJoinBtn',
+        'data-copied': state.copied ? 'true' : 'false',
+        title: label,
+        onClick: () => { void state.copy(); },
+      },
+      state.copied ? h(IconCheck, { size: 13 }) : h(IconCopy, { size: 13 }),
+      h('span', null, label));
+    }
+
+    /**
+     * 「高级」 disclosure at the bottom of the page: every power-user surface
+     * (本机地址 candidates, the relay card, the listener line, the loopback
+     * banner and the Tailscale/LAN examples) lives inside it, collapsed by
+     * default behind one muted summary line.
+     * @param {object} props - `children` (the existing components, untouched).
+     * @returns {object} disclosure element.
+     */
+    function AdvancedSection(props) {
+      const [open, setOpen] = React.useState(false);
+      return h('div', { className: 'dshc-advanced' },
+        h('button', {
+          type: 'button',
+          className: 'dshc-advancedToggle',
+          'aria-expanded': open ? 'true' : 'false',
+          'aria-controls': 'dshc-advanced-body',
+          onClick: () => setOpen((value) => !value),
+        },
+          h(IconChevron, { size: 13, className: 'dshc-advancedChevron' }),
+          h('span', { className: 'dshc-advancedTitle' }, t('advanced.title')),
+          open ? null : h('span', { className: 'dshc-advancedHint' }, t('advanced.summary'))),
+        open
+          ? h('div', { id: 'dshc-advanced-body', className: 'dshc-advancedBody' }, props.children)
+          : null);
     }
 
     function Skeleton() {
@@ -3073,7 +3291,8 @@ window.__ModuleLoader__.load({
           }, t('cancel')),
         ],
       },
-      /* PRIMARY (task-8): the plugin path — paste these into 本机运行时. */
+      /* The demoted key path: this dialog and the 接入 card's 「用加入密钥」
+       * hand over the same server URL + one-time key pair. */
       h('div', { className: 'dshc-copyStack' },
         urlCandidates.length > 1
           ? h(AddressPicker, {
@@ -3163,15 +3382,41 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The 本机运行时 card (PROTOCOL §10.6): this machine joining a hub.
+     * Whether a pasted string carries a `#join=<token>` fragment — the
+     * one-address form (v1.7.0). The client only checks the shape: it hands
+     * the pasted string to the host verbatim, and the host's runtime manager
+     * parses the fragment, strips it from the stored URL and enrolls with the
+     * join token. The browser never re-assembles a credential.
+     * @param {string} value - the pasted 接入地址.
+     * @returns {boolean} whether a non-empty join token is present.
+     */
+    function hasJoinFragment(value) {
+      if (typeof value !== 'string') return false;
+      const at = value.indexOf('#');
+      if (at < 0) return false;
+      /* Same shape the host's runtime manager parses: a fragment that starts
+       * with `join=` and carries a non-empty token. */
+      const fragment = value.slice(at + 1);
+      return fragment.startsWith('join=') && fragment.slice('join='.length).trim() !== '';
+    }
+
+    /**
+     * 「接入」 card (PROTOCOL §10.6, simplified v1.7.0): the whole join flow.
+     *
+     * Not joined: ONE 接入地址 field + 连接. Pasting the address the hub copied
+     * and pressing 连接 is the whole flow; the old 服务器地址 + 加入密钥 pair is
+     * one small 「用加入密钥」 link away for people holding a one-time key.
+     * Joined: one line — 已连接 <address> + the status dot + 断开 — nothing else.
      * @param {object} props - `view` (runtime request state), `onStatus`, `onRetry`.
      * @returns {object} card element.
      */
-    function RuntimeCard(props) {
+    function JoinCard(props) {
       const view = props.view;
       const status = view.data;
       const phase = runtimePhaseOf(status);
       const configured = Boolean(status && status.configured === true);
+      const [mode, setMode] = React.useState('address');
+      const [address, setAddress] = React.useState('');
       const [serverUrl, setServerUrl] = React.useState('');
       const [key, setKey] = React.useState('');
       const [busy, setBusy] = React.useState(false);
@@ -3185,39 +3430,43 @@ window.__ModuleLoader__.load({
         scope.current.abortAll();
       }, []);
 
+      /* Address mode needs a non-empty field; the `#join=` shape is checked on
+       * submit so a pasted plain URL gets an explanation instead of a disabled
+       * button nobody can diagnose. Key mode needs both fields. */
+      const canSubmit = mode === 'address'
+        ? address.trim() !== ''
+        : (serverUrl.trim() !== '' && key.trim() !== '');
+
       const submit = async () => {
-        const url = serverUrl.trim();
-        const enrollmentKey = key.trim();
-        if (url === '' || enrollmentKey === '' || busy) return;
+        if (busy || !canSubmit) return;
+        let payload;
+        let server;
+        if (mode === 'address') {
+          const raw = address.trim();
+          if (!hasJoinFragment(raw)) {
+            setFailure(t('join.invalid'));
+            return;
+          }
+          /* Verbatim: the host owns the fragment (see hasJoinFragment). */
+          payload = { serverUrl: raw };
+          server = raw.split('#')[0];
+        } else {
+          payload = { serverUrl: serverUrl.trim(), key: key.trim() };
+          server = serverUrl.trim();
+        }
         setBusy(true);
         setFailure(null);
         try {
-          const next = await scope.current.run((signal) => api.runtimeConnect(url, enrollmentKey, signal));
+          const next = await scope.current.run((signal) => api.runtimeConnect(payload, signal));
           if (!alive.current) return;
+          setAddress('');
           setServerUrl('');
           setKey('');
-          props.onStatus(next, t('runtime.connected.notice', { server: url }));
+          props.onStatus(next, t('runtime.connected.notice', { server }));
         } catch (error) {
           if (!alive.current) return;
           if (error && error.name === 'AbortError') return;
           setFailure(t('runtime.connectFailed', { message: messageOf(error) }));
-        } finally {
-          if (alive.current) setBusy(false);
-        }
-      };
-
-      const toggle = async (next) => {
-        if (busy) return;
-        setBusy(true);
-        setFailure(null);
-        try {
-          const result = await scope.current.run((signal) => api.runtimeEnable(next, signal));
-          if (!alive.current) return;
-          props.onStatus(result, null);
-        } catch (error) {
-          if (!alive.current) return;
-          if (error && error.name === 'AbortError') return;
-          setFailure(t('runtime.enableFailed', { message: messageOf(error) }));
         } finally {
           if (alive.current) setBusy(false);
         }
@@ -3230,6 +3479,11 @@ window.__ModuleLoader__.load({
         }
       };
 
+      const toggleMode = () => {
+        setFailure(null);
+        setMode((current) => (current === 'address' ? 'key' : 'address'));
+      };
+
       let body;
       if (status === null && (view.phase === 'loading' || view.phase === 'idle')) {
         body = h('div', { className: 'dshc-runtimeMeta' }, h(Spinner), h('span', null, t('runtime.loading')));
@@ -3239,10 +3493,23 @@ window.__ModuleLoader__.load({
             t('error.loadDetail', { title: t('runtime.loadFailed'), message: view.error ? messageOf(view.error) : '' })),
           h('button', { type: 'button', className: 'dshc-ghost', onClick: props.onRetry }, t('retry')));
       } else if (!configured) {
-        body = h('div', null,
-          h('p', { className: 'dshc-hint', style: { margin: '10px 0 0' } }, t('runtime.desc')),
-          h('div', { className: 'dshc-formRow' },
-            h('label', { className: 'dshc-field' },
+        const fields = mode === 'address'
+          ? h('label', { className: 'dshc-field dshc-joinField' },
+            h('span', { className: 'dshc-fieldLabel' }, t('join.addressLabel')),
+            h('input', {
+              className: 'dshc-input',
+              type: 'url',
+              inputMode: 'url',
+              autoComplete: 'off',
+              spellCheck: false,
+              value: address,
+              placeholder: t('join.addressPlaceholder'),
+              disabled: busy,
+              onChange: (event) => setAddress(event.target.value),
+              onKeyDown: enterSubmits,
+            }))
+          : [
+            h('label', { key: 'server', className: 'dshc-field' },
               h('span', { className: 'dshc-fieldLabel' }, t('runtime.serverLabel')),
               h('input', {
                 className: 'dshc-input',
@@ -3256,7 +3523,7 @@ window.__ModuleLoader__.load({
                 onChange: (event) => setServerUrl(event.target.value),
                 onKeyDown: enterSubmits,
               })),
-            h('label', { className: 'dshc-field' },
+            h('label', { key: 'key', className: 'dshc-field' },
               h('span', { className: 'dshc-fieldLabel' }, t('runtime.keyLabel')),
               h('input', {
                 className: 'dshc-input',
@@ -3269,65 +3536,43 @@ window.__ModuleLoader__.load({
                 onChange: (event) => setKey(event.target.value),
                 onKeyDown: enterSubmits,
               })),
+          ];
+        body = h('div', null,
+          h('p', { className: 'dshc-hint dshc-joinHint' },
+            mode === 'address' ? t('join.hint') : t('runtime.hint')),
+          h('div', { className: 'dshc-formRow dshc-joinForm' },
+            fields,
             h('button', {
               type: 'button',
               className: 'dshc-primary dshc-formSubmit',
-              disabled: busy || serverUrl.trim() === '' || key.trim() === '',
+              disabled: busy || !canSubmit,
               onClick: () => { void submit(); },
             }, busy ? t('runtime.connecting') : t('runtime.connect'))),
-          h('p', { className: 'dshc-hint' }, t('runtime.hint')));
+          h('button', {
+            type: 'button',
+            className: 'dshc-joinToggle dshc-joinModeToggle',
+            onClick: toggleMode,
+          }, mode === 'address' ? t('join.keyToggle') : t('join.addressToggle')));
       } else {
-        const name = typeof status.name === 'string' && status.name !== '' ? status.name : t('runtime.nameUnknown');
-        const agentVersion = typeof status.agentVersion === 'string' && status.agentVersion !== ''
-          ? status.agentVersion
-          : '';
-        const capabilities = derivedCapabilityChips(status);
-        const agentParts = [];
-        if (agentVersion !== '') agentParts.push(`agent ${agentVersion}`);
-        if (capabilities.length > 0) agentParts.push(capabilities.map((chip) => chip.label).join(' / '));
-        const drift = status.updateRequired === true || status.drift === true;
-        body = h('div', null,
-          h('div', { className: 'dshc-runtimeName', title: name }, name),
-          h('div', { className: 'dshc-runtimeDirection' }, t('upstream.direction')),
-          agentParts.length > 0
-            ? h('div', { className: 'dshc-runtimeAgent' }, agentParts.join(' · '))
-            : null,
-          h('div', { className: 'dshc-runtimeMeta' },
-            h('span', { className: 'dshc-runtimeMetaKey' }, t('runtime.target')),
-            h('span', { className: 'dshc-runtimeMetaValue' }, typeof status.serverUrl === 'string' ? status.serverUrl : '')),
-          h('div', { className: 'dshc-runtimeActions' },
-            h('div', { className: 'dshc-switchLabel' },
-              h('button', {
-                type: 'button',
-                className: 'dshc-switch',
-                role: 'switch',
-                'aria-checked': status.enabled === true ? 'true' : 'false',
-                'aria-label': t('runtime.enable'),
-                disabled: busy,
-                onClick: () => { void toggle(status.enabled !== true); },
-              }, h('span', { className: 'dshc-switchThumb' })),
-              h('span', null, t('runtime.enable'))),
-            h('button', {
-              type: 'button',
-              className: 'dshc-textBtn',
-              disabled: busy,
-              onClick: () => setConfirming(true),
-            }, t('runtime.disconnect'))),
-          drift ? h('p', { className: 'dshc-driftHint' }, t('drift.runtimeHint')) : null,
-          status.lastError
-            ? h('p', { className: 'dshc-formError', role: 'status' },
-              t('runtime.lastError', { message: String(status.lastError) }))
-            : null);
+        const server = typeof status.serverUrl === 'string' ? status.serverUrl : '';
+        body = h('div', { className: 'dshc-joinLine' },
+          h('span', { className: 'dshc-joinText' },
+            h('span', null, t('join.connected')),
+            h('code', { className: 'dshc-joinAddress', title: server }, server)),
+          h('span', { className: 'dshc-status', 'data-state': phase },
+            h('span', { className: 'dshc-dot', 'data-state': phase, 'aria-hidden': 'true' }),
+            t(`runtime.status.${phase}`)),
+          h('button', {
+            type: 'button',
+            className: 'dshc-textBtn dshc-joinDisconnect',
+            disabled: busy,
+            onClick: () => setConfirming(true),
+          }, t('runtime.disconnect')));
       }
 
-      return h('div', { className: 'dshc-card2' },
+      return h('div', { className: 'dshc-card2 dshc-joinCard' },
         h('div', { className: 'dshc-card2Head' },
-          h('span', { className: 'dshc-card2Title' }, t('upstream.title')),
-          configured
-            ? h('span', { className: 'dshc-status', 'data-state': phase },
-              h('span', { className: 'dshc-dot', 'data-state': phase, 'aria-hidden': 'true' }),
-              t(`runtime.status.${phase}`))
-            : null),
+          h('span', { className: 'dshc-card2Title' }, t('join.title'))),
         body,
         failure !== null ? h('p', { className: 'dshc-formError', role: 'alert' }, failure) : null,
         confirming
@@ -3395,7 +3640,8 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * The page body: the 本机运行时 card, the 已连接的电脑 list, and their states.
+     * The page body: the 接入 card, the 已连接的电脑 list and the collapsed
+     * 高级 block, plus their states.
      * @returns {object} the 电脑 page.
      */
     function ComputersBoard() {
@@ -3589,6 +3835,10 @@ window.__ModuleLoader__.load({
       const canConnect = role !== 'runtime';
       const serverUrls = data && Array.isArray(data.serverUrls) ? data.serverUrls : null;
       const loopbackOnly = data !== null && data.loopbackOnly === true;
+      /* The hub's one copyable string (v1.7.0): `<advertised>#join=<token>`.
+       * It is copied verbatim — the other machine pastes it into 接入. */
+      const fleet = data !== null && data.fleet !== null && typeof data.fleet === 'object' ? data.fleet : null;
+      const joinUrl = fleet !== null && typeof fleet.joinUrl === 'string' ? fleet.joinUrl : '';
 
       let body;
       if (view.phase === 'loading' && computers === null) body = h(Skeleton);
@@ -3601,7 +3851,12 @@ window.__ModuleLoader__.load({
             className: 'dshc-ghost',
             onClick: () => { void load({ initial: true }); },
           }, t('retry')));
-      } else if (computers === null || computers.length === 0) body = h(EmptyState);
+      } else if (computers === null || computers.length === 0) {
+        body = h(EmptyState, {
+          joinUrl,
+          onCliFallback: canConnect ? () => setDialog({ kind: 'connect' }) : undefined,
+        });
+      }
       else {
         body = h('div', { className: 'dshc-list' }, computers.map((computer) => h(ComputerRow, {
           key: computer.id || computer.name,
@@ -3689,38 +3944,12 @@ window.__ModuleLoader__.load({
         h('div', { className: 'dshc-head' },
           h('div', { className: 'dshc-headMain' },
             h('h2', { className: 'dshc-title' }, t('title')),
-            h('p', { className: 'dshc-desc' }, t('description'))),
-          canConnect
-            ? h('button', {
-              type: 'button',
-              className: 'dshc-primary',
-              onClick: () => setDialog({ kind: 'connect' }),
-            }, h(IconPlus, { size: 15 }), t('connect.action'))
-            : null),
+            h('p', { className: 'dshc-desc' }, t('description')))),
         notice !== null ? h(Notice, { kind: notice.kind, text: notice.text }) : null,
-        showComputers
-          ? h(AddressCard, {
-            serverUrls,
-            loopbackOnly,
-            relay,
-            listener: data && data.listener && typeof data.listener === 'object' ? data.listener : null,
-            tunnel: data && data.tunnel && typeof data.tunnel === 'object' ? data.tunnel : null,
-            serverUrl: data && typeof data.serverUrl === 'string' ? data.serverUrl : '',
-          })
-          : null,
-        /* The relay card sits under 本机地址. It stays silent when the host
-         * has no `relay` field (feature absent) and, for hosts that predate
-         * the switch, while the relay is off. */
-        showComputers
-          ? h(RelayCard, {
-            relay,
-            busy: relayBusy,
-            error: relayToggle.error,
-            onToggle: (next) => { void toggleRelay(next); },
-          })
-          : null,
+        /* PRIMARY (v1.7.0): one address joins this machine. Everything else
+         * about being a hub is secondary and lives in 高级 at the bottom. */
         showRuntime
-          ? h(RuntimeCard, {
+          ? h(JoinCard, {
             view: runtime,
             onStatus: handleRuntimeStatus,
             onRetry: () => { void loadRuntime(); },
@@ -3728,8 +3957,32 @@ window.__ModuleLoader__.load({
           : null,
         showComputers
           ? h('div', null,
-            h('div', { className: 'dshc-groupTitle' }, t('computers.group')),
+            h('div', { className: 'dshc-groupHead' },
+              h('div', { className: 'dshc-groupTitle' }, t('computers.group')),
+              joinUrl !== '' ? h(CopyJoinButton, { value: joinUrl }) : null),
             body)
+          : null,
+        /* ADVANCED (v1.7.0): 本机地址 rows, the relay card + switch, the
+         * listener line, the loopback banner and the Tailscale/LAN examples
+         * keep their components untouched, collapsed behind one line. */
+        showComputers && data !== null
+          ? h(AdvancedSection, null,
+            h(AddressCard, {
+              key: 'addresses',
+              serverUrls,
+              loopbackOnly,
+              relay,
+              listener: data && data.listener && typeof data.listener === 'object' ? data.listener : null,
+              tunnel: data && data.tunnel && typeof data.tunnel === 'object' ? data.tunnel : null,
+              serverUrl: data && typeof data.serverUrl === 'string' ? data.serverUrl : '',
+            }),
+            h(RelayCard, {
+              key: 'relay',
+              relay,
+              busy: relayBusy,
+              error: relayToggle.error,
+              onToggle: (next) => { void toggleRelay(next); },
+            }))
           : null,
         layer);
     }

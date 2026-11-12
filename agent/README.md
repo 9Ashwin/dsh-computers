@@ -8,7 +8,7 @@ computer" client — no inbound port, no NAT/firewall change, no daemon port.
 ```
 dsh web  ──SSE (outbound from the Mac)──▶  dsh-computers-agent  ──▶  /bin/sh -lc
                                             │
-                                            ├─ ~/.dsh-computers/config.json  (0600, token)
+                                            ├─ ~/.dsh-computers/config.json  (0600, token + join token)
                                             ├─ ~/.dsh-computers/agent.log    (5 MiB rotate)
                                             └─ launchd / systemd user service
 ```
@@ -43,25 +43,50 @@ The wire contract lives in [`../PROTOCOL.md`](../PROTOCOL.md) (§3 and §6).
 
 ## Install
 
-### Recommended: the one-liner from Settings → 电脑
+### Recommended: paste one address
 
-The server's **Connect computer** dialog generates a command like:
+Since v1.7.0 joining needs **one string**. On the hub, Settings → 电脑 →
+已连接的电脑 → **复制接入地址** copies a capability URL like:
+
+```
+https://dsh-relay.nextai.show/r/hub_xxx#join=dshf_…
+```
+
+Paste that whole string as the server — no `--key`:
+
+```sh
+mkdir -p ~/.dsh-computers
+# the agent is served by the same server — the address without its #join= part
+curl -fsSL 'https://dsh-relay.nextai.show/r/hub_xxx/api/dsh-computers/agent.mjs' -o ~/.dsh-computers/agent.mjs
+node ~/.dsh-computers/agent.mjs enroll --server 'https://dsh-relay.nextai.show/r/hub_xxx#join=dshf_…'
+node ~/.dsh-computers/agent.mjs service install
+node ~/.dsh-computers/agent.mjs service start
+```
+
+The `#join=…` fragment is parsed **locally** and never stored or transmitted as
+part of a URL: `config.json` keeps the fragment-free `serverUrl`, the join token
+is kept next to it (`joinToken`, same `0600` file), and it is sent exactly once —
+in the enroll body. It never rides the SSE stream, a heartbeat or a result POST.
+Because it stays on disk, a later `enroll --server <url>` (no `--key`, no
+fragment) re-registers the machine — useful when its token was revoked on the
+hub — without asking the user to paste the address again.
+
+A successful `enroll` prints `✓ 已连接 <server>，这台电脑现在是 <name>`.
+If the stream probe fails, the credentials are still saved and `run` retries.
+
+### The key form (one-time key)
+
+The pre-1.7 flow is unchanged and still supported: the server's **Connect
+computer** dialog can generate a one-liner with a single-use key:
 
 ```sh
 curl -fsSL 'http://<server>/api/dsh-computers/join.sh?key=dshc_…' | sh
 ```
 
-It downloads this script to `~/.dsh-computers/agent.mjs`, enrolls with the
-one-time key, installs the login service, and starts it.
-
-### Manual
+or manually:
 
 ```sh
-mkdir -p ~/.dsh-computers
-curl -fsSL 'http://<server>/api/dsh-computers/agent.mjs' -o ~/.dsh-computers/agent.mjs
 node ~/.dsh-computers/agent.mjs enroll --server http://<server> --key dshc_…
-node ~/.dsh-computers/agent.mjs service install
-node ~/.dsh-computers/agent.mjs service start
 ```
 
 Enrollment keys are single use and expire (15 minutes by default). When the
@@ -71,12 +96,14 @@ server says the machine is already connected, re-run with `--replace`:
 node ~/.dsh-computers/agent.mjs enroll --server http://<server> --key dshc_… --replace
 ```
 
-> A successful `enroll` prints `✓ 已连接 <server>，这台电脑现在是 <name>`.
-> If the stream probe fails, the credentials are still saved and `run` retries.
+`--key` wins if both credentials are present: a `#join=` fragment on the same
+`--server` is then ignored (and not persisted). With neither a key nor a
+`#join=` fragment, `enroll` exits non-zero and names both forms.
 
 ## Commands
 
 ```
+dsh-computers-agent enroll --server '<url>#join=<token>' [--name <name>] [--workspace-base <path>] [--replace]
 dsh-computers-agent enroll --server <url> --key <key> [--name <name>] [--workspace-base <path>] [--replace]
 dsh-computers-agent run
 dsh-computers-agent service install|uninstall|start|stop|restart|status
@@ -86,7 +113,7 @@ dsh-computers-agent --version | --help
 
 | Command | What it does |
 | --- | --- |
-| `enroll` | POSTs the join key (plus `capabilities` and §11.6 `metadata`) to `/api/dsh-computers/agent/enroll`, saves `{serverUrl, computerId, token, name, enrolledAt, workspaceBase}` to `config.json` (atomic, `0600`), then opens the SSE stream for ~5 s to prove the round trip. `--workspace-base` sets the default working directory (default `$HOME`). Exits non-zero with the server's message on failure. |
+| `enroll` | POSTs the join credential — `{ join }` parsed from `--server '<url>#join=<token>'`, or the one-time `--key` — plus `capabilities` and §11.6 `metadata` to `/api/dsh-computers/agent/enroll`, saves `{serverUrl, computerId, token, name, enrolledAt, workspaceBase, joinToken?}` to `config.json` (atomic, `0600`), then opens the SSE stream for ~5 s to prove the round trip. `--workspace-base` sets the default working directory (default `$HOME`). Exits non-zero with the server's message on failure. |
 | `run` | Foreground worker: one SSE stream to `/api/dsh-computers/agent/events`; executes `exec` events, kills the process group on `cancel`, POSTs results, sends heartbeats, reconnects with jittered 1 s → 30 s backoff. |
 | `status` | Prints server, computer id/name, redacted token (last 6 chars only), config/log paths and service state. Exit `0` when enrolled, `1` when not. |
 | `service` | Login/auto-restart service. See below. |
@@ -124,7 +151,7 @@ this same file and starts an in-process runtime — no CLI, no service, no
 import { startRuntime } from '../agent/dsh-computers-agent.mjs'
 
 const runtime = startRuntime({
-  serverUrl: 'https://dsh.example.com',
+  serverUrl: 'https://dsh.example.com',   // or '<url>#join=<token>' (one-address join)
   token: 'dshc_…',            // from the hub's enroll response
   computerId: 'cmp_…',
   name: 'Desk Mac mini',      // optional display name
@@ -132,11 +159,23 @@ const runtime = startRuntime({
   heartbeatMs: 20000,         // optional; `hello` overrides it
   log: (level, message) => {}, // 'info' | 'warn' | 'error'
   onState: (state) => {},      // connect/disconnect/error/stop transitions
+  onEnrolled: (info) => {},    // optional; see the one-address form below
 })
 
 runtime.status() // synchronous snapshot incl. mode, capabilities, caps, features (see below)
 await runtime.stop() // idempotent: aborts SSE, SIGKILLs children, awaits the loop
 ```
+
+**One-address form (v1.7.0).** The desktop plugin hands over whatever the user
+pasted, so `serverUrl` may be the capability URL `'<url>#join=<token>'`. In that
+form `token`/`computerId` may be omitted: the runtime enrolls once with
+`{ join }`, adopts the returned credentials **in memory**, strips the fragment
+from `status().serverUrl`, and calls `onEnrolled({ serverUrl, computerId, token,
+name })` so the embedder can persist them (the embedded runtime still never
+writes `~/.dsh-computers`). When `token` + `computerId` are also passed they
+win and the fragment is ignored, exactly like `--key` on the CLI. A rejected
+join token ends the loop like `invalid-token` (`lastError: 'invalid-join'`,
+`exitCode: 1`); transport failures are retried with the normal backoff.
 
 `status()` returns
 `{ running, connected, serverUrl, computerId, name, heartbeatMs, since, lastConnectedAt, lastError, attempts, exitCode }`
@@ -271,7 +310,7 @@ and the last advertised `features`.
 
 | Path | Purpose |
 | --- | --- |
-| `${DSH_COMPUTERS_HOME:-$HOME/.dsh-computers}/config.json` | Credentials + `workspaceBase`, mode `0600`, atomic tmp+rename |
+| `${DSH_COMPUTERS_HOME:-$HOME/.dsh-computers}/config.json` | Credentials + `workspaceBase` + the fleet `joinToken` from a one-address enroll, mode `0600`, atomic tmp+rename |
 | `${DSH_COMPUTERS_HOME}/agent.log` | Append-only log, rotates at 5 MiB (keeps one `agent.log.1`) |
 | `~/Library/LaunchAgents/com.dsh.computers.agent.plist` | macOS service unit |
 | `~/.config/systemd/user/dsh-computers-agent.service` | Linux service unit |
@@ -290,6 +329,12 @@ Environment variables:
 - **Token**: generated by the server, stored only on this machine in a `0600`
   file, sent as `authorization: Bearer …` on every request. It is never printed,
   never logged, and `status` shows only its last 6 characters.
+- **Join address**: `<url>#join=<token>` is a capability URL — whoever holds it
+  can join machines. The token lives in the fragment, which browsers and
+  proxies never send to the server, so it stays out of access logs. The agent
+  parses it locally, stores it only in the `0600` `config.json` (`joinToken`),
+  keeps `serverUrl` fragment-free, and sends it exactly once, in the enroll
+  body — never on the stream, in a heartbeat or in a result POST.
 - **Outbound only**: enroll, SSE stream, result POSTs, heartbeats, chunk/fs
   result POSTs. No listener.
 - **Remote files**: when the server advertises the `fs` feature it can read and
@@ -326,7 +371,8 @@ removed).
 | `run` exits with `✗ 服务器拒绝了已保存的凭据（HTTP 401 invalid-token）` | The server explicitly answered JSON `{"error":"invalid-token"}`: the token was revoked or the server state was reset. Generate a new key and `enroll` again. This is the one error the agent does **not** retry. |
 | A bare `401` / `403` / `404` / `503` while connecting | That is **not** a token rejection (plugin reloading, generic `/api` gateway fence, proxy). The agent logs a throttled `⚠ 服务器暂时不可用…` at most once a minute and keeps retrying — machines survive plugin disable/enable and upgrades. |
 | `status` says 未注册, exit 1 | No `config.json`; enroll first. |
-| `注册失败（invalid-key / key-expired / key-used）` | The one-time key is wrong, older than 15 min, or already used — create a new one in Settings → 连接电脑. |
+| `注册失败（invalid-key / key-expired / key-used）` | The one-time key is wrong, older than 15 min, or already used — create a new one in Settings → 连接电脑, or use the one-address form instead. |
+| `注册失败（invalid-join）` | The hub no longer accepts that `#join=` token (the address was regenerated, or it came from another server). Copy a fresh 接入地址 from Settings → 电脑 and `enroll --server '<url>#join=<token>'` again. The token is long-lived, so a rejected one is not retried. |
 | Service not running (`service status`) | `service start`, then check `~/.dsh-computers/agent.log`. `KeepAlive` restarts it after crashes with a 10 s throttle. |
 | `launchctl bootstrap` fails (`5: Input/output error` / domain unsupported) | The `gui/<uid>` domain is unavailable — usually an SSH session without a GUI login. The agent falls back to `launchctl load -w`; if both fail, run `service start` once from a logged-in desktop terminal. |
 | `✗ 需要 Node.js >= 22` | Upgrade Node; the script relies on global `fetch` and modern ESM. |
@@ -347,6 +393,14 @@ removed).
 - **Heartbeats** call `POST /api/dsh-computers/agent/heartbeat` every
   `heartbeatMs` (from `hello`). This is belt-and-braces next to the open
   stream and also picks up renames echoed by the server.
+- **One-address join (v1.7.0).** `--server '<url>#join=<token>'` (or the same
+  string as `startRuntime({ serverUrl })`) parses the fragment locally, sends
+  `{ join: '<token>' }` instead of `{ key }`, and stores the fragment-free URL.
+  The join token is persisted in the same `0600` `config.json` so a later
+  `enroll --server <url>` can re-register; it is sent only on enroll. `--key`
+  still works and wins when both are present. A rejected join is fatal on the
+  enroll side (401 `invalid-join`) but transient join failures (network, 5xx)
+  are retried by the embedded runtime with the normal backoff.
 - **`enroll --replace`** sends `"replace": true` in the enroll body (the host
   also keys replacement off the pending key). It does not change local
   behaviour otherwise.
@@ -377,7 +431,13 @@ node agent/test/mock-server.mjs --port 0 --verbose
 ```
 
 Covered by the suite: enroll happy path / invalid / expired / used key,
-`--replace` re-enroll, token redaction, `0600` + atomic config, SSE connect →
+one-address `#join=` enroll (posts `{ join }`, stores a fragment-free
+`serverUrl` + `joinToken`, never prints or streams the token), `--key` wins
+over a fragment, the "neither form" error, a rejected join (401 `invalid-join`)
+failing with the server message, reuse of the saved join token for a later
+`enroll --server`, `startRuntime({ serverUrl: '<url>#join=…' })` enrolling once
+and reporting credentials through `onEnrolled`, `--replace` re-enroll, token
+redaction, `0600` + atomic config, SSE connect →
 exec → result, exit codes + stdout/stderr, default and explicit `cwd`,
 environment inheritance, timeout process-group kill, truncation at 1 MiB,
 cancel process-group kill, reconnect after a dropped stream, heartbeats,

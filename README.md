@@ -46,14 +46,14 @@ dsh plugin install github:9Ashwin/dsh-computers
 **npm 安装**：插件市场 → 已安装 → 「检查更新」即可，或者在 CLI 里装具体版本：
 
 ```bash
-dsh plugin install dsh-computers@1.6.1
+dsh plugin install dsh-computers@1.7.0
 ```
 
 **GitHub 安装**：profile 里是按 spec + commit 固定的（`github:user/repo` 或 `#v1.0.2`），所以
 
 - 用**同一个 spec** 再装一次只会得到 `already-installed`（这就是「再安装没法更新」的原因）；
 - 装 **tag** 会被冻住，市场永远检测不到更新；装**分支**（不带 `#`）才能被市场「检查更新」发现新提交；
-- 手动升级到某个版本要**换 spec**：`dsh plugin install github:9Ashwin/dsh-computers#v1.6.1`。
+- 手动升级到某个版本要**换 spec**：`dsh plugin install github:9Ashwin/dsh-computers#v1.7.0`。
 
 > 更新完记得重启 Host 并刷新页面，具体见 [docs/deploy.md](./docs/deploy.md)。
 
@@ -130,6 +130,21 @@ tail -f ~/.dsh-computers/agent.log
 - **流式**：长命令的分块输出会随帧回传（含心跳），后台任务的输出可在 DSH 的任务里查看。
 - **超时转后台**：前台命令超时默认不杀（`promoteOnTimeout: true`），而是转入后台任务并返回 jobId，之后用内置的 `job_output` / `job_kill` 接管。
 - **激活时机**：新电脑要等 agent 首次建流后才出现在列表（从生成密钥到真正连上之间，弹窗会一直显示"等待电脑连接…"）。
+
+## 3.0 接入：填一个地址（v1.7.0）
+
+主控那台 设置 → 电脑 → **复制接入地址**，得到一串：
+
+```
+https://dsh.nextai.show#join=dshf_…
+```
+
+在另一台机器 设置 → 电脑 → **接入地址** 里粘贴 → 连接，完成。不需要生成密钥、不需要记 15 分钟有效期。
+
+- `#` 之后是 fragment，代理和浏览器都不会发给服务器，token 不进日志
+- 地址是长期凭据，可随时「重新生成」（旧地址立刻失效，已接入的机器不受影响）
+- 一次性密钥仍保留（「用加入密钥」里），适合"用完即废"
+- 详细说明见 [docs/onboarding.md](./docs/onboarding.md)
 
 ## 3.1 能力位与执行终态
 

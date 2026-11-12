@@ -842,3 +842,34 @@ v1.6.1 起另有 `enabledSource: 'ui' | 'config'` 与 `canEnable: boolean`（未
 不能是请求来源地址：经中继转发时 bridge 会强制 `Host: 127.0.0.1:<port>`，回显它会让那台机器
 把自己的回环地址存成上游（v1.6.0 的真实故障）。启用且连接成功时，
 `serverUrls` 首位出现 `{ "kind": "relay", "label": "中继" }` 候选并被推荐。
+
+## 13 接入地址（v1.7.0）
+
+一个地址完成接入，不再需要一次性密钥。
+
+### 13.1 地址形态
+
+```
+<advertisedBase>#join=<fleetToken>
+例：https://dsh.nextai.show#join=dshf_<32 hex>
+    https://dsh-relay.nextai.show/r/hub_xxx#join=dshf_<32 hex>
+```
+
+`#` 之后是 fragment：**浏览器与代理都不会把它发到服务器**，token 不会进访问日志。
+`fleetToken` 持久化在 `${stateDir}/fleet.json`（0600），与 `state.json` / `relay.json` 分离——
+重置电脑列表不会让已发出的接入地址失效。
+
+### 13.2 端点
+
+| 路由 | 语义 |
+| --- | --- |
+| `GET /state` | 新增 `fleet: { joinUrl, hasToken }`（`joinUrl` 就是上面那串） |
+| `POST /agent/enroll` | `{ key }` 与 `{ join }` 二选一；**两者都有时 key 优先**；join 错误 → `401 invalid-join` |
+| `POST /fleet/rotate` | 重新生成 token，旧地址立刻失效（已接入的机器不受影响） |
+| `POST /runtime/connect` | `{ serverUrl }` 里带 `#join=` 时可省略 `key`；存入的 URL 永远不含 fragment |
+
+### 13.3 兼容
+
+- 一次性密钥路径完全保留（15 分钟、一次一用），适合"用完即废"的场景
+- 老 agent（不认 `#join=`）不受影响：它们只会用 `--key`
+- `role` 仍可配置，但 `both` 是默认值，日常无需写配置

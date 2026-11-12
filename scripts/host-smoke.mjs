@@ -23,7 +23,12 @@
  * and the `relay` address candidate (first and recommended only while up); plus
  * the live relay switch (v1.6.1): POST /relay/enable persisting a runtime
  * override, live dial/dispose without a reload, the override surviving a fresh
- * manager, and canEnable/rejection when no relay.url is configured.
+ * manager, and canEnable/rejection when no relay.url is configured; plus the
+ * one-address join (v1.7.0): fleet token persistence in its own 0600
+ * fleet.json, `/state.fleet` publishing the token as a URL fragment only, a
+ * join-token enroll answering the advertised serverUrl, rotation invalidating
+ * the old token while keeping the relay hubId, and runtime/connect accepting
+ * the pasted `…#join=` string.
  */
 
 import assert from 'node:assert/strict'
@@ -47,6 +52,10 @@ import {
 import { createTunnel } from '../lib/tunnel.js'
 import { createRuntimeStatusRoutes } from '../lib/routes.js'
 import { deriveRelayPublicUrl, mintHubId, normalizeRelayUrl } from '../lib/relay-manager.js'
+import {
+  FLEET_IDENTITY_VERSION, ensureFleetIdentity, fleetIdentityFile, isJoinToken, mintJoinToken,
+  readFleetIdentity, rotateFleetIdentity, writeFleetIdentity,
+} from '../lib/fleet-identity.js'
 import * as contracts from '../lib/contracts.js'
 import {
   DENY_CODES, OPERATIONS, OPERATION_REQUIREMENTS, TOOL_OPERATIONS,
@@ -1299,6 +1308,8 @@ async function createFakeHub() {
     validKey: mintSecret(),
     expiredKey: mintSecret(),
     usedKey: mintSecret(),
+    // v1.7.0: the fleet token a pasted join address carries.
+    joinToken: mintJoinToken(),
     issuedToken: null,
     computerId: newComputerId(),
     name: 'smoke-runtime',
@@ -1332,7 +1343,8 @@ async function createFakeHub() {
         return
       }
       state.enrollBodies.push(body)
-      if (body.key === state.validKey) {
+      // v1.7.0: the one-address form answers exactly like a keyed enroll.
+      if (body.join === state.joinToken || body.key === state.validKey) {
         if (state.issuedToken === null) state.issuedToken = mintSecret()
         hubJson(res, 200, {
           computerId: state.computerId,
@@ -1348,6 +1360,10 @@ async function createFakeHub() {
       }
       if (body.key === state.usedKey) {
         hubJson(res, 409, { error: 'key-used', message: 'this smoke key was already used' })
+        return
+      }
+      if (typeof body.join === 'string' && body.join !== '') {
+        hubJson(res, 401, { error: 'invalid-join', message: 'unknown smoke join token' })
         return
       }
       hubJson(res, 401, { error: 'invalid-key', message: 'unknown smoke key' })
@@ -4645,6 +4661,22 @@ function readRelayDoc(dir) {
   return JSON.parse(readFileSync(file, 'utf8'))
 }
 
+/** Read fleet.json, asserting it exists and is 0600 (the join credential document). */
+function readFleetDoc(dir) {
+  const file = fleetIdentityFile(dir)
+  assert.ok(existsSync(file), 'fleet.json must exist')
+  const mode = statSync(file).mode & 0o777
+  assert.equal(mode, 0o600, `fleet.json must be 0600, got 0${mode.toString(8)}`)
+  return JSON.parse(readFileSync(file, 'utf8'))
+}
+
+/** The fleet token carried as the fragment of one published join address. */
+function joinTokenOf(joinUrl) {
+  const parsed = new URL(joinUrl)
+  assert.equal(parsed.hash.startsWith('#join='), true, `the fleet token must be the fragment: ${joinUrl}`)
+  return parsed.hash.slice('#join='.length)
+}
+
 /** GET /state and return only the relay block. */
 async function relayOf(origin) {
   return (await call(origin, `${API}/state`)).data.relay
@@ -5219,6 +5251,295 @@ async function phaseT(root) {
   })
 }
 
+// ---------------------------------------------------------------------------
+// Phase U — v1.7.0 one-address join: fleet identity, join enroll, rotate
+// ---------------------------------------------------------------------------
+
+async function phaseU(root) {
+  await check('fleet: token minting, 0600 persistence, rotation and corrupt tolerance', async () => {
+    const dir = join(root, 'u-identity')
+    assert.equal(fleetIdentityFile(dir), join(dir, 'fleet.json'))
+    assert.equal(readFleetIdentity(dir), null, 'a missing document reads as no identity')
+    const identity = ensureFleetIdentity(dir)
+    assert.match(identity.joinToken, /^dshf_[0-9a-f]{32}$/)
+    assert.ok(isJoinToken(identity.joinToken))
+    assert.equal(isJoinToken(`dshf_${'A'.repeat(32)}`), false, 'uppercase hex is not a minted token')
+    assert.equal(isJoinToken(`dshc_${'a'.repeat(32)}`), false, 'the enrollment-key prefix is not a fleet token')
+    assert.equal(isJoinToken(null), false)
+    assert.ok(Number.isFinite(Date.parse(identity.createdAt)))
+    assert.deepEqual(readFleetDoc(dir), {
+      version: FLEET_IDENTITY_VERSION,
+      joinToken: identity.joinToken,
+      createdAt: identity.createdAt,
+    })
+    // Idempotent: a second mount reuses the persisted token.
+    assert.deepEqual(ensureFleetIdentity(dir), identity)
+    assert.equal(readFleetIdentity(dir).joinToken, identity.joinToken)
+    // Rotation mints a new token and rewrites the same 0600 document.
+    const rotated = rotateFleetIdentity(dir)
+    assert.notEqual(rotated.joinToken, identity.joinToken)
+    assert.equal(isJoinToken(rotated.joinToken), true)
+    assert.equal(readFleetDoc(dir).joinToken, rotated.joinToken)
+    assert.equal(readFleetIdentity(dir).joinToken, rotated.joinToken)
+    // A bad token is never written, and a document with one is not trusted.
+    assert.equal(writeFleetIdentity(dir, { joinToken: 'nope' }), false)
+    assert.equal(readFleetDoc(dir).joinToken, rotated.joinToken, 'a rejected write changes nothing')
+    // A corrupt document is moved aside and a fresh token is minted.
+    writeFileSync(fleetIdentityFile(dir), '{not json', { mode: 0o600 })
+    assert.equal(readFleetIdentity(dir), null)
+    assert.equal(readdirSync(dir).filter((name) => name.startsWith('fleet.json.corrupt-')).length, 1, 'the corrupt file is moved aside')
+    const reminted = ensureFleetIdentity(dir)
+    assert.equal(isJoinToken(reminted.joinToken), true)
+    assert.equal(readFleetDoc(dir).joinToken, reminted.joinToken)
+    writeFileSync(fleetIdentityFile(dir), `${JSON.stringify({ version: 1, joinToken: 'nope' })}\n`)
+    assert.equal(readFleetIdentity(dir), null, 'a bogus token is treated as absent')
+  })
+
+  const publicUrl = 'https://hub.example.com'
+  const dir = join(root, 'u-join')
+  const app = await mount({ ...FAST_CONFIG, stateDir: dir, publicUrl })
+  const sseClients = []
+  try {
+    const origin = app.origin
+
+    await check('fleet: /state publishes the join URL with the token as a fragment only', async () => {
+      const state = (await call(origin, `${API}/state`)).data
+      assert.equal(state.fleet.hasToken, true)
+      const token = readFleetDoc(dir).joinToken
+      assert.equal(state.fleet.joinUrl, `${publicUrl}#join=${token}`)
+      // A fragment is never sent to a server: no path or query carries the token.
+      const parsed = new URL(state.fleet.joinUrl)
+      assert.equal(parsed.origin, publicUrl)
+      assert.equal(parsed.pathname, '/')
+      assert.equal(parsed.search, '')
+      assert.equal(parsed.hash, `#join=${token}`)
+      const beforeFragment = state.fleet.joinUrl.slice(0, state.fleet.joinUrl.indexOf('#'))
+      assert.equal(beforeFragment, publicUrl)
+      assert.equal(beforeFragment.includes('?'), false)
+      // The address is computed from the SAME advertised base enroll answers.
+      assert.equal(state.serverUrl, publicUrl)
+      // The identity is on disk before it is published.
+      assert.ok(Number.isFinite(Date.parse(readFleetDoc(dir).createdAt)))
+    })
+
+    await check('fleet: a pasted join token enrolls and answers the advertised address', async () => {
+      const token = joinTokenOf((await call(origin, `${API}/state`)).data.fleet.joinUrl)
+      const enrolled = await call(origin, `${API}/agent/enroll`, {
+        method: 'POST',
+        body: {
+          join: token,
+          agentVersion: PLUGIN_VERSION,
+          machine: { hostname: 'fleet-mac.local', name: 'Fleet Mac', os: 'darwin', arch: 'arm64' },
+        },
+      })
+      assert.equal(enrolled.status, 200)
+      assert.match(enrolled.data.computerId, /^cmp_[0-9a-f]{12}$/)
+      assert.match(enrolled.data.token, /^dshc_[A-Za-z0-9_-]{43}$/)
+      assert.equal(enrolled.data.name, 'Fleet Mac')
+      assert.equal(enrolled.data.serverUrl, publicUrl, 'enroll must answer the ADVERTISED address, not the request origin')
+      app.fleetComputerId = enrolled.data.computerId
+      // §11.6.4 parity with the key path: hidden until the first stream.
+      assert.deepEqual((await call(origin, `${API}/state`)).data.computers, [])
+      // The issued bearer token opens the stream and activates the record.
+      const sse = await openSse(origin, `${API}/agent/events`, { authorization: `Bearer ${enrolled.data.token}` })
+      sseClients.push(sse)
+      const hello = await sse.nextEvent('hello', 2000)
+      assert.equal(hello.data.computerId, enrolled.data.computerId)
+      sse.close()
+      const listed = await waitFor(
+        async () => (await call(origin, `${API}/state`)).data,
+        (value) => value.computers.some((computer) => computer.id === enrolled.data.computerId),
+        3000,
+        'the join-enrolled computer to appear',
+      )
+      assert.equal(listed.computers.find((computer) => computer.id === enrolled.data.computerId).name, 'Fleet Mac')
+      // Re-pasting the same address replaces the record in place (no duplicate):
+      // for a join the hostname/name IS the machine's identity.
+      const again = await call(origin, `${API}/agent/enroll`, {
+        method: 'POST',
+        body: { join: token, machine: { hostname: 'fleet-mac.local' } },
+      })
+      assert.equal(again.status, 200)
+      assert.equal(again.data.computerId, enrolled.data.computerId)
+      assert.notEqual(again.data.token, enrolled.data.token, 'the bearer token is rotated')
+      assert.equal((await call(origin, `${API}/state`)).data.computers.length, 1, 'a re-enroll never duplicates the record')
+    })
+
+    await check('fleet: a wrong join is 401 invalid-join and creates nothing; the key path is unchanged', async () => {
+      const stateFile = join(dir, 'state.json')
+      const before = JSON.parse(readFileSync(stateFile, 'utf8')).computers.length
+      const wrongForms = [
+        mintJoinToken(), // well-formed, not the live token
+        'not-a-token', // garbage
+        `https://hub.example.com#join=${mintJoinToken()}`, // the whole address instead of the token
+      ]
+      for (const join of wrongForms) {
+        const response = await call(origin, `${API}/agent/enroll`, {
+          method: 'POST',
+          body: { join, machine: { hostname: 'evil.local' } },
+        })
+        assert.equal(response.status, 401, `join ${join} must be refused`)
+        assert.equal(response.data.error, 'invalid-join')
+      }
+      const missing = await call(origin, `${API}/agent/enroll`, { method: 'POST', body: { machine: { hostname: 'evil.local' } } })
+      assert.equal(missing.status, 400)
+      assert.equal(missing.data.error, 'bad-request')
+      assert.match(missing.data.message, /key or join/)
+      const after = JSON.parse(readFileSync(stateFile, 'utf8'))
+      assert.equal(after.computers.length, before, 'a refused join creates no computer record')
+      assert.equal(after.computers.some((computer) => computer.hostname === 'evil.local'), false)
+
+      // The one-time key still works exactly as before (PROTOCOL §3.1).
+      const minted = await call(origin, `${API}/keys`, { method: 'POST', body: { os: 'linux' } })
+      assert.equal(minted.status, 200)
+      const keyed = await call(origin, `${API}/agent/enroll`, {
+        method: 'POST',
+        body: { key: minted.data.key, machine: { hostname: 'key-mac.local' } },
+      })
+      assert.equal(keyed.status, 200)
+      assert.equal(keyed.data.serverUrl, publicUrl)
+      assert.notEqual(keyed.data.computerId, app.fleetComputerId)
+      // Both forms in one body: the key wins (an installer that forwards the
+      // pasted address must not change the key path's semantics).
+      const both = await call(origin, `${API}/agent/enroll`, {
+        method: 'POST',
+        body: { key: minted.data.key, join: `dshf_${'0'.repeat(32)}`, machine: { hostname: 'key-mac.local' } },
+      })
+      assert.equal(both.status, 200, 'a present key wins over the join token')
+      assert.equal(both.data.computerId, keyed.data.computerId, 'the pending key re-enrolls its own record')
+    })
+
+    await check('fleet: rotate is gated, mints a new token and invalidates the old one', async () => {
+      const oldToken = joinTokenOf((await call(origin, `${API}/state`)).data.fleet.joinUrl)
+      // The browser gate runs before the token is minted.
+      app.fake.setGate({ requestRejection: (req) => (req.headers['x-smoke-refuse'] === '1' ? 403 : undefined) })
+      const refused = await call(origin, `${API}/fleet/rotate`, {
+        method: 'POST', body: {}, headers: { 'x-smoke-refuse': '1' },
+      })
+      assert.equal(refused.status, 403)
+      assert.equal(refused.data.error, 'unadmitted')
+      app.fake.setGate(undefined)
+      assert.equal(joinTokenOf((await call(origin, `${API}/state`)).data.fleet.joinUrl), oldToken, 'a refused rotate changes nothing')
+      const wrongMethod = await call(origin, `${API}/fleet/rotate`, { method: 'GET' })
+      assert.equal(wrongMethod.status, 405)
+
+      const rotated = await call(origin, `${API}/fleet/rotate`, { method: 'POST', body: {} })
+      assert.equal(rotated.status, 200)
+      assert.equal(rotated.data.hasToken, true)
+      const newToken = joinTokenOf(rotated.data.joinUrl)
+      assert.notEqual(newToken, oldToken)
+      assert.equal(rotated.data.joinUrl, `${publicUrl}#join=${newToken}`)
+      assert.equal(readFleetDoc(dir).joinToken, newToken, 'the new token is persisted before it is answered')
+      // The old address stops working immediately; the new one enrolls.
+      const stale = await call(origin, `${API}/agent/enroll`, { method: 'POST', body: { join: oldToken, machine: { hostname: 'stale.local' } } })
+      assert.equal(stale.status, 401)
+      assert.equal(stale.data.error, 'invalid-join')
+      const fresh = await call(origin, `${API}/agent/enroll`, { method: 'POST', body: { join: newToken, machine: { hostname: 'rotated.local' } } })
+      assert.equal(fresh.status, 200)
+    })
+  } finally {
+    for (const client of sseClients) client.close()
+    await app.close()
+  }
+
+  await check('fleet: fleet.json survives a state.json reset and rotation keeps the relay hubId', async () => {
+    const resetDir = join(root, 'u-reset')
+    const resetUrl = 'https://hub2.example.com'
+    const hubId = 'hub_smoke_identity'
+    mkdirSync(resetDir, { recursive: true })
+    writeFileSync(join(resetDir, 'relay.json'), `${JSON.stringify({
+      version: 1, hubId, createdAt: iso(Date.now()), enabled: null,
+    })}\n`, { mode: 0o600 })
+    let token = ''
+    const first = await mount({ ...FAST_CONFIG, stateDir: resetDir, publicUrl: resetUrl })
+    try {
+      const state = (await call(first.origin, `${API}/state`)).data
+      token = joinTokenOf(state.fleet.joinUrl)
+      assert.equal(state.relay.hubId, hubId, 'the persisted relay identity is served')
+      const enrolled = await call(first.origin, `${API}/agent/enroll`, {
+        method: 'POST', body: { join: token, machine: { hostname: 'reset.local' } },
+      })
+      assert.equal(enrolled.status, 200)
+      const rotated = await call(first.origin, `${API}/fleet/rotate`, { method: 'POST', body: {} })
+      assert.equal(rotated.status, 200)
+      assert.equal((await relayOf(first.origin)).hubId, hubId, 'rotating the join token must not change the hubId')
+      token = joinTokenOf(rotated.data.joinUrl)
+      assert.equal(readFleetDoc(resetDir).joinToken, token)
+    } finally {
+      await first.close()
+    }
+    // A routine registry reset: delete state.json, keep every sidecar document.
+    rmSync(join(resetDir, 'state.json'))
+    const second = await mount({ ...FAST_CONFIG, stateDir: resetDir, publicUrl: resetUrl })
+    try {
+      const state = (await call(second.origin, `${API}/state`)).data
+      assert.equal(joinTokenOf(state.fleet.joinUrl), token, 'resetting state.json must not rotate the join address')
+      assert.equal(state.relay.hubId, hubId, 'and it must not change the hubId either')
+      assert.deepEqual(state.computers, [], 'the reset registry is empty')
+      const reenrolled = await call(second.origin, `${API}/agent/enroll`, {
+        method: 'POST', body: { join: token, machine: { hostname: 'reset.local' } },
+      })
+      assert.equal(reenrolled.status, 200, 'the address handed out before the reset still works')
+    } finally {
+      await second.close()
+    }
+  })
+
+  await check('runtime: the one-address form connects with { join } and stores no fragment', async () => {
+    const runtimeDir = join(root, 'u-runtime')
+    const runtimeFile = join(runtimeDir, 'runtime.json')
+    const hub = await createFakeHub()
+    const app = await mount({ ...FAST_CONFIG, stateDir: runtimeDir, role: 'runtime' })
+    // A second, untouched state directory proves a refused join persists nothing.
+    const wrongDir = join(root, 'u-runtime-wrong')
+    const wrongApp = await mount({ ...FAST_CONFIG, stateDir: wrongDir, role: 'runtime' })
+    try {
+      const pasted = `${hub.origin}#join=${hub.state.joinToken}`
+      const connected = await call(app.origin, `${API}/runtime/connect`, { method: 'POST', body: { serverUrl: pasted } })
+      assert.equal(connected.status, 200)
+      assert.equal(connected.data.configured, true)
+      assert.equal(connected.data.enabled, true)
+      assert.equal(connected.data.serverUrl, hub.origin, 'the stored serverUrl has no fragment')
+      const enroll = hub.state.enrollBodies.at(-1)
+      assert.equal(enroll.join, hub.state.joinToken, 'the enroll body carries the join token')
+      assert.equal('key' in enroll, false, 'no key is sent on the join path')
+      assert.equal(statSync(runtimeFile).mode & 0o777, 0o600, 'runtime.json stays 0600')
+      const doc = JSON.parse(readFileSync(runtimeFile, 'utf8'))
+      assert.equal(doc.serverUrl, hub.origin)
+      assert.equal(doc.serverUrl.includes('#'), false, 'the fragment is never persisted')
+      assert.equal(doc.joinToken, hub.state.joinToken, 'the join token is kept for a later re-enroll')
+
+      // The key path is unchanged, and a present key wins over a fragment.
+      const keyed = await call(app.origin, `${API}/runtime/connect`, {
+        method: 'POST',
+        body: { serverUrl: pasted, key: hub.state.validKey },
+      })
+      assert.equal(keyed.status, 200)
+      const keyedEnroll = hub.state.enrollBodies.at(-1)
+      assert.equal(keyedEnroll.key, hub.state.validKey)
+      assert.equal('join' in keyedEnroll, false, 'a present key wins over the fragment')
+
+      // Neither form is the only 400, and it names both forms.
+      const neither = await call(app.origin, `${API}/runtime/connect`, { method: 'POST', body: { serverUrl: hub.origin } })
+      assert.equal(neither.status, 400)
+      assert.match(neither.data.message, /join address.*enrollment key/)
+
+      // A wrong join is the hub's 401 invalid-join, and nothing is persisted.
+      const wrong = await call(wrongApp.origin, `${API}/runtime/connect`, {
+        method: 'POST',
+        body: { serverUrl: `${hub.origin}#join=${mintJoinToken()}` },
+      })
+      assert.equal(wrong.status, 401)
+      assert.equal(wrong.data.error, 'invalid-join')
+      assert.equal(existsSync(join(wrongDir, 'runtime.json')), false, 'a refused join persists nothing')
+    } finally {
+      await app.close()
+      await wrongApp.close()
+      await hub.close()
+    }
+  })
+}
+
 watchdog.unref()
 
 const root = mkdtempSync(join(tmpdir(), 'dshc-smoke-'))
@@ -5244,6 +5565,7 @@ try {
   await phaseR(root)
   await phaseS(root)
   await phaseT(root)
+  await phaseU(root)
 } finally {
   rmSync(root, { recursive: true, force: true })
   clearTimeout(watchdog)
