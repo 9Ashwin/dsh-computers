@@ -735,3 +735,36 @@ stream frames, background adoption, update-required) without copying any of its 
 6. **Revoke kicks the stream.** Deleting a computer ends its live SSE stream in the same
    request and invalidates the token, so a stale agent gets `401 invalid-token` and stops
    retrying until re-enrolled.
+
+## 11.7 在线判定（应用层 lease）与路由健康
+
+### 在线 = 有 lease，不是"有连接"
+
+socket 保持 OPEN 不能证明对端活着（OS 挂起、代理假死、半开 TCP 都是这样）。所以：
+
+| 项 | 值 |
+| --- | --- |
+| `LEASE_MS` | 45 000 |
+| `LEASE_CHECK_MS` | 10 000 |
+| 刷新条件 | **只有已校验的入站帧**：`hello`、heartbeat、chunk、result、fs result |
+| 过期后果 | 10s 扫描把该电脑判为离线、关闭旧流、在飞执行以 `offline` 收尾 |
+| `/state` 字段 | `leaseExpiresAt`（离线时为 `null`） |
+
+agent 侧配合：心跳 10s，连续 2 次无响应即判定连接死亡并重连（`min(1500·2^n, 30000)`，±20% 抖动，稳定 30s 后计数归零）。
+
+### 路由健康（`serverUrls[].health`）
+
+每个地址候选带运行时健康：
+
+```json
+{ "state": "unknown|ok|failed", "checkedAt": 0, "failures": 0, "cooldownUntil": 0 }
+```
+
+- 探针：`GET <url>/api/dsh-computers/health`，1.5s 预算，后台执行，不阻塞浏览器请求；
+- 失败 → `state:"failed"` + 60s 冷却，冷却期内**不重复探测**；
+- 冷却到期后重试；成功清零；
+- `recommended` 只从"未冷却且可达"的候选里选，所以坏掉的路由会立刻让位给下一个；
+- 候选数组**保持 kind 顺序**（公网 → 转发 → Tailscale → 局域网 → 本机名 → 本机），只有选择会变；
+- 身份锚定电脑记录（`computerId` + token），与地址无关。
+
+## 12
