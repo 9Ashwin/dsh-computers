@@ -37,7 +37,10 @@ import { normalizeState, prunePendingKeys } from '../lib/state.js'
 import { collectServerUrls, resolveAddressPayload } from '../lib/addresses.js'
 import { createTunnel } from '../lib/tunnel.js'
 import * as contracts from '../lib/contracts.js'
-import { capsOf, legacyCaps, normalizeCaps, supports } from '../lib/policy.js'
+import {
+  DENY_CODES, OPERATIONS, OPERATION_REQUIREMENTS, TOOL_OPERATIONS,
+  assertOperationTable, assertToolsExhaustive, capsOf, createPolicy, legacyCaps, normalizeCaps, supports,
+} from '../lib/policy.js'
 
 const ROOT = new URL('../', import.meta.url).pathname
 const API = '/api/dsh-computers'
@@ -3949,6 +3952,244 @@ async function phaseO(root) {
 }
 
 // ---------------------------------------------------------------------------
+// Phase P — R4: exhaustive permission table + single authorize() gate
+// ---------------------------------------------------------------------------
+
+async function phaseP(root) {
+  await check('permissions: the operation table is frozen and exhaustive', async () => {
+    assert.deepEqual([...OPERATIONS], [
+      'exec', 'exec.background', 'cancel', 'read', 'write', 'edit', 'glob', 'grep', 'fs.request', 'list',
+    ])
+    assert.ok(Object.isFrozen(OPERATIONS))
+    assert.ok(Object.isFrozen(OPERATION_REQUIREMENTS))
+    assert.deepEqual(Object.keys(OPERATION_REQUIREMENTS).sort(), [...OPERATIONS].sort())
+    const fields = ['access', 'activation', 'description', 'feature', 'hostGate', 'jobsService', 'label', 'operatorGate', 'presence']
+    for (const op of OPERATIONS) {
+      const rule = OPERATION_REQUIREMENTS[op]
+      assert.ok(Object.isFrozen(rule), `${op} rule is frozen`)
+      assert.deepEqual(Object.keys(rule).sort(), fields, `${op} has the exhaustive field set`)
+      assert.ok(rule.feature === null || contracts.CAPABILITIES.includes(rule.feature), `${op} feature is a declared capability`)
+    }
+    assert.equal(assertOperationTable(), true)
+    // A rule cannot be added or replaced at runtime.
+    assert.throws(() => { OPERATION_REQUIREMENTS['new.op'] = { ...OPERATION_REQUIREMENTS.list } }, TypeError)
+    assert.equal(DENY_CODES.SESSION_DENIED, 'session-denied')
+    assert.ok(Object.isFrozen(DENY_CODES))
+  })
+
+  await check('permissions: every registered tool maps to a declared operation', async () => {
+    assert.deepEqual(Object.keys(TOOL_OPERATIONS).sort(), [
+      'computer_edit', 'computer_exec', 'computer_glob', 'computer_grep',
+      'computer_list', 'computer_read', 'computer_write',
+    ])
+    for (const [tool, mapped] of Object.entries(TOOL_OPERATIONS)) {
+      for (const op of Array.isArray(mapped) ? mapped : [mapped]) {
+        assert.ok(OPERATIONS.includes(op), `${tool} maps to declared operation ${op}`)
+      }
+    }
+    assert.equal(assertToolsExhaustive(Object.keys(TOOL_OPERATIONS)), true)
+    assert.throws(() => assertToolsExhaustive(['computer_exec', 'mystery_tool']), /does not cover every tool: unmapped \[mystery_tool\]/)
+  })
+
+  // A fake access control with overridable rules (the real one is mounted below).
+  const accessStub = ({ sessionAllows = () => true, presetAllows = () => true } = {}) => ({ sessionAllows, presetAllows })
+  const baseComputer = {
+    id: 'cmp_policy',
+    name: 'Policy Box',
+    activatedAt: '2026-01-01T00:00:00.000Z',
+    agentVersion: PLUGIN_VERSION,
+    caps: { exec: true, fs: true, jobs: true, pty: false, tunnel: false },
+    mode: 'embedded',
+  }
+  const policy = createPolicy({ config: { execEnabled: true, minAgentVersion: '' }, isOnline: () => true, hasJobs: () => true })
+  const session = { sessionId: 'sess_policy', presetId: 'default' }
+
+  await check('permissions: a fully capable, allowed, online computer can do every operation', async () => {
+    for (const operation of OPERATIONS) {
+      const decision = policy.authorize({ computer: baseComputer, operation, session, access: accessStub() })
+      assert.deepEqual(decision, { allowed: true }, `${operation} allowed`)
+    }
+  })
+
+  await check('permissions: a missing capability denies exactly the operations that need it', async () => {
+    const noCaps = { ...baseComputer, caps: { exec: false, fs: false, jobs: false, pty: false, tunnel: false } }
+    for (const operation of OPERATIONS) {
+      const rule = OPERATION_REQUIREMENTS[operation]
+      const decision = policy.authorize({ computer: noCaps, operation, session, access: accessStub() })
+      if (rule.feature === null) {
+        assert.equal(decision.allowed, true, `${operation} has no capability requirement`)
+      } else {
+        assert.equal(decision.allowed, false, `${operation} must be denied`)
+        assert.equal(decision.code, DENY_CODES.CAPABILITY_MISSING)
+        assert.match(decision.reason, /capability rule/)
+        assert.match(decision.reason, new RegExp(`'${rule.feature}' capability is missing`))
+      }
+    }
+  })
+
+  await check('permissions: an ACL-denied session cannot reach any operation', async () => {
+    const deniedSession = accessStub({ sessionAllows: () => false })
+    for (const operation of OPERATIONS) {
+      const decision = policy.authorize({ computer: baseComputer, operation, session, access: deniedSession })
+      assert.equal(decision.allowed, false, `${operation} denied for the session`)
+      assert.equal(decision.code, DENY_CODES.SESSION_DENIED)
+      assert.match(decision.reason, /session allow-list/)
+      assert.match(decision.reason, /not accessible to this conversation/)
+      assert.match(decision.reason, /管理访问权/)
+    }
+  })
+
+  await check('permissions: a preset rule denies exactly the blocked preset', async () => {
+    const blockedPreset = accessStub({ presetAllows: (computerId, presetId) => presetId !== 'blocked' })
+    for (const operation of OPERATIONS) {
+      const denied = policy.authorize({ computer: baseComputer, operation, session: { sessionId: 's', presetId: 'blocked' }, access: blockedPreset })
+      assert.equal(denied.allowed, false, `${operation} denied for the blocked preset`)
+      assert.equal(denied.code, DENY_CODES.PRESET_DENIED)
+      assert.match(denied.reason, /preset rule/)
+      assert.match(denied.reason, /Agent preset 'blocked'/)
+      const allowed = policy.authorize({ computer: baseComputer, operation, session: { sessionId: 's', presetId: 'allowed' }, access: blockedPreset })
+      assert.equal(allowed.allowed, true, `${operation} allowed for another preset`)
+    }
+  })
+
+  await check('permissions: every deny code is reachable and names the blocking rule', async () => {
+    const noHost = createPolicy({ config: { execEnabled: false }, isOnline: () => true, hasJobs: () => true })
+    for (const operation of ['exec', 'exec.background']) {
+      const decision = noHost.authorize({ computer: baseComputer, operation, session, access: accessStub() })
+      assert.equal(decision.code, DENY_CODES.HOST_DISABLED)
+      assert.match(decision.reason, /disabled on this host/)
+    }
+    assert.equal(noHost.authorize({ computer: baseComputer, operation: 'read', session, access: accessStub() }).allowed, true)
+
+    const gated = createPolicy({ config: { minAgentVersion: '9.9' }, isOnline: () => true, hasJobs: () => true })
+    const version = gated.authorize({ computer: baseComputer, operation: 'exec', session, access: accessStub() })
+    assert.equal(version.code, DENY_CODES.VERSION_BELOW_MINIMUM)
+    assert.match(version.reason, /operator version gate/)
+    assert.match(version.reason, /older than the required/)
+    assert.match(version.reason, /设置 → 插件市场|重新运行安装命令/)
+
+    const noJobs = createPolicy({ config: {}, isOnline: () => true, hasJobs: () => false })
+    const jobs = noJobs.authorize({ computer: baseComputer, operation: 'exec.background', session, access: accessStub() })
+    assert.equal(jobs.code, DENY_CODES.JOBS_UNAVAILABLE)
+    assert.match(jobs.reason, /jobs registry is not loaded/)
+    assert.equal(noJobs.authorize({ computer: baseComputer, operation: 'exec', session, access: accessStub() }).allowed, true)
+
+    const inactive = { ...baseComputer, activatedAt: null }
+    const notActivated = policy.authorize({ computer: inactive, operation: 'read', session, access: accessStub() })
+    assert.equal(notActivated.code, DENY_CODES.NOT_ACTIVATED)
+    assert.match(notActivated.reason, /activation rule/)
+    assert.equal(policy.authorize({ computer: inactive, operation: 'list', session, access: accessStub() }).allowed, true)
+
+    const offlinePolicy = createPolicy({ config: {}, isOnline: () => false, hasJobs: () => true })
+    const offline = offlinePolicy.authorize({ computer: baseComputer, operation: 'read', session, access: accessStub() })
+    assert.equal(offline.code, DENY_CODES.OFFLINE)
+    assert.match(offline.reason, /presence rule/)
+    assert.equal(offlinePolicy.authorize({ computer: baseComputer, operation: 'list', session, access: accessStub() }).allowed, true)
+
+    assert.equal(policy.authorize({ computer: baseComputer, operation: 'pty.open', session, access: accessStub() }).code, DENY_CODES.UNKNOWN_OPERATION)
+    assert.equal(policy.authorize({ computer: null, operation: 'read', session, access: accessStub() }).code, DENY_CODES.COMPUTER_UNKNOWN)
+  })
+
+  // --- integration: tools go through the authority and nothing else ----------
+  const dir = join(root, 'p')
+  const fsToken = mintSecret()
+  const fsComputerId = newComputerId()
+  const offlineToken = mintSecret()
+  const offlineComputerId = newComputerId()
+  const execToken = mintSecret()
+  const execComputerId = newComputerId()
+  seedState(dir, {
+    version: 1,
+    computers: [
+      seedComputer(fsComputerId, 'No FS Policy Box', {
+        tokenHash: sha256Hex(fsToken), capabilities: ['exec'],
+        caps: { exec: true, fs: false, jobs: false, pty: false, tunnel: false }, agentVersion: PLUGIN_VERSION,
+      }),
+      seedComputer(offlineComputerId, 'Offline Policy Box', {
+        tokenHash: sha256Hex(offlineToken), capabilities: ['exec'],
+        caps: { exec: true, fs: true, jobs: true, pty: false, tunnel: false }, agentVersion: PLUGIN_VERSION,
+      }),
+      seedComputer(execComputerId, 'Exec Policy Box', {
+        tokenHash: sha256Hex(execToken), capabilities: ['exec', 'jobs'],
+        caps: { exec: true, fs: false, jobs: true, pty: false, tunnel: false }, agentVersion: PLUGIN_VERSION,
+      }),
+    ],
+    pendingKeys: [],
+  })
+  const app = await mount({ ...FAST_CONFIG, stateDir: dir })
+  const sseClients = []
+  try {
+    const origin = app.origin
+    const execSse = await openSse(origin, `${API}/agent/events`, { authorization: `Bearer ${execToken}` })
+    sseClients.push(execSse)
+    await execSse.nextEvent('hello', 2000)
+    const sessionP = { id: 'sess_p', session: { id: 'sess_p' } }
+
+    await check('permissions: tools surface the deny code from the authority', async () => {
+      const readTool = app.fake.tools.get('computer_read')
+      const denied = await readTool.execute({ computer: 'No FS Policy Box', path: '/tmp/x' }, { agent: sessionP })
+        .then((value) => ({ value }), (error) => ({ error }))
+      assert.ok(denied.error)
+      assert.equal(denied.error.code, DENY_CODES.CAPABILITY_MISSING, 'capability denial carries the code')
+      assert.match(denied.error.message, /capability rule/)
+
+      const offlineTool = await readTool.execute({ computer: 'Offline Policy Box', path: '/tmp/x' }, { agent: sessionP })
+        .then((value) => ({ value }), (error) => ({ error }))
+      assert.ok(offlineTool.error)
+      assert.equal(offlineTool.error.code, DENY_CODES.OFFLINE)
+      assert.match(offlineTool.error.message, /offline/)
+
+      // ACL: deny every computer for this session, then the same tool call.
+      const acl = await call(origin, `${API}/access`, {
+        method: 'POST',
+        body: { sessionId: 'sess_p_denied', allowedComputers: [] },
+      })
+      assert.equal(acl.status, 200)
+      const sessionDenied = { id: 'sess_p_denied', session: { id: 'sess_p_denied' } }
+      const execTool = app.fake.tools.get('computer_exec')
+      const deniedExec = await execTool.execute({ computer: 'Exec Policy Box', command: 'echo hi' }, { agent: sessionDenied })
+        .then((value) => ({ value }), (error) => ({ error }))
+      assert.ok(deniedExec.error)
+      assert.equal(deniedExec.error.code, DENY_CODES.SESSION_DENIED)
+      assert.match(deniedExec.error.message, /管理访问权/)
+
+      // The same call is allowed once the session rule is reset.
+      await call(origin, `${API}/access`, {
+        method: 'POST',
+        body: { sessionId: 'sess_p_denied', allowedComputers: null },
+      })
+      const allowedExec = execTool.execute({ computer: 'Exec Policy Box', command: 'echo hi' }, { agent: sessionDenied })
+        .then((value) => ({ value }), (error) => ({ error }))
+      const event = await execSse.nextEvent('exec', 3000)
+      await raw(origin, `${API}/agent/results`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${execToken}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          requestId: event.data.requestId, ok: true, exitCode: 0, signal: null,
+          stdout: 'hi\n', stderr: '', durationMs: 1, truncated: false, timedOut: false, error: null,
+        }),
+      })
+      const settled = await allowedExec
+      assert.ok(settled.value, settled.error && settled.error.message)
+    })
+
+    await check('permissions: tools.js contains no inline capability/ACL/version gates', async () => {
+      const source = readFileSync(new URL('../lib/tools.js', import.meta.url), 'utf8')
+      for (const banned of ['supports(', 'requireCapability(', 'requireCurrentAgent(', 'callerAllowed', 'gateTarget', 'access.isAllowed', 'sessionAllows(', 'presetAllows(', 'denialMessage', 'upgradeHint']) {
+        assert.equal(source.includes(banned), false, `tools.js must not contain '${banned}' (the authority owns it)`)
+      }
+      assert.ok((source.match(/authorizeOp\(/g) ?? []).length >= 6, 'every gated tool goes through authorizeOp')
+      assert.ok((source.match(/policy\.authorize\(/g) ?? []).length >= 1, 'the job cancel path uses policy.authorize too')
+      // Every registered tool is in the table (load-time check already ran; prove it here).
+      assert.equal(assertToolsExhaustive([...app.fake.tools.keys()]), true)
+    })
+  } finally {
+    for (const client of sseClients) client.close()
+    await app.close()
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -3976,6 +4217,7 @@ try {
   await phaseM()
   await phaseN(root)
   await phaseO(root)
+  await phaseP(root)
 } finally {
   rmSync(root, { recursive: true, force: true })
   clearTimeout(watchdog)
