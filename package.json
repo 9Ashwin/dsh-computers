@@ -1,6 +1,6 @@
 {
   "name": "dsh-computers",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "Connect your own machines to a DSH Web deployment and run commands on them from the agent.",
   "type": "module",
   "license": "MIT",
@@ -35,7 +35,10 @@
     "PROTOCOL.md",
     "README.md",
     "docs/*.md",
-    "LICENSE"
+    "LICENSE",
+    "relay/*.mjs",
+    "lib/relay/*.js",
+    "bin/*.mjs"
   ],
   "engines": {
     "node": ">=22"
@@ -54,5 +57,8 @@
         "@deepseek-ai/dsh-client-locale"
       ]
     }
+  },
+  "bin": {
+    "dsh-computers-relay": "./bin/dsh-computers-relay.mjs"
   }
 }

@@ -1,6 +1,6 @@
 # 重构参考分析（Paseo / t3code）
 
-> 状态：分析稿，决定重构顺序用。基线 `main@d76de8b`（v1.4.0 + relay 设计稿）。
+> 状态：R1–R6 全部完成（v1.4.1 / v1.5.0）；relay S0/S1 已落地但未接线。基线 `main@d76de8b`（v1.4.0 + relay 设计稿）。
 > 参考仓库（本机只读克隆，partial clone）：
 > - `~/workspaces/github/paseo` — `getpaseo/paseo`
 > - `~/workspaces/github/t3code` — `pingdotgg/t3code`

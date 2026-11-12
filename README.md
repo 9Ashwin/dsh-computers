@@ -46,14 +46,14 @@ dsh plugin install github:9Ashwin/dsh-computers
 **npm 安装**：插件市场 → 已安装 → 「检查更新」即可，或者在 CLI 里装具体版本：
 
 ```bash
-dsh plugin install dsh-computers@1.4.1
+dsh plugin install dsh-computers@1.5.0
 ```
 
 **GitHub 安装**：profile 里是按 spec + commit 固定的（`github:user/repo` 或 `#v1.0.2`），所以
 
 - 用**同一个 spec** 再装一次只会得到 `already-installed`（这就是「再安装没法更新」的原因）；
 - 装 **tag** 会被冻住，市场永远检测不到更新；装**分支**（不带 `#`）才能被市场「检查更新」发现新提交；
-- 手动升级到某个版本要**换 spec**：`dsh plugin install github:9Ashwin/dsh-computers#v1.4.1`。
+- 手动升级到某个版本要**换 spec**：`dsh plugin install github:9Ashwin/dsh-computers#v1.5.0`。
 
 > 更新完记得重启 Host 并刷新页面，具体见 [docs/deploy.md](./docs/deploy.md)。
 
@@ -139,6 +139,13 @@ tail -f ~/.dsh-computers/agent.log
   `status`: `completed | failed | cancelled | timeout`，`disposition`: `reusable | broken`。
   **取消不再一律报"已取消"**：agent 确认停止 → `cancelled / confirmed:true`；只发出取消但没等到确认 → `cancelled / confirmed:false / broken`，并明确提示"命令可能还在那台机器上运行"；流中断 → `failed / broken`。
 - **协议与常量**：所有 wire 形状、错误码、能力与状态词表集中在 `lib/contracts.js`（零依赖、零状态），协议文档见 [PROTOCOL.md](./PROTOCOL.md) §5.2 / §11。
+
+## 3.1.1 权限、在线判定与路由健康（v1.5.0）
+
+- **一张权限表**：所有操作（exec / 后台 exec / cancel / 文件五件套 / fs 请求 / list）都在 `lib/policy.js` 的冻结表里，加载时自检"没有操作漏登记"；准入由唯一的 `authorize()` 决定，拒绝时给出**码 + 被哪条规则挡住 + 怎么改**（`capability-missing` / `session-denied` / `preset-denied` / `offline` / `version-below-minimum` …）。
+- **在线 = 有 lease**：只有已校验的入站帧（hello / 心跳 / chunk / result / fs result）才刷新在场，45 秒租约 + 10 秒扫描。OS 睡眠、代理假死、半开连接都会正确掉线，而不是一直显示在线。
+- **路由健康**：每个地址候选带 `health { state, checkedAt, failures, cooldownUntil }`。后台探活 `GET /api/dsh-computers/health`（1.5 秒预算，不阻塞页面），失败即冷却 60 秒并**让位给下一个可用地址**——坏掉的隧道不会被复制进别人的连接命令。
+- **relay 传输层（预览，未接线）**：`relay/main.mjs` 独立零依赖中继 + `lib/relay/{wire,mux,hub-link,bridge}.js` 已落地并有 47 项测试（S0/S1）。**尚未接入插件**：hub 目前还不能经 relay 出站，S2（WebSocket 升级）与接线在后续版本。
 
 ## 3.2 地址、可达性与 Tailscale
 
