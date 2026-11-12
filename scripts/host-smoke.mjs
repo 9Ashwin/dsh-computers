@@ -56,6 +56,10 @@ import {
 } from '../lib/addresses.js'
 import { createTunnel } from '../lib/tunnel.js'
 import { createRuntimeStatusRoutes } from '../lib/routes.js'
+import {
+  collectSkills, composeSkillName, createComputerSkills, machineSlug, normalizeSkill,
+  parseSkillDocument, skillDirectoriesOf,
+} from '../lib/skills.js'
 import { deriveRelayPublicUrl, mintHubId, normalizeRelayUrl } from '../lib/relay-manager.js'
 import {
   FLEET_IDENTITY_VERSION, ensureFleetIdentity, fleetIdentityFile, isJoinToken, mintJoinToken,
@@ -278,7 +282,7 @@ function withoutHealth(list) {
   return list.map(({ health, ...rest }) => rest)
 }
 
-async function mount(config, { addressDeps, webServerHost, tunnelExec, hubDeps, relayDeps, accountDeps } = {}) {
+async function mount(config, { addressDeps, webServerHost, tunnelExec, hubDeps, relayDeps, accountDeps, skills } = {}) {
   const fake = createFakeContext()
   if (addressDeps !== undefined) fake.ctx.addressDeps = addressDeps
   // R5b test seam: an injected clock + short lease for the presence sweep.
@@ -287,6 +291,9 @@ async function mount(config, { addressDeps, webServerHost, tunnelExec, hubDeps, 
   if (relayDeps !== undefined) fake.ctx.relayDeps = relayDeps
   // v1.8.0 account seam: a short heartbeat interval for the smoke run.
   if (accountDeps !== undefined) fake.ctx.accountDeps = accountDeps
+  // v1.9.0 skills seam: a fake `skills` service, so the provider registration
+  // (and its disposer) is observable without a real DSH composition.
+  if (skills !== undefined) fake.setService('skills', skills)
   if (typeof webServerHost === 'string' && webServerHost !== '') fake.setHost(webServerHost)
   if (typeof tunnelExec === 'function') fake.ctx.tunnelExec = tunnelExec
   apply(fake.ctx, config)
@@ -1579,7 +1586,7 @@ async function phaseE(root) {
     await check('role=hub: hub routes + tools registered, no runtime routes', async () => {
       assert.ok(hubRole.fake.routes.has(`${API}/state`))
       assert.ok(hubRole.fake.routes.has(`${API}/agent/enroll`))
-      assert.equal(hubRole.fake.tools.size, 7)
+      assert.equal(hubRole.fake.tools.size, 8)
       assert.equal(hubRole.fake.sections.length, 1)
       assert.equal(hubRole.fake.routes.has(`${API}/runtime`), false)
       const runtime = await call(hubRole.origin, `${API}/runtime`)
@@ -1594,7 +1601,7 @@ async function phaseE(root) {
   const bothRole = await mount({ ...FAST_CONFIG, stateDir: join(root, 'e-both') })
   try {
     await check('role default=both: hub and runtime surfaces coexist', async () => {
-      assert.equal(bothRole.fake.tools.size, 7)
+      assert.equal(bothRole.fake.tools.size, 8)
       assert.ok(bothRole.fake.routes.has(`${API}/runtime`))
       assert.ok(bothRole.fake.routes.has(`${API}/state`))
       const state = await call(bothRole.origin, `${API}/state`)
@@ -4055,7 +4062,7 @@ async function phaseP(root) {
   await check('permissions: every registered tool maps to a declared operation', async () => {
     assert.deepEqual(Object.keys(TOOL_OPERATIONS).sort(), [
       'computer_edit', 'computer_exec', 'computer_glob', 'computer_grep',
-      'computer_list', 'computer_read', 'computer_write',
+      'computer_list', 'computer_read', 'computer_skills', 'computer_write',
     ])
     for (const [tool, mapped] of Object.entries(TOOL_OPERATIONS)) {
       for (const op of Array.isArray(mapped) ? mapped : [mapped]) {
@@ -6574,8 +6581,480 @@ async function phaseW(root) {
   })
 }
 
-watchdog.unref()
+// ---------------------------------------------------------------------------
+// Phase X — v1.9.0: remote skills in the slash menu + computer_skills
+// ---------------------------------------------------------------------------
 
+/** A fake DSH `skills` service: captures each provider factory and its disposer. */
+function createFakeSkillsService() {
+  const registrations = []
+  let disposed = 0
+  let invalidations = 0
+  return {
+    registrations,
+    invalidations: () => invalidations,
+    disposed: () => disposed,
+    registerProvider(create) {
+      const control = {
+        signal: new AbortController().signal,
+        invalidate() {
+          invalidations += 1
+        },
+      }
+      registrations.push({ provider: create(control), control })
+      // The registry returns the exact Cordis effect disposer.
+      return () => {
+        disposed += 1
+      }
+    },
+  }
+}
+
+/** A fake hub: `offlineIds` are the machines that are not connected. */
+function fakePresence(offlineIds = []) {
+  return { isOnline: (computer) => !offlineIds.includes(computer.id) }
+}
+
+/** One registry record with a reported skill list (the v1.9.0 agent field). */
+function skillComputer(id, name, skills, extra = {}) {
+  return {
+    id,
+    name,
+    activatedAt: iso(Date.now()),
+    // A machine that reports skills can read files (the same agent release
+    // scans the skill directories and serves fs ops).
+    capabilities: ['exec', 'fs'],
+    workspaceBase: '/Users/skills',
+    skills,
+    ...extra,
+  }
+}
+
+async function phaseX(root) {
+  await check('skills: machine names slug to kebab-case and skill names stay stable', async () => {
+    assert.equal(machineSlug('Ashwin Mac'), 'ashwin-mac')
+    assert.equal(machineSlug('  Ashwin’s MacBook Pro  '), 'ashwin-s-macbook-pro')
+    assert.equal(machineSlug('***'), 'computer')
+    assert.equal(machineSlug(''), 'computer')
+    assert.equal(machineSlug('MÁC 01'), 'm-c-01')
+    // `<machine>-<skill>` is bounded to 64 kebab-case characters.
+    const long = composeSkillName('a'.repeat(70), 'deploy')
+    assert.ok(long.length <= 64, `composed name must fit 64 chars (got ${long.length})`)
+    assert.match(long, /^[a-z0-9]+(-[a-z0-9]+)*$/)
+    assert.ok(long.endsWith('-deploy'))
+    assert.equal(composeSkillName('mac', 'deploy'), 'mac-deploy')
+  })
+
+  await check('skills: SKILL.md frontmatter is parsed (quoted, block and body fallback)', async () => {
+    const parsed = parseSkillDocument([
+      '---',
+      'name: deploy',
+      'description: "Ship the app"',
+      'whenToUse: >',
+      '  When a release is ready',
+      '  and tested',
+      '---',
+      '',
+      '# Deploy',
+      '',
+      'Run make deploy.',
+    ].join('\n'))
+    assert.equal(parsed.hasFrontmatter, true)
+    assert.equal(parsed.frontmatter.name, 'deploy')
+    assert.equal(parsed.frontmatter.description, 'Ship the app')
+    assert.equal(parsed.frontmatter.whenToUse, 'When a release is ready and tested')
+    assert.match(parsed.body, /^# Deploy/)
+    assert.ok(!parsed.body.includes('---'))
+    // No frontmatter: the whole document is the body.
+    const plain = parseSkillDocument('# Plain\n\nJust instructions.')
+    assert.equal(plain.hasFrontmatter, false)
+    assert.equal(plain.body, '# Plain\n\nJust instructions.')
+    // A skill name that is not kebab-case is slugged rather than dropped.
+    assert.equal(normalizeSkill({ name: 'Deploy Now' }).name, 'deploy-now')
+    assert.equal(normalizeSkill({ name: '' }), null)
+    assert.equal(normalizeSkill(null), null)
+    assert.equal(normalizeSkill({ name: 'x', path: 'relative/dir' }).path, null, 'only absolute paths are accepted')
+    // The host derives the workspace skill directories in their documented order.
+    assert.deepEqual(skillDirectoriesOf({ workspaceBase: '/Users/skills' }, { name: 'deploy', path: null }), [
+      '/Users/skills/.dsh/skills/deploy',
+      '/Users/skills/.agents/skills/deploy',
+    ])
+    assert.deepEqual(skillDirectoriesOf({ workspaceBase: '/Users/skills' }, { name: 'deploy', path: '/opt/skills/deploy/' }), [
+      '/opt/skills/deploy',
+      '/Users/skills/.dsh/skills/deploy',
+      '/Users/skills/.agents/skills/deploy',
+    ])
+  })
+
+  await check('skills: list aggregates only ONLINE machines, sorted and slugged', async () => {
+    const records = [
+      skillComputer('cmp_mac', 'Ashwin Mac', [
+        { name: 'deploy', description: 'Ship the app', whenToUse: 'When deploying' },
+        { name: 'db-migrate', description: 'Run migrations', path: '/Users/skills/.dsh/skills/db-migrate' },
+      ]),
+      skillComputer('cmp_mini', 'Mac mini', []),
+      skillComputer('cmp_off', 'Offline Box', [{ name: 'ghost', description: 'Not reachable' }]),
+    ]
+    const skills = createComputerSkills({ hub: fakePresence(['cmp_off']), fsOps: null, computers: records })
+    const candidates = await skills.list({})
+    assert.deepEqual(candidates.map((candidate) => candidate.name), ['ashwin-mac-db-migrate', 'ashwin-mac-deploy'])
+    assert.deepEqual(candidates.map((candidate) => candidate.description), [
+      '[Ashwin Mac] Run migrations',
+      '[Ashwin Mac] Ship the app',
+    ])
+    for (const candidate of candidates) {
+      assert.equal(candidate.source, 'custom')
+      assert.equal(candidate.rank, 50)
+      assert.equal(candidate.provider, 'dsh-computers')
+      assert.deepEqual(candidate.invocation, { modelInvocable: true, userInvocable: true })
+      assert.deepEqual(candidate.metadata, { computer: 'Ashwin Mac' })
+      assert.equal(candidate.locator.computerId, 'cmp_mac')
+      assert.equal(candidate.locator.machineName, 'Ashwin Mac')
+      assert.equal(typeof candidate.locator.skillName, 'string')
+    }
+    assert.deepEqual(candidates[0].locator, {
+      computerId: 'cmp_mac',
+      machineName: 'Ashwin Mac',
+      skillName: 'db-migrate',
+      path: '/Users/skills/.dsh/skills/db-migrate',
+    })
+    // No reported path: derived from the machine's workspace base.
+    assert.equal(candidates[1].locator.path, '/Users/skills/.dsh/skills/deploy')
+    assert.equal(candidates[1].whenToUse, 'When deploying')
+    // The offline machine contributes nothing, and a skill-less machine is silent.
+    assert.ok(!candidates.some((candidate) => candidate.locator.computerId === 'cmp_off'))
+    assert.ok(!candidates.some((candidate) => candidate.locator.computerId === 'cmp_mini'))
+    // Offline-only registries list nothing at all.
+    const empty = createComputerSkills({ hub: fakePresence(records.map((record) => record.id)), computers: records })
+    assert.deepEqual(await empty.list({}), [])
+  })
+
+  await check('skills: duplicate names after slugging get numeric suffixes', async () => {
+    const records = [
+      skillComputer('cmp_a', 'Mac!', [{ name: 'deploy', description: 'from a' }]),
+      skillComputer('cmp_b', 'Mac?', [{ name: 'deploy', description: 'from b' }]),
+      skillComputer('cmp_c', 'Mac*', [{ name: 'deploy', description: 'from c' }]),
+    ]
+    const skills = createComputerSkills({ hub: fakePresence(), computers: records })
+    const names = (await skills.list({})).map((candidate) => candidate.name)
+    assert.deepEqual([...names].sort(), ['mac-deploy', 'mac-deploy-2', 'mac-deploy-3'])
+    assert.equal(new Set(names).size, names.length, 'candidate names are unique within the provider')
+    // collectSkills (shared by list and the tool) produces the same names.
+    const rows = collectSkills(records, { isOnline: () => true, onlineOnly: true })
+    assert.deepEqual(rows.map((row) => row.catalogName), names)
+  })
+
+  await check('skills: get loads SKILL.md through the fs channel and parses it', async () => {
+    const calls = []
+    const skillText = [
+      '---',
+      'name: deploy',
+      'description: Ship the app',
+      'whenToUse: When deploying',
+      '---',
+      '',
+      '# Deploy',
+      '',
+      'Run `make deploy`.',
+    ].join('\n')
+    const fsOps = {
+      async request(request) {
+        calls.push(request)
+        if (request.computerId === 'cmp_mac' && request.payload.path === '/Users/skills/.dsh/skills/db-migrate/SKILL.md') {
+          return { ok: true, path: request.payload.path, text: skillText }
+        }
+        throw Object.assign(new Error('ENOENT: no such file or directory'), { code: 'ENOENT' })
+      },
+    }
+    const records = [
+      skillComputer('cmp_mac', 'Ashwin Mac', [
+        { name: 'deploy', description: 'Ship the app', whenToUse: 'When deploying' },
+        { name: 'db-migrate', description: 'Run migrations', path: '/Users/skills/.dsh/skills/db-migrate' },
+      ]),
+    ]
+    const skills = createComputerSkills({ hub: fakePresence(), fsOps, computers: records })
+    const candidates = await skills.list({})
+    const definition = await skills.get(candidates[0], {})
+    assert.deepEqual(calls, [{
+      computerId: 'cmp_mac',
+      name: 'Ashwin Mac',
+      op: 'read',
+      payload: { path: '/Users/skills/.dsh/skills/db-migrate/SKILL.md' },
+    }])
+    assert.equal(definition.name, 'ashwin-mac-db-migrate', 'the definition keeps the catalog name')
+    assert.equal(definition.description, 'Ship the app')
+    assert.equal(definition.whenToUse, 'When deploying')
+    assert.equal(definition.path, '/Users/skills/.dsh/skills/db-migrate/SKILL.md')
+    assert.match(definition.content, /^# Deploy/)
+    assert.ok(!definition.content.includes('---'), 'frontmatter is not part of the instructions')
+    assert.equal(definition.source, 'custom')
+    assert.equal(definition.provider, 'dsh-computers')
+    assert.equal(definition.resourceBase.kind, 'opaque')
+    assert.match(definition.resourceBase.description, /Ashwin Mac/)
+    assert.match(definition.resourceBase.description, /computer_read/)
+    assert.match(definition.resourceBase.description, /computer_exec/)
+    assert.deepEqual(definition.metadata, { computer: 'Ashwin Mac', computerId: 'cmp_mac', skill: 'deploy' })
+    // The other candidate's file does not exist: undefined, not a throw.
+    assert.equal(await skills.get(candidates[1], {}), undefined)
+  })
+
+  await check('skills: get is undefined for offline machines and malformed candidates', async () => {
+    const calls = []
+    const fsOps = { async request(request) { calls.push(request); return { ok: true, text: '# nope' } } }
+    const records = [
+      skillComputer('cmp_mac', 'Ashwin Mac', [{ name: 'deploy', description: 'Ship it' }]),
+      skillComputer('cmp_off', 'Offline Box', [{ name: 'ghost', description: 'Gone' }]),
+    ]
+    const skills = createComputerSkills({ hub: fakePresence(['cmp_off']), fsOps, computers: records })
+    const ghost = {
+      name: 'offline-box-ghost',
+      description: '[Offline Box] Gone',
+      source: 'custom',
+      rank: 50,
+      locator: { computerId: 'cmp_off', machineName: 'Offline Box', skillName: 'ghost', path: '/Users/skills/.dsh/skills/ghost' },
+    }
+    assert.equal(await skills.get(ghost, {}), undefined)
+    assert.equal(calls.length, 0, 'an offline machine is never asked for its file')
+    assert.equal(await skills.get(null, {}), undefined)
+    assert.equal(await skills.get({}, {}), undefined)
+    assert.equal(await skills.get({ locator: null }, {}), undefined)
+    assert.equal(await skills.get({ locator: { computerId: 'cmp_missing', skillName: 'deploy' } }, {}), undefined)
+    assert.equal(await skills.get({ locator: { computerId: 'cmp_mac', skillName: '' } }, {}), undefined)
+    // An agent without the fs capability cannot load a skill: fast-fail, no
+    // 15 s fs timeout on a machine that would never answer.
+    const noFsCap = createComputerSkills({
+      hub: fakePresence(),
+      fsOps,
+      computers: [skillComputer('cmp_nofscap', 'No Fs Cap', [{ name: 'deploy' }], { capabilities: ['exec'] })],
+    })
+    const [noFsCapCandidate] = await noFsCap.list({})
+    assert.equal(await noFsCap.get(noFsCapCandidate, {}), undefined)
+    assert.equal(calls.length, 0, 'a machine without file access is never asked for a file')
+    // A machine that reported no path and has no workspace base cannot be read.
+    const noBase = createComputerSkills({
+      hub: fakePresence(),
+      fsOps,
+      computers: [{ id: 'cmp_nobase', name: 'No Base', activatedAt: iso(Date.now()), skills: [{ name: 'deploy' }] }],
+    })
+    const [candidate] = await noBase.list({})
+    assert.equal(candidate.locator.path, null)
+    assert.equal(await noBase.get(candidate, {}), undefined)
+    assert.equal(calls.length, 0)
+    // An agent without file access (fsOps null) is tolerated too.
+    const noFs = createComputerSkills({ hub: fakePresence(), fsOps: null, computers: records })
+    const [macCandidate] = await noFs.list({})
+    assert.equal(await noFs.get(macCandidate, {}), undefined)
+  })
+
+  await check('skills: the provider registers once through ctx.effect and disposes on teardown', async () => {
+    const service = createFakeSkillsService()
+    const app = await mount({ ...FAST_CONFIG, stateDir: join(root, 'x-register') }, { skills: service })
+    try {
+      assert.equal(service.registrations.length, 1, 'exactly one provider registration')
+      const { provider } = service.registrations[0]
+      assert.equal(provider.name, 'dsh-computers')
+      assert.equal(typeof provider.list, 'function')
+      assert.equal(typeof provider.get, 'function')
+      // No computers are connected: an empty catalog, never a throw.
+      assert.deepEqual(await provider.list({}), [])
+      assert.equal(await provider.get({ locator: {} }, {}), undefined)
+      // The tool is registered alongside the provider.
+      assert.equal(app.fake.tools.has('computer_skills'), true)
+    } finally {
+      await app.close()
+    }
+    assert.equal(service.disposed(), 1, 'the registration disposer ran when the plugin unmounted')
+  })
+
+  await check('skills: a host without the skills service still mounts and serves the tool', async () => {
+    const app = await mount({ ...FAST_CONFIG, stateDir: join(root, 'x-noservice') })
+    try {
+      assert.equal(app.fake.tools.has('computer_skills'), true)
+      const state = await call(app.origin, `${API}/state`)
+      assert.equal(state.status, 200)
+    } finally {
+      await app.close()
+    }
+  })
+
+  await check('skills: computer_skills lists per machine (online + offline) like computer_list', async () => {
+    const dir = join(root, 'x-tool')
+    const onlineId = newComputerId()
+    const idleId = newComputerId()
+    const ghostId = newComputerId()
+    const onlineToken = mintSecret()
+    seedState(dir, {
+      version: 1,
+      computers: [
+        seedComputer(onlineId, 'Skills Mac', {
+          tokenHash: sha256Hex(onlineToken),
+          capabilities: ['exec', 'fs'],
+          workspaceBase: '/Users/skills',
+          skills: [
+            { name: 'deploy', description: 'Ship the app', whenToUse: 'When deploying' },
+            { name: 'db-migrate', description: 'Run migrations', path: '/Users/skills/.agents/skills/db-migrate' },
+          ],
+        }),
+        seedComputer(idleId, 'Idle Mac', { tokenHash: sha256Hex(mintSecret()), skills: [] }),
+        seedComputer(ghostId, 'Ghost Mac', {
+          tokenHash: sha256Hex(mintSecret()),
+          skills: [{ name: 'ghost', description: 'Last known' }],
+        }),
+      ],
+      pendingKeys: [],
+    })
+    const app = await mount({ ...FAST_CONFIG, stateDir: dir })
+    let sse = null
+    try {
+      sse = await openSse(app.origin, `${API}/agent/events`, { authorization: `Bearer ${onlineToken}` })
+      await sse.nextEvent('hello', 2000)
+      const tool = app.fake.tools.get('computer_skills')
+      assert.ok(tool !== undefined, 'computer_skills is registered')
+      assert.equal(tool.parameters.type, 'object')
+      assert.deepEqual(Object.keys(tool.parameters.properties), ['computer'])
+      assert.equal(tool.parameters.additionalProperties, false)
+
+      const all = await tool.execute({}, {})
+      assert.deepEqual(all.computers.map((computer) => [computer.name, computer.online, computer.skillCount]), [
+        ['Skills Mac', true, 2],
+        ['Idle Mac', false, 0],
+        ['Ghost Mac', false, 1],
+      ])
+      assert.deepEqual(all.skills.map((skill) => skill.name), ['ghost', 'db-migrate', 'deploy'])
+      const deploy = all.skills.find((skill) => skill.name === 'deploy')
+      assert.deepEqual(deploy, {
+        computer: { id: onlineId, name: 'Skills Mac' },
+        name: 'deploy',
+        catalogName: 'skills-mac-deploy',
+        description: 'Ship the app',
+        whenToUse: 'When deploying',
+        path: '/Users/skills/.dsh/skills/deploy',
+        online: true,
+      })
+      const ghost = all.skills.find((skill) => skill.name === 'ghost')
+      assert.equal(ghost.online, false, 'offline machines keep their last report, marked offline')
+      assert.equal(all.hiddenComputerCount, 0)
+
+      // The rendered text groups by machine and names the slash-menu entry.
+      const rendered = tool.output.render({}, all)
+      const text = rendered.map((block) => block.text).join('\n')
+      assert.match(text, /Skills Mac/)
+      assert.match(text, /online/)
+      assert.match(text, /slash menu: \/skills-mac-deploy/)
+      assert.match(text, /Idle Mac[\s\S]*no skills in its last report/)
+      assert.match(text, /Ghost Mac[\s\S]*offline/)
+
+      // `computer` narrows the answer to that one machine.
+      const one = await tool.execute({ computer: 'Skills Mac' }, {})
+      assert.deepEqual(one.computers.map((computer) => computer.name), ['Skills Mac'])
+      assert.deepEqual(one.skills.map((skill) => skill.name), ['db-migrate', 'deploy'])
+      const unknown = await tool.execute({ computer: 'nope' }, {})
+        .then(() => null, (error) => error)
+      assert.match(String(unknown && unknown.message), /no computer matches 'nope'/)
+      // An offline machine is still listable: `list` has no presence gate.
+      const idle = await tool.execute({ computer: 'Idle Mac' }, {})
+      assert.equal(idle.computers[0].online, false)
+      assert.deepEqual(idle.skills, [])
+    } finally {
+      sse?.close?.()
+      await app.close()
+    }
+  })
+
+  await check('skills: enroll and heartbeat persist the machine\'s reported skills (end to end)', async () => {
+    const service = createFakeSkillsService()
+    const dir = join(root, 'x-enroll')
+    const app = await mount({ ...FAST_CONFIG, stateDir: dir }, { skills: service })
+    try {
+      const created = await call(app.origin, `${API}/keys`, { method: 'POST', body: {} })
+      assert.equal(created.status, 200)
+      const key = created.data.key
+      const enroll = await call(app.origin, `${API}/agent/enroll`, {
+        method: 'POST',
+        body: {
+          key,
+          agentVersion: PLUGIN_VERSION,
+          capabilities: ['exec', 'fs'],
+          machine: { hostname: 'enroll.local', os: 'darwin', arch: 'arm64' },
+          metadata: { capabilities: ['exec', 'fs'], workspaceBase: '/Users/enroll' },
+          // Valid, duplicated and unusable entries: the host sanitizes the report.
+          skills: [
+            { name: 'deploy', description: 'Ship it', whenToUse: 'When releasing', path: '/Users/enroll/.dsh/skills/deploy' },
+            { name: 'deploy', description: 'duplicate is dropped' },
+            { name: 'Bad Name', description: 'not kebab-case, dropped' },
+            { name: 'relative', description: 'path is not absolute', path: 'relative/dir' },
+          ],
+        },
+      })
+      assert.equal(enroll.status, 200)
+      const computerId = enroll.data.computerId
+      const token = enroll.data.token
+      const recordOf = () => JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'))
+        .computers.find((computer) => computer.id === computerId)
+      assert.deepEqual(recordOf().skills, [
+        { name: 'deploy', description: 'Ship it', whenToUse: 'When releasing', path: '/Users/enroll/.dsh/skills/deploy' },
+        { name: 'relative', description: 'path is not absolute' },
+      ])
+
+      // Before the first stream the machine is not activated: no candidates.
+      const { provider } = service.registrations[0]
+      assert.deepEqual(await provider.list({}), [])
+
+      const sse = await openSse(app.origin, `${API}/agent/events`, { authorization: `Bearer ${token}` })
+      try {
+        await sse.nextEvent('hello', 2000)
+        const machineSlugOf = recordOf().name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+        const online = await provider.list({})
+        assert.deepEqual(online.map((candidate) => candidate.name), [`${machineSlugOf}-deploy`, `${machineSlugOf}-relative`])
+        assert.equal(online[0].locator.path, '/Users/enroll/.dsh/skills/deploy')
+
+        // A heartbeat replaces the report (an empty array clears it).
+        const beat = await call(app.origin, `${API}/agent/heartbeat`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${token}` },
+          body: { skills: [{ name: 'release', description: 'Cut a release', path: '/Users/enroll/.agents/skills/release' }] },
+        })
+        assert.equal(beat.status, 200)
+        assert.deepEqual((await provider.list({})).map((candidate) => candidate.name), [`${machineSlugOf}-release`])
+        const cleared = await call(app.origin, `${API}/agent/heartbeat`, {
+          method: 'POST',
+          headers: { authorization: `Bearer ${token}` },
+          body: { skills: [] },
+        })
+        assert.equal(cleared.status, 200)
+        assert.deepEqual(await provider.list({}), [], 'an empty report removes the machine\'s skills')
+      } finally {
+        sse.close()
+      }
+    } finally {
+      await app.close()
+    }
+  })
+
+  await check('skills: the catalog is invalidated when the reported skill set changes', async () => {
+    const records = [skillComputer('cmp_mac', 'Mac', [{ name: 'deploy', description: 'Ship it' }])]
+    const skills = createComputerSkills({ hub: fakePresence(), computers: () => records })
+    let invalidations = 0
+    skills.attachControl({ invalidate: () => { invalidations += 1 } })
+    assert.equal((await skills.list({})).length, 1)
+    assert.equal(invalidations, 0, 'the first list only sets the baseline')
+    await skills.list({})
+    assert.equal(invalidations, 0, 'an unchanged catalog does not invalidate the cache')
+    records[0].skills = [{ name: 'deploy' }, { name: 'release', description: 'Cut a release' }]
+    const changed = await skills.list({})
+    assert.deepEqual(changed.map((candidate) => candidate.name), ['mac-deploy', 'mac-release'])
+    // Invalidation is deferred one turn so it never re-enters the registry's
+    // in-flight discovery.
+    assert.equal(invalidations, 0, 'the change is not invalidated from inside list()')
+    await sleep(10)
+    assert.equal(invalidations, 1, 'a changed catalog invalidates the registry cache exactly once')
+    await skills.list({})
+    await sleep(10)
+    assert.equal(invalidations, 1, 'the refreshed catalog settles: no invalidation storm')
+  })
+}
+
+watchdog.unref()
 const root = mkdtempSync(join(tmpdir(), 'dshc-smoke-'))
 let exitCode = 0
 try {
@@ -6602,6 +7081,7 @@ try {
   await phaseU(root)
   await phaseV(root)
   await phaseW(root)
+  await phaseX(root)
 } finally {
   rmSync(root, { recursive: true, force: true })
   clearTimeout(watchdog)

@@ -36,7 +36,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { parseArgs } from 'node:util'
 
 // Keep in sync with package.json. The server compares this for display only.
-export const AGENT_VERSION = '1.8.0'
+export const AGENT_VERSION = '1.9.0'
 
 const DEFAULT_EXEC_TIMEOUT_MS = 120_000
 const MAX_EXEC_TIMEOUT_MS = 24 * 60 * 60 * 1000
@@ -280,6 +280,301 @@ function handshakeMetadata(workspaceBase, mode, caps) {
 
 function encodeMetadataHeader(metadata) {
   return Buffer.from(JSON.stringify(metadata), 'utf8').toString('base64url')
+}
+
+// ---------------------------------------------------------------------------
+// Local skills report (v1.9.0)
+//
+// The hub lists a machine's skills in DSH's slash menu, so every enroll and
+// every heartbeat carries what actually exists ON THIS MACHINE. A skill is a
+// directory with a `SKILL.md` inside one of four roots:
+//
+//   ~/.dsh/skills/<skill>/SKILL.md
+//   ~/.agents/skills/<skill>/SKILL.md
+//   <workspace>/.dsh/skills/<skill>/SKILL.md
+//   <workspace>/.agents/skills/<skill>/SKILL.md
+//
+// Only the head of each file is read (frontmatter + first body line), the scan
+// is cached behind a cheap stat signature so a heartbeat every few seconds does
+// not re-read files that did not change, and nothing here ever throws: a
+// missing or unreadable directory/file is simply skipped.
+//
+// The report is deliberately small and bounded so it stays far away from the
+// enroll (16 KiB) and heartbeat (256 KiB) body guards:
+//   - at most 50 entries
+//   - kebab-case name, <= 64 chars; a violation DROPS the entry
+//   - description / whenToUse are truncated to 200 chars (a skill with a long
+//     description is still useful; one with an unlistable name is not)
+//   - each entry also carries `path` — the skill's DIRECTORY on this machine —
+//     so the hub can read `<path>/SKILL.md` back for the slash menu (a skill
+//     under `~` cannot be re-derived from `workspaceBase` alone)
+//   - the serialized array stays under 10 KiB (entries that no longer fit are
+//     skipped), so `skills` never dominates the payload
+// ---------------------------------------------------------------------------
+
+/** Skill roots, relative to `$HOME` and to `workspaceBase` (in that order). */
+const SKILL_ROOTS = [path.join('.dsh', 'skills'), path.join('.agents', 'skills')]
+const SKILL_FILE_NAME = 'SKILL.md'
+/** Read only the head of a SKILL.md: frontmatter plus the first body line. */
+const SKILL_HEAD_BYTES = 4096
+const SKILL_MAX_COUNT = 50
+const SKILL_MAX_NAME_CHARS = 64
+const SKILL_MAX_TEXT_CHARS = 200
+/** Longer directory paths are reported without `path` rather than dropped. */
+const SKILL_MAX_PATH_CHARS = 512
+/**
+ * Serialized `skills` array budget: the enroll body is capped at 16 KiB on the
+ * hub and already carries ~1 KiB of metadata, so 10 KiB keeps it comfortable.
+ */
+const SKILL_REPORT_MAX_BYTES = 10 * 1024
+/** Kebab-case only: the hub builds slash-menu names out of it. */
+const SKILL_NAME_PATTERN = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
+
+/** Cache: `${home}\0${workspaceBase}` -> { signature, skills }. */
+const skillReportCache = new Map()
+
+/**
+ * The four skill roots, de-duplicated (they collapse when the workspace IS the
+ * home directory). Order is the documented precedence: user-level first, then
+ * workspace-level, so a workspace skill never shadows a user skill.
+ */
+function skillSearchDirs(workspaceBase, home) {
+  const workspace = normalizeWorkspaceBase(workspaceBase)
+  const dirs = []
+  const seen = new Set()
+  for (const base of [home, workspace]) {
+    for (const relative of SKILL_ROOTS) {
+      const dir = path.join(base, relative)
+      if (seen.has(dir)) continue
+      seen.add(dir)
+      dirs.push(dir)
+    }
+  }
+  return dirs
+}
+
+/** Read at most {@link SKILL_HEAD_BYTES} of a SKILL.md as utf8. Throws on OS errors. */
+function readSkillHead(file) {
+  const handle = fs.openSync(file, 'r')
+  try {
+    const buffer = Buffer.allocUnsafe(SKILL_HEAD_BYTES)
+    const bytes = fs.readSync(handle, buffer, 0, SKILL_HEAD_BYTES, 0)
+    // A multi-byte character cut at the 4 KiB boundary would decode as U+FFFD.
+    return buffer.subarray(0, bytes).toString('utf8').replace(/\uFFFD+$/, '')
+  } finally {
+    try {
+      fs.closeSync(handle)
+    } catch {
+      // closing a read handle cannot fail in a way that matters here
+    }
+  }
+}
+
+/** Collapse whitespace so a value always fits one JSON line. */
+function normalizeSkillText(value) {
+  return String(value ?? '').replace(/\s+/g, ' ').trim()
+}
+
+/** Strip one layer of YAML quotes from a frontmatter value. */
+function unquoteSkillValue(value) {
+  const text = normalizeSkillText(value)
+  // Block scalars (`description: |`, `description: >-`) are not part of the
+  // supported subset; an empty value makes the caller fall back to the body.
+  if (/^[|>][-+]?$/.test(text)) return ''
+  if (text.length >= 2) {
+    const first = text[0]
+    const last = text[text.length - 1]
+    if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+      return text.slice(1, -1).replace(/\\(["'\\])/g, '$1').trim()
+    }
+  }
+  return text
+}
+
+/**
+ * Split the `---`-fenced frontmatter subset out of a SKILL.md head.
+ *
+ * Only `name`, `description` and `whenToUse` are understood; every other key is
+ * ignored and multi-line scalars are not supported (a real skill keeps them on
+ * one line, and the hub only shows a one-line summary anyway). An unterminated
+ * or absent fence is not an error: it just means "no frontmatter", and the
+ * caller falls back to the directory name and the first body line.
+ *
+ * @returns {{ fields: {name?: string, description?: string, whenToUse?: string} | null, body: string }}
+ */
+function splitSkillFrontmatter(text) {
+  const source = String(text ?? '').replace(/^\uFEFF/, '')
+  const lines = source.split(/\r?\n/)
+  let index = 0
+  while (index < lines.length && lines[index].trim() === '') index++
+  if (index >= lines.length || lines[index].trim() !== '---') return { fields: null, body: source }
+  const fields = {}
+  let cursor = index + 1
+  let closed = false
+  for (; cursor < lines.length; cursor++) {
+    const trimmed = lines[cursor].trim()
+    if (trimmed === '---' || trimmed === '...') {
+      closed = true
+      cursor++
+      break
+    }
+    const match = /^([A-Za-z_][A-Za-z0-9_-]*)\s*:\s*(.*)$/.exec(trimmed)
+    if (!match) continue
+    const key = match[1]
+    if (key !== 'name' && key !== 'description' && key !== 'whenToUse') continue
+    fields[key] = unquoteSkillValue(match[2])
+  }
+  // Unterminated frontmatter is malformed: there is no reliable way to tell the
+  // fence from the body, so report no fields and no body (the caller then falls
+  // back to the directory name) instead of leaking YAML keys as a description.
+  if (!closed) return { fields: null, body: '' }
+  return { fields, body: lines.slice(cursor).join('\n') }
+}
+
+/** First meaningful body line: skips blanks, rules and markdown bullets. */
+function firstSkillBodyLine(body) {
+  for (const raw of String(body ?? '').split(/\r?\n/)) {
+    const line = raw.trim()
+    if (!line) continue
+    if (/^([-*_])\1{2,}$/.test(line)) continue
+    const text = line
+      .replace(/^#{1,6}\s*/, '')
+      .replace(/^[-*+]\s+/, '')
+      .replace(/^\d+[.)]\s+/, '')
+      .trim()
+    if (text) return text
+  }
+  return ''
+}
+
+/** Normalize and clamp a free-text skill field to 200 chars. */
+function clampSkillText(value) {
+  const text = normalizeSkillText(value)
+  if (text.length <= SKILL_MAX_TEXT_CHARS) return text
+  return text.slice(0, SKILL_MAX_TEXT_CHARS).trimEnd()
+}
+
+/**
+ * Build one `{ name, description, path?, whenToUse? }` entry from a SKILL.md
+ * head, or `null` when the name cannot be listed (missing, not kebab-case,
+ * > 64 chars). `directory` is the skill's directory on this machine.
+ */
+function buildSkillEntry(directoryName, directory, head) {
+  const { fields, body } = splitSkillFrontmatter(head)
+  const name = normalizeSkillText(fields && fields.name ? fields.name : directoryName)
+  if (!name || name.length > SKILL_MAX_NAME_CHARS || !SKILL_NAME_PATTERN.test(name)) return null
+  const description = clampSkillText(fields && fields.description ? fields.description : firstSkillBodyLine(body))
+  const entry = { name, description: description || name }
+  // The hub reads `<path>/SKILL.md` back to render the skill; without it, only
+  // workspace skills could be re-derived from `workspaceBase`.
+  if (typeof directory === 'string' && directory.length > 0 && directory.length <= SKILL_MAX_PATH_CHARS) {
+    entry.path = directory
+  }
+  if (fields && fields.whenToUse) {
+    const whenToUse = clampSkillText(fields.whenToUse)
+    if (whenToUse) entry.whenToUse = whenToUse
+  }
+  return entry
+}
+
+/**
+ * List the skill directories and a cheap signature of them.
+ *
+ * The signature is built from directory entry counts plus each SKILL.md's
+ * `mtimeMs`/size, so a heartbeat can tell "nothing changed, reuse the cached
+ * report" without opening a single file. Unreadable directories contribute an
+ * error marker instead of throwing.
+ */
+function collectSkillCandidates(workspaceBase, home) {
+  const candidates = []
+  const signature = []
+  for (const dir of skillSearchDirs(workspaceBase, home)) {
+    let entries
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch (error) {
+      signature.push(`${dir}\u0000${error && error.code ? error.code : 'error'}`)
+      continue
+    }
+    const names = []
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) continue
+      let isDirectory = entry.isDirectory()
+      if (!isDirectory && entry.isSymbolicLink()) {
+        // A skill installed through a symlink is still a skill; follow it once.
+        try {
+          isDirectory = fs.statSync(path.join(dir, entry.name)).isDirectory()
+        } catch {
+          isDirectory = false
+        }
+      }
+      if (isDirectory) names.push(entry.name)
+    }
+    names.sort()
+    signature.push(`${dir}\u0000${names.length}`)
+    for (const name of names) {
+      const file = path.join(dir, name, SKILL_FILE_NAME)
+      try {
+        const stat = fs.statSync(file)
+        if (!stat.isFile()) continue
+        signature.push(`${file}\u0000${Math.floor(stat.mtimeMs)}\u0000${stat.size}`)
+        candidates.push({ directoryName: name, directory: path.join(dir, name), file })
+      } catch (error) {
+        signature.push(`${file}\u0000${error && error.code ? error.code : 'missing'}`)
+      }
+    }
+  }
+  return { signature: signature.join('|'), candidates }
+}
+
+/**
+ * The machine's skills report (v1.9.0), safe to call on every enroll and every
+ * heartbeat: synchronous, bounded (50 entries / 10 KiB), cached behind a stat
+ * signature, and it never throws (a broken filesystem yields `[]`).
+ *
+ * @param {string} workspaceBase the workspace whose `.dsh`/`.agents` are scanned
+ * @param {{ home?: string }} [options] `home` overrides `$HOME` (tests only)
+ * @returns {{ name: string, description: string, path?: string, whenToUse?: string }[]}
+ */
+export function scanLocalSkills(workspaceBase, options = {}) {
+  try {
+    const override = options && typeof options.home === 'string' ? options.home.trim() : ''
+    const home = override ? path.resolve(override) : os.homedir()
+    const workspace = normalizeWorkspaceBase(workspaceBase)
+    const cacheKey = `${home}\u0000${workspace}`
+    const { signature, candidates } = collectSkillCandidates(workspace, home)
+    const cached = skillReportCache.get(cacheKey)
+    if (cached && cached.signature === signature) return cached.skills.map((entry) => ({ ...entry }))
+
+    const skills = []
+    const seen = new Set()
+    let bytes = 2 // '[]'
+    for (const candidate of candidates) {
+      if (skills.length >= SKILL_MAX_COUNT) break
+      let entry
+      try {
+        entry = buildSkillEntry(candidate.directoryName, candidate.directory, readSkillHead(candidate.file))
+      } catch {
+        continue // ENOENT/EACCES/race: skip this skill, keep the rest
+      }
+      if (!entry || seen.has(entry.name)) continue
+      const size = Buffer.byteLength(JSON.stringify(entry), 'utf8') + 1 // + comma
+      if (bytes + size > SKILL_REPORT_MAX_BYTES) continue
+      seen.add(entry.name)
+      skills.push(entry)
+      bytes += size
+    }
+    // A long-lived host may start/stop runtimes with different workspaces; keep
+    // the cache from growing without bound.
+    if (skillReportCache.size >= 8 && !skillReportCache.has(cacheKey)) {
+      skillReportCache.delete(skillReportCache.keys().next().value)
+    }
+    skillReportCache.set(cacheKey, { signature, skills })
+    return skills.map((entry) => ({ ...entry }))
+  } catch {
+    // A skills report is a nice-to-have; it must never break enroll/heartbeat.
+    return []
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1005,6 +1300,11 @@ async function sendHeartbeat(runtime) {
           mode: config.mode,
           caps: { ...config.caps },
         },
+        // v1.9.0: what this machine can do in DSH's slash menu. Top-level (not
+        // inside `meta`) because `meta` is also the base64url SSE connect header,
+        // and a 50-skill list has no business in an HTTP header. Cached behind a
+        // stat signature, so an unchanged skill tree costs no file reads.
+        skills: scanLocalSkills(config.workspaceBase),
       },
       timeoutMs: 15_000,
     })
@@ -2077,6 +2377,8 @@ async function enrollPendingJoin(runtime) {
     capabilities: [...AGENT_CAPABILITIES],
     machine: machineInfo(config.name),
     metadata: handshakeMetadata(config.workspaceBase, config.mode, config.caps),
+    // v1.9.0: the hub lists this machine's skills in the slash menu.
+    skills: scanLocalSkills(config.workspaceBase),
   }
   let response
   try {
@@ -2535,6 +2837,8 @@ async function cmdEnroll(argv) {
     capabilities: [...AGENT_CAPABILITIES],
     machine: machineInfo(requestedName),
     metadata: handshakeMetadata(workspaceBase, 'service', agentCaps()),
+    // v1.9.0: the hub lists this machine's skills in the slash menu.
+    skills: scanLocalSkills(workspaceBase),
   }
   // Exactly one credential: the one-time key when present, else the fleet join
   // token from the address fragment. The token is sent ONLY here.

@@ -917,3 +917,33 @@ v1.7.2 起 `joinUrl` **永远不是回环地址**：它要粘到另一台机器�
 
 `selections.json` 现在记录 `{ computerId, name, updatedAt }`。被选中的电脑之后被删除时：
 报错会**点名那台机器**（「你之前选定的电脑『X』已被删除或断开」），而不是含糊的"没有选择电脑"。
+
+## 15 远端技能（v1.9.0）
+
+每台电脑把自己的技能报给主控，主控把它们放进 DSH 的斜杠菜单。
+
+### 15.1 上报
+
+- 运行时 agent 扫描 `~/.dsh/skills`、`~/.agents/skills`、`<workspace>/.dsh/skills`、`<workspace>/.agents/skills`
+- 每项读 `SKILL.md` 的前 4 KiB，取 frontmatter 的 `name` / `description` / `whenToUse`
+- **enroll body 与每次 heartbeat 都带顶层 `skills: [{ name, description, path?, whenToUse? }]`**
+  （不放进 `metadata`：那串同时是 SSE 连接的 base64url 头，放技能列表会撑爆）
+- 上限：50 项、kebab-case 名 ≤64、文本 ≤200、序列化后 ≤10 KiB；不合格的条目丢弃
+
+### 15.2 斜杠菜单
+
+主控注册一个 `skills` provider（DSH 官方扩展点 `ctx.skills.registerProvider`）：
+
+| 字段 | 值 |
+| --- | --- |
+| 名字 | `<机器slug>-<技能名>`（如 `air-image-compress`），重名加 `-2`/`-3` |
+| 描述 | `[<机器名>] <技能描述>` |
+| 来源 | `custom`，`rank: 50` |
+| 选中后 | 通过运行时读那台机器的 `SKILL.md`，正文返回给 agent，`resourceBase` 提示用 `computer_read` / `computer_exec` 在那台机器上取资源 |
+
+离线机器不贡献技能；机器下线后对应条目从菜单消失。
+
+### 15.3 `computer_skills` 工具
+
+`{ computer?: string }` → `{ computers: [{ id, name, online, skillCount }], skills: [{ computer, name, catalogName, description, whenToUse, path, online }] }`。
+与 `computer_list` 同一套授权（operation `list`）。

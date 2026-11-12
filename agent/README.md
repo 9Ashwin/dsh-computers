@@ -201,6 +201,9 @@ Semantics guaranteed to the host:
   `config.json`.
 
 `AGENT_VERSION` is exported too (the host can put it in the §3.1 enroll body).
+`scanLocalSkills(workspaceBase)` is exported as well — it is the v1.9.0 skills
+report described below; its optional second argument `{ home }` overrides `$HOME`
+for tests.
 
 ## Protocol v1.3.0 / §11 features
 
@@ -246,6 +249,63 @@ the plugin's in-process runtime (upgrade the DSH plugin instead); it is also in
 the heartbeat `meta` and in `startRuntime().status()`. `workspaceBase` comes
 from `config.json` (`--workspace-base`, default `$HOME`), is the default `cwd`
 for `exec`, and is the base for relative `glob`/`grep` patterns.
+
+### Local skills report (v1.9.0)
+
+Every enroll body and every heartbeat carries the skills that exist **on this
+machine**, so the hub can list them in DSH's slash menu:
+
+```json
+"skills": [
+  {
+    "name": "lark-doc",
+    "description": "飞书云文档（Docx / Wiki）内容操作…",
+    "path": "/Users/me/.dsh/skills/lark-doc",
+    "whenToUse": "用户提供文档 URL/token 时使用"
+  }
+]
+```
+
+`path` is the skill's **directory** on this machine (the hub appends
+`SKILL.md`); it is optional in the shape but reported whenever it is absolute and
+≤ 512 chars, because the hub cannot re-derive a `~/.dsh/skills` path from
+`workspaceBase`.
+
+`skills` is top-level — a sibling of `meta` in a heartbeat and of `metadata` in
+the enroll body. It is deliberately **not** inside `metadata`: that object is
+also the base64url `x-dsh-computers-metadata` header on every SSE connect, and a
+skill list has no business in an HTTP header.
+
+Scan roots, each `<root>/<skill>/SKILL.md`:
+
+| root | scope |
+| --- | --- |
+| `~/.dsh/skills` | this user |
+| `~/.agents/skills` | this user (agents convention) |
+| `<workspaceBase>/.dsh/skills` | this workspace |
+| `<workspaceBase>/.agents/skills` | this workspace |
+
+Rules:
+
+- Only the first **4 KiB** of each `SKILL.md` is read. The `---`-fenced
+  frontmatter subset `name`, `description`, `whenToUse` is parsed (single-line
+  scalars, optional quotes; block scalars like `description: |` are not
+  supported and fall back). A missing `name` falls back to the directory name; a
+  missing `description` falls back to the first non-empty body line (markdown
+  heading/bullet markers stripped). Unterminated frontmatter is malformed and
+  falls back to the directory name.
+- Caps: **50 entries**; `name` must be kebab-case
+  (`^[a-z0-9]+(-[a-z0-9]+)*$`) and ≤ 64 chars — an entry that violates the name
+  rule is **dropped**. `description` / `whenToUse` are clamped to 200 chars, and
+  the serialized array stays ≤ **10 KiB** (verbose skills that no longer fit are
+  skipped) so it can never crowd the 16 KiB enroll body or the heartbeat.
+- Duplicate names: the first root wins (user roots before workspace roots).
+- Unreadable or missing directories/files (ENOENT/EACCES, races) are skipped.
+  The scan never throws and never fails an enroll or a heartbeat.
+- The scan is synchronous and cached behind a cheap signature (directory entry
+  counts plus each `SKILL.md`'s mtime/size), so an unchanged skill tree costs no
+  file reads on the 10 s heartbeat; adding or editing a skill re-scans on the
+  next heartbeat. A full scan of dozens of skills stays in single-digit ms.
 
 ### Streaming results (§11.2 + §11.6 frames)
 
@@ -466,3 +526,10 @@ paths:
   `{exec:true,fs:true,jobs:true,pty:false,tunnel:false}`; `startRuntime({fs:false})`
   reports `fs:false`, ignores fs events, and leaves the legacy `capabilities`
   array + `mode` unchanged; old metadata fields are untouched.
+- v1.9.0 skills (temp `HOME` + workspace fixtures): the enroll body and every
+  heartbeat carry `skills` from the four roots (frontmatter, directory-name and
+  first-body-line fallbacks, malformed/unterminated frontmatter), invalid
+  kebab-case names are dropped, `description`/`whenToUse` are clamped to 200
+  chars, the 50-entry / 10 KiB caps hold, unreadable dirs and `SKILL.md` files are
+  skipped without failing enroll, a machine with no skills reports `[]`, and the
+  scan re-runs when a `SKILL.md` changes while an unchanged tree reuses the cache.

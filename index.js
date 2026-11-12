@@ -23,6 +23,7 @@ import { HUB_ID_PATTERN, isHubId, readRelayIdentity, writeRelayIdentity } from '
 import { createFleetIdentity } from './lib/fleet-identity.js'
 import { createAccountManager, machineNameOf, preferNonLoopback } from './lib/account.js'
 import { resolveBaseUrl } from './lib/http.js'
+import { createComputerSkills } from './lib/skills.js'
 import { createSelectionStore } from './lib/selection.js'
 import { majorMinor } from './lib/version.js'
 import { resolveStateDir, createStore } from './lib/state.js'
@@ -35,7 +36,7 @@ export const name = 'dsh-computers'
 export const inject = ['tools', 'webServer']
 
 /** Version reported by `/api/dsh-computers/health` (and asserted by the smoke harness). */
-export const PLUGIN_VERSION = '1.8.0'
+export const PLUGIN_VERSION = '1.9.0'
 
 /** The machine agent bundle, served at request time (never imported). */
 const AGENT_URL = new URL('./agent/dsh-computers-agent.mjs', import.meta.url)
@@ -466,6 +467,41 @@ export function apply(ctx, config) {
       onWarn,
     })
     createTools({ ctx, config: resolved, store, hub, selections, access, fsOps, version: PLUGIN_VERSION, onWarn })
+
+    // ---- remote skills in the slash menu (v1.9.0) ----------------------
+    // Every connected computer's own skills become DSH skills named
+    // `<machineSlug>-<skillName>`; loading one reads that machine's SKILL.md
+    // over the existing fs channel. The `skills` service is OPTIONAL (a headless
+    // composition may not load it), so it is read through a guarded ctx.get and
+    // a missing service simply means no provider. Registration happens
+    // synchronously during apply, through ctx.effect so a reload unregisters it.
+    const computerSkills = createComputerSkills({
+      hub,
+      fsOps,
+      computers: () => store.read().computers,
+      onWarn,
+    })
+    try {
+      const skillsService = ctx.get('skills')
+      if (skillsService !== undefined && skillsService !== null && typeof skillsService.registerProvider === 'function') {
+        ctx.effect(() => {
+          try {
+            return skillsService.registerProvider((control) => {
+              computerSkills.attachControl(control)
+              return computerSkills.provider
+            })
+          } catch (error) {
+            // A duplicate/reserved provider name or a broken registry must not
+            // take the whole plugin down: the computers keep working, only the
+            // slash-menu entries are missing.
+            onWarn(`dsh-computers: could not register the remote skills provider: ${error && error.message ? error.message : error}`)
+            return () => {}
+          }
+        }, 'dsh-computers: remote skills provider')
+      }
+    } catch (error) {
+      onWarn(`dsh-computers: the skills service is unavailable: ${error && error.message ? error.message : error}`)
+    }
 
     // Every registered route is its own effect; this one owns the timers and
     // the in-flight exec promises so a plugin reload cannot leak either.

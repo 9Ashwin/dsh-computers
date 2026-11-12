@@ -548,6 +548,8 @@ export class MockComputerServer {
       agentVersion: body.agentVersion,
       capabilities: body.capabilities,
       metadata: body.metadata,
+      // v1.9.0: the machine's local skills report (top-level, not in metadata).
+      skills: body.skills,
       machine,
       replace: body.replace === true,
     })

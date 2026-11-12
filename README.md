@@ -53,7 +53,7 @@ dsh plugin install dsh-computers@1.7.1
 
 - 用**同一个 spec** 再装一次只会得到 `already-installed`（这就是「再安装没法更新」的原因）；
 - 装 **tag** 会被冻住，市场永远检测不到更新；装**分支**（不带 `#`）才能被市场「检查更新」发现新提交；
-- 手动升级到某个版本要**换 spec**：`dsh plugin install github:9Ashwin/dsh-computers#v1.8.0`。
+- 手动升级到某个版本要**换 spec**：`dsh plugin install github:9Ashwin/dsh-computers#v1.9.0`。
 
 > 更新完记得重启 Host 并刷新页面，具体见 [docs/deploy.md](./docs/deploy.md)。
 
@@ -130,6 +130,22 @@ tail -f ~/.dsh-computers/agent.log
 - **流式**：长命令的分块输出会随帧回传（含心跳），后台任务的输出可在 DSH 的任务里查看。
 - **超时转后台**：前台命令超时默认不杀（`promoteOnTimeout: true`），而是转入后台任务并返回 jobId，之后用内置的 `job_output` / `job_kill` 接管。
 - **激活时机**：新电脑要等 agent 首次建流后才出现在列表（从生成密钥到真正连上之间，弹窗会一直显示"等待电脑连接…"）。
+
+## 2.8 远端技能进斜杠菜单（v1.9.0）
+
+每台电脑把自己的技能报给主控，斜杠菜单里按机器区分：
+
+```
+/                      ← 输入 / 打开
+  /image-compress      ← 服务器本机
+  /air-image-compress  ← Air 上的技能
+  /mini-video-cut      ← mini 上的技能
+```
+
+- 用的是 DSH 官方扩展点 `ctx.skills.registerProvider`，和本机技能并列
+- 选中后主控去那台机器读 `SKILL.md`，执行落在**那台机器**上
+- 机器离线时它的技能从菜单消失
+- 另有 `computer_skills` 工具显式列出某台机器有什么技能
 
 ## 2.9 账号中心（v1.8.0）
 

@@ -13,7 +13,7 @@ import fs from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
-import { AGENT_VERSION, LIVENESS } from '../dsh-computers-agent.mjs'
+import { AGENT_VERSION, LIVENESS, scanLocalSkills } from '../dsh-computers-agent.mjs'
 import { MockComputerServer } from './mock-server.mjs'
 import {
   agentPath,
@@ -1470,4 +1470,221 @@ test('liveness: a stable stream resets the backoff attempt counter', async (t) =
   const log = agent.output + (await readLog(home))
   const nominal = [...log.matchAll(/标称 (\d+)ms/g)].map((match) => Number(match[1]))
   assert.deepEqual(nominal.slice(0, 3), [20, 40, 20], `nominal steps were ${nominal.join(',')}`)
+})
+
+// ---------------------------------------------------------------------------
+// v1.9.0: local skills report (enroll body + every heartbeat)
+//
+// The hub lists a machine's skills in DSH's slash menu, so the agent reports
+// `<root>/<skill>/SKILL.md` from ~/.dsh/skills, ~/.agents/skills and the same
+// two under workspaceBase. The tests below set HOME to a throw-away directory
+// so the developer's own skills never leak into the fixtures.
+// ---------------------------------------------------------------------------
+
+/** Create `<root>/<name>/SKILL.md` with `content` and return the skill dir. */
+async function writeSkill(root, name, content) {
+  const dir = path.join(root, name)
+  await fs.mkdir(dir, { recursive: true })
+  await fs.writeFile(path.join(dir, 'SKILL.md'), content)
+  return dir
+}
+
+test('skills: enroll and every heartbeat report the machine’s SKILL.md directories', async (t) => {
+  const { mock, home } = await setup(t, { heartbeatMs: 400 })
+  const skillHome = await tempHome('dshc-skill-home-')
+  const workspace = await tempHome('dshc-skill-ws-')
+  t.after(async () => {
+    await rmQuiet(skillHome)
+    await rmQuiet(workspace)
+  })
+
+  await writeSkill(
+    path.join(skillHome, '.dsh', 'skills'),
+    'alpha',
+    '---\nname: alpha\ndescription: "Alpha skill: does alpha things"\nwhenToUse: when alpha is needed\n---\n\n# Alpha\n\nBody line here.\n',
+  )
+  // No frontmatter: name from the directory, description from the first body
+  // line (the markdown heading marker is stripped).
+  await writeSkill(path.join(skillHome, '.agents', 'skills'), 'beta', '# Beta skill\n\nBeta has no frontmatter at all.\n')
+  // Malformed (unterminated) frontmatter: falls back to the directory name.
+  await writeSkill(path.join(workspace, '.dsh', 'skills'), 'gamma', '---\nname: gamma\nthis is not yaml\n')
+  // A block-scalar description is outside the supported subset: first body line.
+  await writeSkill(
+    path.join(workspace, '.agents', 'skills'),
+    'delta',
+    '---\nname: delta\ndescription: |\n---\nDelta body first line\n',
+  )
+
+  // `path` is the skill's DIRECTORY on this machine: the hub reads
+  // `<path>/SKILL.md` back when DSH invokes the skill, and a skill under `~`
+  // cannot be re-derived from workspaceBase.
+  const expected = [
+    {
+      name: 'alpha',
+      description: 'Alpha skill: does alpha things',
+      path: path.join(skillHome, '.dsh', 'skills', 'alpha'),
+      whenToUse: 'when alpha is needed',
+    },
+    { name: 'beta', description: 'Beta skill', path: path.join(skillHome, '.agents', 'skills', 'beta') },
+    { name: 'gamma', description: 'gamma', path: path.join(workspace, '.dsh', 'skills', 'gamma') },
+    { name: 'delta', description: 'Delta body first line', path: path.join(workspace, '.agents', 'skills', 'delta') },
+  ]
+
+  await enrollAgent(mock, home, {
+    extraArgs: ['--workspace-base', workspace],
+    runOptions: { env: { HOME: skillHome } },
+  })
+  assert.deepEqual(mock.enrollments.at(-1).skills, expected, 'the enroll body carries the skills report')
+
+  const agent = startAgent({ home, env: { HOME: skillHome } })
+  t.after(() => agent.stop())
+  const heartbeat = await mock.waitForHeartbeat({ timeoutMs: 15_000 })
+  assert.deepEqual(heartbeat.body.skills, expected, 'every heartbeat carries the same list')
+})
+
+test('skills: invalid names are dropped and long text is capped at 200 chars', async (t) => {
+  const { mock, home } = await setup(t)
+  const skillHome = await tempHome('dshc-skill-home-')
+  const workspace = await tempHome('dshc-skill-ws-')
+  t.after(async () => {
+    await rmQuiet(skillHome)
+    await rmQuiet(workspace)
+  })
+
+  const root = path.join(skillHome, '.dsh', 'skills')
+  await writeSkill(root, 'Bad_Name', '---\nname: Bad_Name\ndescription: not kebab-case\n---\n')
+  await writeSkill(root, 'UPPER', '---\nname: UPPER\ndescription: uppercase is not kebab-case\n---\n')
+  await writeSkill(root, 'good', '---\nname: good\ndescription: a perfectly listable skill\n---\n')
+  await writeSkill(
+    root,
+    'long-text',
+    `---\nname: long-text\ndescription: ${'x'.repeat(300)}\nwhenToUse: ${'y'.repeat(300)}\n---\n`,
+  )
+
+  await enrollAgent(mock, home, {
+    extraArgs: ['--workspace-base', workspace],
+    runOptions: { env: { HOME: skillHome } },
+  })
+  const skills = mock.enrollments.at(-1).skills
+  assert.deepEqual(skills.map((skill) => skill.name), ['good', 'long-text'], 'invalid names are dropped, order is stable')
+  const longText = skills.find((skill) => skill.name === 'long-text')
+  assert.equal(longText.description, 'x'.repeat(200), 'description clamped to 200 chars')
+  assert.equal(longText.whenToUse, 'y'.repeat(200), 'whenToUse clamped to 200 chars')
+})
+
+test('skills: at most 50 entries and the report stays under the 10 KiB budget', async (t) => {
+  const { mock, home } = await setup(t)
+  const skillHome = await tempHome('dshc-skill-home-')
+  const workspace = await tempHome('dshc-skill-ws-')
+  t.after(async () => {
+    await rmQuiet(skillHome)
+    await rmQuiet(workspace)
+  })
+
+  const root = path.join(skillHome, '.dsh', 'skills')
+  for (let index = 0; index < 60; index++) {
+    const name = `skill-${String(index).padStart(2, '0')}`
+    await writeSkill(root, name, `---\nname: ${name}\ndescription: skill number ${index}\n---\n`)
+  }
+
+  await enrollAgent(mock, home, {
+    extraArgs: ['--workspace-base', workspace],
+    runOptions: { env: { HOME: skillHome } },
+  })
+  const skills = mock.enrollments.at(-1).skills
+  assert.equal(skills.length, 50, 'hard cap of 50 entries')
+  assert.equal(skills[0].name, 'skill-00')
+  assert.equal(skills.at(-1).name, 'skill-49')
+  assert.ok(
+    Buffer.byteLength(JSON.stringify(skills), 'utf8') <= 10 * 1024,
+    `skills report must stay under 10 KiB, was ${Buffer.byteLength(JSON.stringify(skills), 'utf8')}`,
+  )
+})
+
+test(
+  'skills: unreadable directories and SKILL.md files are skipped without failing enroll',
+  { skip: process.platform === 'win32' ? 'POSIX permissions are required' : false },
+  async (t) => {
+    if (typeof process.getuid === 'function' && process.getuid() === 0) {
+      t.skip('running as root: permission bits are not enforced')
+      return
+    }
+    const { mock, home } = await setup(t)
+    const skillHome = await tempHome('dshc-skill-home-')
+    const workspace = await tempHome('dshc-skill-ws-')
+    const workspaceSkills = path.join(workspace, '.dsh', 'skills')
+    await writeSkill(workspaceSkills, 'visible', '---\nname: visible\ndescription: readable skill\n---\n')
+    const lockedDir = await writeSkill(workspaceSkills, 'locked', '---\nname: locked\ndescription: unreadable file\n---\n')
+    const unreadableRoot = path.join(skillHome, '.agents', 'skills')
+    await fs.mkdir(unreadableRoot, { recursive: true })
+    await fs.chmod(path.join(lockedDir, 'SKILL.md'), 0o000)
+    await fs.chmod(unreadableRoot, 0o000)
+    t.after(async () => {
+      // Restore permissions first, otherwise the temp dir cannot be removed.
+      await fs.chmod(unreadableRoot, 0o755).catch(() => {})
+      await fs.chmod(path.join(lockedDir, 'SKILL.md'), 0o644).catch(() => {})
+      await rmQuiet(skillHome)
+      await rmQuiet(workspace)
+    })
+
+    const key = mock.createEnrollKey({ replace: true })
+    const result = await runCli(
+      ['enroll', '--server', mock.url, '--key', key, '--workspace-base', workspace],
+      { home, env: { HOME: skillHome } },
+    )
+    assert.equal(result.code, 0, `enroll must survive unreadable skill paths:\n${result.stderr}`)
+    const skills = mock.enrollments.at(-1).skills
+    assert.deepEqual(skills.map((skill) => skill.name), ['visible'], 'unreadable skill dirs/files are skipped')
+  },
+)
+
+test('skills: a machine with no skills reports an empty list', async (t) => {
+  const { mock, home } = await setup(t, { heartbeatMs: 400 })
+  const skillHome = await tempHome('dshc-skill-home-')
+  const workspace = await tempHome('dshc-skill-ws-')
+  t.after(async () => {
+    await rmQuiet(skillHome)
+    await rmQuiet(workspace)
+  })
+
+  await enrollAgent(mock, home, {
+    extraArgs: ['--workspace-base', workspace],
+    runOptions: { env: { HOME: skillHome } },
+  })
+  assert.deepEqual(mock.enrollments.at(-1).skills, [], 'enroll reports [] when there are no skills')
+
+  const agent = startAgent({ home, env: { HOME: skillHome } })
+  t.after(() => agent.stop())
+  const heartbeat = await mock.waitForHeartbeat({ timeoutMs: 15_000 })
+  assert.deepEqual(heartbeat.body.skills, [], 'heartbeats report [] too')
+})
+
+test('skills: the scan re-runs when a SKILL.md changes and reuses the cache otherwise', async (t) => {
+  const skillHome = await tempHome('dshc-skill-home-')
+  const workspace = await tempHome('dshc-skill-ws-')
+  t.after(async () => {
+    await rmQuiet(skillHome)
+    await rmQuiet(workspace)
+  })
+
+  const root = path.join(skillHome, '.dsh', 'skills')
+  await writeSkill(root, 'one', '---\nname: one\ndescription: first description\n---\n')
+  const onePath = path.join(root, 'one')
+  const first = scanLocalSkills(workspace, { home: skillHome })
+  assert.deepEqual(first, [{ name: 'one', description: 'first description', path: onePath }])
+  assert.deepEqual(scanLocalSkills(workspace, { home: skillHome }), first, 'an unchanged tree reuses the cached report')
+
+  await writeSkill(root, 'two', '---\nname: two\ndescription: second skill\n---\n')
+  const grown = scanLocalSkills(workspace, { home: skillHome })
+  assert.deepEqual(grown.map((skill) => skill.name), ['one', 'two'], 'a new skill directory triggers a re-scan')
+
+  await writeSkill(root, 'one', '---\nname: one\ndescription: a much longer replacement description\n---\n')
+  const updated = scanLocalSkills(workspace, { home: skillHome })
+  assert.equal(updated[0].description, 'a much longer replacement description', 'a changed SKILL.md is re-read')
+
+  assert.deepEqual(
+    scanLocalSkills(path.join(workspace, 'does-not-exist'), { home: path.join(skillHome, 'does-not-exist') }),
+    [],
+    'missing roots never throw',
+  )
 })
