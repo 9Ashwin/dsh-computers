@@ -824,5 +824,21 @@ frame = opcode(1) | metaLen(4, BE) | meta(JSON) | payload
   "state": "disabled", "connectedAt": null, "lastError": null, "streams": 0 }
 ```
 
-`state` ∈ `disabled | idle | connecting | reconnecting | connected | failed | closed`（`connectedAt` 为 epoch 毫秒或 `null`）。启用且连接成功时，
+`state` ∈ `disabled | idle | connecting | reconnecting | connected | failed | closed`（`connectedAt` 为 epoch 毫秒或 `null`）。
+v1.6.1 起另有 `enabledSource: 'ui' | 'config'` 与 `canEnable: boolean`（未配置 `relay.url` 时为 false）。
+
+开关（v1.6.1，UI 用，不必改配置）：
+
+| 路由 | 语义 |
+| --- | --- |
+| `GET /api/dsh-computers/relay` | 返回 `/state.relay`（轻量轮询） |
+| `POST /api/dsh-computers/relay/enable` | body `{ enabled: boolean }`；持久化覆盖到 `relay.json.enabled`，**现场启停**链路，无需重载插件 |
+
+`relay.json` 为 `{ version, hubId, createdAt, enabled: boolean | null }`；`null` = 跟随配置默认值。
+
+### 12.7 enroll 返回的 `serverUrl`
+
+`POST /agent/enroll` 的响应里 `serverUrl` **必须是本 hub 对外公布的地址**（中继 > 公网 > 局域网），
+不能是请求来源地址：经中继转发时 bridge 会强制 `Host: 127.0.0.1:<port>`，回显它会让那台机器
+把自己的回环地址存成上游（v1.6.0 的真实故障）。启用且连接成功时，
 `serverUrls` 首位出现 `{ "kind": "relay", "label": "中继" }` 候选并被推荐。

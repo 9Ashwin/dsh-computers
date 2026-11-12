@@ -20,7 +20,10 @@
  * per-session target selection (selection routes, tool default, list marker),
  * and the relay host wiring (v1.6.0): config validation, hubId minting/reuse in
  * its own relay.json, `/state.relay` for disabled/connecting/connected/failed,
- * and the `relay` address candidate (first and recommended only while up).
+ * and the `relay` address candidate (first and recommended only while up); plus
+ * the live relay switch (v1.6.1): POST /relay/enable persisting a runtime
+ * override, live dial/dispose without a reload, the override surviving a fresh
+ * manager, and canEnable/rejection when no relay.url is configured.
  */
 
 import assert from 'node:assert/strict'
@@ -1466,6 +1469,8 @@ async function phaseE(root) {
       const paths = [...runtimeRole.fake.routes.keys()].sort()
       assert.deepEqual(paths, [
         `${API}/health`,
+        `${API}/relay`,
+        `${API}/relay/enable`,
         `${API}/runtime`,
         `${API}/runtime/connect`,
         `${API}/runtime/disconnect`,
@@ -4547,6 +4552,8 @@ async function phaseR(root) {
 /** The documented `/state.relay` shape when relay is off (or no manager). */
 const RELAY_OFF = Object.freeze({
   enabled: false,
+  enabledSource: 'config',
+  canEnable: false,
   configured: false,
   hubId: '',
   url: '',
@@ -4607,6 +4614,35 @@ function fakeRelayDeps(link) {
       return link
     },
   }
+}
+
+/**
+ * A relayDeps seam that mints a FRESH fake link per dial, so a disable/enable
+ * round trip is observable (each activation gets its own state machine).
+ * `links` is the ordered list of links the manager created.
+ */
+function fakeRelayDepsFactory() {
+  const links = []
+  return {
+    links,
+    deps: {
+      createHubLink(options) {
+        const link = createFakeHubLink()
+        link.options = options
+        links.push(link)
+        return link
+      },
+    },
+  }
+}
+
+/** Read relay.json, asserting it exists and is 0600 (the override document). */
+function readRelayDoc(dir) {
+  const file = join(dir, 'relay.json')
+  assert.ok(existsSync(file), 'relay.json must exist')
+  const mode = statSync(file).mode & 0o777
+  assert.equal(mode, 0o600, `relay.json must be 0600, got 0${mode.toString(8)}`)
+  return JSON.parse(readFileSync(file, 'utf8'))
 }
 
 /** GET /state and return only the relay block. */
@@ -4724,9 +4760,11 @@ async function phaseS(root) {
       assert.ok(existsSync(identityFile), 'relay.json must be written when the id is minted')
       assert.equal(statSync(identityFile).mode & 0o777, 0o600, `relay.json must be 0600, got 0${(statSync(identityFile).mode & 0o777).toString(8)}`)
       const identity = JSON.parse(readFileSync(identityFile, 'utf8'))
-      assert.deepEqual(Object.keys(identity).sort(), ['createdAt', 'hubId', 'version'])
+      assert.deepEqual(Object.keys(identity).sort(), ['createdAt', 'enabled', 'hubId', 'version'])
       assert.equal(identity.version, 1)
       assert.equal(identity.hubId, hubId)
+      // No UI decision yet: the switch follows the config default.
+      assert.equal(identity.enabled, null)
       assert.ok(Number.isFinite(Date.parse(identity.createdAt)), 'createdAt must be ISO')
       // Never in state.json: resetting the registry must not orphan the address.
       assert.equal(readFileSync(join(relayDir, 'state.json'), 'utf8').includes(hubId), false, 'the hubId must not live in state.json')
@@ -4747,6 +4785,28 @@ async function phaseS(root) {
       assert.ok(connected.serverUrls.some((c) => c.kind === 'public'), 'the public candidate is still listed')
       assert.equal(connected.serverUrls.filter((c) => c.recommended).length, 1, 'exactly one recommendation')
       assert.ok(candidate.health !== undefined, 'candidates keep the health annotation')
+
+      // An enroll that arrives THROUGH the relay must answer with the advertised
+      // address, not the forced Host: the agent persists this field as its
+      // upstream, so echoing 127.0.0.1 back would make that machine dial itself.
+      const keysResponse = await call(first.origin, `${API}/keys`, { method: 'POST', body: { os: 'macos' } })
+      const enrollKey = keysResponse.data.key
+      assert.equal(typeof enrollKey, 'string', `keys answered ${JSON.stringify(keysResponse.data).slice(0, 200)}`)
+      const enrolled = await raw(first.origin, `${API}/agent/enroll`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', host: '127.0.0.1:9999', 'x-forwarded-proto': 'https' },
+        body: JSON.stringify({
+          key: enrollKey,
+          agentVersion: PLUGIN_VERSION,
+          capabilities: ['exec'],
+          machine: { hostname: 'relay-probe.local', os: 'macos', arch: 'arm64' },
+        }),
+      })
+      const enrollBody = enrolled.data
+      assert.equal(enrolled.status, 200, `enroll answered ${JSON.stringify(enrollBody).slice(0, 200)}`)
+      assert.equal(enrolled.status, 200)
+      assert.equal(enrollBody.serverUrl, connected.relay.publicUrl, 'enroll answers the relay address, not the request Host')
+      assert.equal(enrollBody.serverUrl.includes('127.0.0.1'), false, 'never the loopback the bridge forced')
 
       // A drop removes the address instead of advertising a dead one.
       link.set({ state: 'reconnecting', connectedAt: null, lastError: 'socket closed' })
@@ -4870,6 +4930,295 @@ async function phaseS(root) {
   })
 }
 
+// ---------------------------------------------------------------------------
+// Phase T — relay live toggle (v1.6.1): persisted override + switch routes
+// ---------------------------------------------------------------------------
+
+async function phaseT(root) {
+  await check('relay toggle: the config default applies while no override exists', async () => {
+    // Off by config: no relay.json, but the switch is offered because a url exists.
+    const offDir = join(root, 't-default-off')
+    const off = fakeRelayDepsFactory()
+    const offApp = await mount({
+      ...FAST_CONFIG,
+      stateDir: offDir,
+      relay: { url: RELAY_URL },
+    }, { relayDeps: off.deps })
+    try {
+      const relay = await relayOf(offApp.origin)
+      assert.equal(relay.enabled, false)
+      assert.equal(relay.enabledSource, 'config')
+      assert.equal(relay.canEnable, true, 'a configured relay.url makes the UI switch usable')
+      assert.equal(relay.state, 'disabled')
+      assert.equal(off.links.length, 0, 'a config-disabled relay never dials')
+      assert.equal(existsSync(join(offDir, 'relay.json')), false, 'no override means no relay.json')
+      // GET /relay is the cheap poll target: same shape as /state.relay.
+      const polled = await call(offApp.origin, `${API}/relay`)
+      assert.equal(polled.status, 200)
+      assert.deepEqual(polled.data, relay, 'GET /relay and /state.relay agree')
+    } finally {
+      await offApp.close()
+    }
+
+    // On by config: dials and reports that the value came from the config.
+    const onDir = join(root, 't-default-on')
+    const on = fakeRelayDepsFactory()
+    const onApp = await mount({
+      ...FAST_CONFIG,
+      stateDir: onDir,
+      relay: { enabled: true, url: RELAY_URL },
+    }, { relayDeps: on.deps })
+    try {
+      const relay = await waitFor(() => relayOf(onApp.origin), (value) => value.state === 'connecting', 4000, 'config-enabled relay')
+      assert.equal(relay.enabled, true)
+      assert.equal(relay.enabledSource, 'config')
+      assert.equal(relay.canEnable, true)
+      assert.equal(on.links.length, 1)
+      assert.equal(on.links[0].started, 1)
+      const doc = readRelayDoc(onDir)
+      assert.equal(doc.enabled, null, 'no UI decision: relay.json keeps enabled null')
+      assert.match(doc.hubId, HUB_ID_SHAPE)
+    } finally {
+      await onApp.close()
+    }
+  })
+
+  await check('relay toggle: POST /relay/enable dials live, disposes live, persists 0600', async () => {
+    const dir = join(root, 't-toggle')
+    const fake = fakeRelayDepsFactory()
+    const app = await mount({
+      ...FAST_CONFIG,
+      stateDir: dir,
+      relay: { url: RELAY_URL },
+    }, { relayDeps: fake.deps })
+    try {
+      assert.equal((await relayOf(app.origin)).enabled, false)
+
+      // ---- on: the link is dialled immediately, no plugin reload ----------
+      const enabled = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { enabled: true } })
+      assert.equal(enabled.status, 200)
+      assert.equal(enabled.data.enabled, true)
+      assert.equal(enabled.data.enabledSource, 'ui')
+      assert.equal(enabled.data.canEnable, true)
+      assert.equal(enabled.data.state, 'connecting', 'the switch takes effect synchronously')
+      assert.match(enabled.data.hubId, HUB_ID_SHAPE, 'the address is minted on first enable')
+      const dialed = await waitFor(() => relayOf(app.origin), (value) => value.state === 'connecting' || value.state === 'connected', 4000, 'ui-enabled relay')
+      assert.equal(fake.links.length, 1, 'enabling dials immediately')
+      assert.equal(fake.links[0].started, 1)
+      assert.equal(fake.links[0].options.hubId, dialed.hubId)
+      assert.equal(fake.links[0].options.relayUrl, RELAY_URL)
+      const onDoc = readRelayDoc(dir)
+      assert.equal(onDoc.enabled, true, 'the UI override is persisted')
+      assert.equal(onDoc.hubId, dialed.hubId)
+
+      // Connected: the relay address becomes the recommended candidate.
+      fake.links[0].set({ state: 'open', connectedAt: Date.now() })
+      const connected = await waitFor(async () => (await call(app.origin, `${API}/state`)).data, (data) => data.relay.state === 'connected', 5000, 'relay connected')
+      assert.equal(connected.relay.enabledSource, 'ui')
+      assert.equal(connected.serverUrls[0].kind, 'relay')
+      assert.equal(connected.serverUrls[0].url, connected.relay.publicUrl)
+
+      // Enabling twice must not dial a second link.
+      const again = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { enabled: true } })
+      assert.equal(again.status, 200)
+      assert.equal(again.data.enabled, true)
+      assert.equal(fake.links.length, 1, 'enable is idempotent')
+
+      // ---- off: the link is disposed and the snapshot returns to disabled --
+      const disabled = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { enabled: false } })
+      assert.equal(disabled.status, 200)
+      assert.equal(disabled.data.enabled, false)
+      assert.equal(disabled.data.enabledSource, 'ui')
+      assert.equal(disabled.data.state, 'disabled')
+      assert.equal(disabled.data.configured, false)
+      assert.equal(disabled.data.connectedAt, null)
+      assert.equal(disabled.data.streams, 0)
+      assert.equal(disabled.data.lastError, null)
+      assert.equal(fake.links[0].stopped >= 1, true, 'disabling disposes the live link')
+      const after = (await call(app.origin, `${API}/state`)).data
+      assert.equal(after.relay.state, 'disabled')
+      assert.equal(after.serverUrls.some((candidate) => candidate.kind === 'relay'), false, 'a disabled relay is not advertised')
+      assert.equal(after.relay.hubId, dialed.hubId, 'the address identity survives the toggle')
+      const offDoc = readRelayDoc(dir)
+      assert.equal(offDoc.enabled, false, 'the off decision is persisted')
+      assert.equal(offDoc.hubId, dialed.hubId)
+
+      // ---- back on: same address, a fresh link ----------------------------
+      const reenabled = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { enabled: true } })
+      assert.equal(reenabled.status, 200)
+      assert.equal(reenabled.data.enabled, true)
+      assert.equal(reenabled.data.state, 'connecting')
+      assert.equal(reenabled.data.hubId, dialed.hubId, 're-enabling reuses the minted address')
+      assert.equal(fake.links.length, 2, 're-enabling dials a fresh link')
+      assert.equal(fake.links[1].options.hubId, dialed.hubId)
+    } finally {
+      await app.close()
+    }
+  })
+
+  await check('relay toggle: a UI override survives a fresh manager in both directions', async () => {
+    // UI-on, then reload with the config still saying off.
+    const dir = join(root, 't-survive')
+    const first = fakeRelayDepsFactory()
+    const firstApp = await mount({
+      ...FAST_CONFIG,
+      stateDir: dir,
+      relay: { url: RELAY_URL },
+    }, { relayDeps: first.deps })
+    let hubId
+    try {
+      const enabled = await call(firstApp.origin, `${API}/relay/enable`, { method: 'POST', body: { enabled: true } })
+      assert.equal(enabled.status, 200)
+      hubId = enabled.data.hubId
+    } finally {
+      await firstApp.close()
+    }
+
+    const second = fakeRelayDepsFactory()
+    const secondApp = await mount({
+      ...FAST_CONFIG,
+      stateDir: dir,
+      relay: { url: RELAY_URL },
+    }, { relayDeps: second.deps })
+    try {
+      const relay = await waitFor(() => relayOf(secondApp.origin), (value) => value.state === 'connecting' || value.state === 'connected', 4000, 'persisted on override')
+      assert.equal(relay.enabled, true, 'the persisted override wins over the config default')
+      assert.equal(relay.enabledSource, 'ui')
+      assert.equal(relay.hubId, hubId, 'the address survives the reload')
+      assert.equal(second.links.length, 1, 'a fresh manager auto-dials from the persisted override')
+      assert.equal(readRelayDoc(dir).enabled, true)
+      // UI-off now, so the third load must not dial even against enabled:true.
+      const disabled = await call(secondApp.origin, `${API}/relay/enable`, { method: 'POST', body: { enabled: false } })
+      assert.equal(disabled.status, 200)
+      assert.equal(disabled.data.enabled, false)
+    } finally {
+      await secondApp.close()
+    }
+
+    const third = fakeRelayDepsFactory()
+    const thirdApp = await mount({
+      ...FAST_CONFIG,
+      stateDir: dir,
+      relay: { enabled: true, url: RELAY_URL },
+    }, { relayDeps: third.deps })
+    try {
+      const relay = await relayOf(thirdApp.origin)
+      assert.equal(relay.enabled, false, 'the persisted off override wins over config enabled:true')
+      assert.equal(relay.enabledSource, 'ui')
+      assert.equal(relay.state, 'disabled')
+      assert.equal(relay.canEnable, true, 'the switch stays usable so the user can turn it back on')
+      assert.equal(relay.hubId, hubId)
+      assert.equal(third.links.length, 0, 'a UI-disabled relay does not dial on load')
+    } finally {
+      await thirdApp.close()
+    }
+  })
+
+  await check('relay toggle: canEnable:false without relay.url and the route rejects enabling', async () => {
+    const dir = join(root, 't-nourl')
+    const fake = fakeRelayDepsFactory()
+    const app = await mount({
+      ...FAST_CONFIG,
+      stateDir: dir,
+      relay: {},
+    }, { relayDeps: fake.deps })
+    try {
+      const relay = await relayOf(app.origin)
+      assert.equal(relay.enabled, false)
+      assert.equal(relay.enabledSource, 'config')
+      assert.equal(relay.canEnable, false, 'no relay.url means the UI switch must be disabled')
+      assert.equal((await call(app.origin, `${API}/relay`)).data.canEnable, false)
+
+      const rejected = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { enabled: true } })
+      assert.equal(rejected.status, 400)
+      assert.equal(rejected.data.error, 'relay-not-configured')
+      assert.match(rejected.data.message, /relay\.url is not configured/)
+      assert.match(rejected.data.message, /wss:\/\//, 'the rejection names an example relay address')
+      assert.equal(fake.links.length, 0, 'a rejected enable never dials')
+      assert.equal(existsSync(join(dir, 'relay.json')), false, 'a rejected enable persists nothing')
+
+      // Disabling is always allowed: it is how a stuck override is cleared.
+      const off = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { enabled: false } })
+      assert.equal(off.status, 200)
+      assert.equal(off.data.enabled, false)
+      assert.equal(existsSync(join(dir, 'relay.json')), false, 'nothing to persist without an address')
+    } finally {
+      await app.close()
+    }
+  })
+
+  await check('relay toggle: body validation, drift tolerance and the browser gate', async () => {
+    const dir = join(root, 't-guard')
+    const fake = fakeRelayDepsFactory()
+    const app = await mount({
+      ...FAST_CONFIG,
+      stateDir: dir,
+      relay: { url: RELAY_URL },
+    }, { relayDeps: fake.deps })
+    try {
+      for (const body of [{ enabled: 'yes' }, { enabled: 1 }, { enabled: null }, {}]) {
+        const bad = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body })
+        assert.equal(bad.status, 400, `body ${JSON.stringify(body)} must be rejected`)
+        assert.equal(bad.data.error, 'bad-request')
+      }
+      const wrongMethod = await call(app.origin, `${API}/relay`, { method: 'PUT', body: {} })
+      assert.equal(wrongMethod.status, 405)
+      assert.equal(wrongMethod.data.error, 'method-not-allowed')
+
+      // Drift tolerance: unknown body keys are ignored, not fatal.
+      const drift = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { enabled: true, from: 'client-v2' } })
+      assert.equal(drift.status, 200)
+      assert.equal(drift.data.enabled, true)
+      assert.equal(fake.links.length, 1)
+
+      // The gate answers before anything is read or persisted.
+      app.fake.setGate({ requestRejection: (req) => (req.headers['x-smoke-refuse'] === '1' ? 403 : undefined) })
+      const refusedPost = await call(app.origin, `${API}/relay/enable`, {
+        method: 'POST', body: { enabled: false }, headers: { 'x-smoke-refuse': '1' },
+      })
+      assert.equal(refusedPost.status, 403)
+      assert.equal(refusedPost.data.error, 'unadmitted')
+      const refusedGet = await call(app.origin, `${API}/relay`, { headers: { 'x-smoke-refuse': '1' } })
+      assert.equal(refusedGet.status, 403)
+      assert.equal(refusedGet.data.error, 'unadmitted')
+      assert.equal((await relayOf(app.origin)).enabled, true, 'a refused toggle changes nothing')
+      assert.equal(fake.links.length, 1, 'a refused toggle never dials')
+      app.fake.setGate(undefined)
+    } finally {
+      await app.close()
+    }
+  })
+
+  await check('relay toggle: the runtime-role surface serves the same switch', async () => {
+    const dir = join(root, 't-runtime')
+    const fake = fakeRelayDepsFactory()
+    const app = await mount({
+      ...FAST_CONFIG,
+      stateDir: dir,
+      role: 'runtime',
+      relay: { url: RELAY_URL },
+    }, { relayDeps: fake.deps })
+    try {
+      assert.ok(app.fake.routes.has(`${API}/relay`), 'runtime role serves GET /relay')
+      assert.ok(app.fake.routes.has(`${API}/relay/enable`), 'runtime role serves POST /relay/enable')
+      const before = await call(app.origin, `${API}/relay`)
+      assert.equal(before.status, 200)
+      assert.equal(before.data.enabled, false)
+      assert.equal(before.data.enabledSource, 'config')
+      assert.equal(before.data.canEnable, true)
+      const enabled = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { enabled: true } })
+      assert.equal(enabled.status, 200)
+      assert.equal(enabled.data.enabled, true)
+      assert.equal(enabled.data.enabledSource, 'ui')
+      assert.equal((await relayOf(app.origin)).enabled, true)
+      assert.equal(fake.links.length, 1)
+      assert.equal(readRelayDoc(dir).enabled, true)
+    } finally {
+      await app.close()
+    }
+  })
+}
+
 watchdog.unref()
 
 const root = mkdtempSync(join(tmpdir(), 'dshc-smoke-'))
@@ -4894,6 +5243,7 @@ try {
   await phaseQ(root)
   await phaseR(root)
   await phaseS(root)
+  await phaseT(root)
 } finally {
   rmSync(root, { recursive: true, force: true })
   clearTimeout(watchdog)
