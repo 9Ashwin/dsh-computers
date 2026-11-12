@@ -194,7 +194,12 @@ window.__ModuleLoader__.load({
       'access.presetDenied': '该电脑的 Bot 权限未包含当前预设',
       'cap.exec': '执行',
       'cap.fs': '文件',
+      'cap.jobs': '后台任务',
       'cap.pty': '终端',
+      'cap.exec.title': '可以在这台电脑上执行命令',
+      'cap.fs.title': '可以读写这台电脑上的文件',
+      'cap.jobs.title': '命令可以在后台继续跑',
+      'cap.pty.title': '可以打开交互式终端',
       'drift.chip': '可升级',
       'drift.title': '升级这台电脑的 agent',
       'drift.body': '这台电脑运行的是 agent {current}，需要更新的版本才能使用全部能力。',
@@ -364,7 +369,12 @@ window.__ModuleLoader__.load({
       'access.presetDenied': 'This computer’s Bot access does not include the current preset',
       'cap.exec': 'Exec',
       'cap.fs': 'Files',
+      'cap.jobs': 'Jobs',
       'cap.pty': 'Terminal',
+      'cap.exec.title': 'Can run commands on this computer',
+      'cap.fs.title': 'Can read and write files on this computer',
+      'cap.jobs.title': 'Commands can keep running in the background',
+      'cap.pty.title': 'Can open an interactive terminal',
       'drift.chip': 'Upgradable',
       'drift.title': 'Upgrade this computer’s agent',
       'drift.body': 'This computer runs agent {current}; a newer version is needed for every capability.',
@@ -2088,12 +2098,48 @@ window.__ModuleLoader__.load({
     }
 
     /* Capability ids → localized chip labels; unknown ids render raw. */
-    const CAPABILITY_KEYS = { exec: 'cap.exec', fs: 'cap.fs', pty: 'cap.pty' };
+    const CAPABILITY_KEYS = { exec: 'cap.exec', fs: 'cap.fs', jobs: 'cap.jobs', pty: 'cap.pty' };
+
+    /* R2: user-facing chips, in a stable order. `tunnel` is deliberately not
+     * a chip (it is relay plumbing, not something the machine can do). */
+    const CAPABILITY_CHIPS = [
+      { id: 'exec', label: 'cap.exec', title: 'cap.exec.title' },
+      { id: 'fs', label: 'cap.fs', title: 'cap.fs.title' },
+      { id: 'jobs', label: 'cap.jobs', title: 'cap.jobs.title' },
+      { id: 'pty', label: 'cap.pty', title: 'cap.pty.title' },
+    ];
 
     /** @param {string} capability - capability id. @returns {string} chip text. */
     function capabilityLabel(capability) {
       const key = CAPABILITY_KEYS[capability];
       return key === undefined ? String(capability) : t(key);
+    }
+
+    /**
+     * Derive the capability chips for a computer (or a runtime status).
+     * Prefers the host's boolean `caps` (R2); older hosts only send the
+     * legacy `capabilities` id array, so that stays as the fallback.
+     * @param {object|null} source - computer or runtime status.
+     * @returns {Array<{id: string, label: string, title: string|null}>} chips.
+     */
+    function derivedCapabilityChips(source) {
+      const caps = source !== null && typeof source === 'object' ? source.caps : null;
+      if (caps !== null && typeof caps === 'object') {
+        return CAPABILITY_CHIPS
+          .filter((chip) => caps[chip.id] === true)
+          .map((chip) => ({ id: chip.id, label: t(chip.label), title: t(chip.title) }));
+      }
+      const legacy = source !== null && typeof source === 'object' && Array.isArray(source.capabilities)
+        ? source.capabilities.filter((capability) => typeof capability === 'string' && capability !== '')
+        : [];
+      return legacy.map((capability) => {
+        const meta = CAPABILITY_CHIPS.find((chip) => chip.id === capability);
+        return {
+          id: capability,
+          label: capabilityLabel(capability),
+          title: meta === undefined ? null : t(meta.title),
+        };
+      });
     }
 
     /* The client root context, kept for the few late-bound services
@@ -2471,9 +2517,7 @@ window.__ModuleLoader__.load({
       const name = typeof computer.name === 'string' && computer.name !== ''
         ? computer.name
         : (typeof computer.hostname === 'string' ? computer.hostname : '');
-      const capabilities = Array.isArray(computer.capabilities)
-        ? computer.capabilities.filter((capability) => typeof capability === 'string' && capability !== '')
-        : [];
+      const capabilities = derivedCapabilityChips(computer);
       /* How this machine is connected decides the upgrade path (v1.3.2). */
       const modeLabel = computer.mode === 'embedded'
         ? t('mode.embedded')
@@ -2490,9 +2534,10 @@ window.__ModuleLoader__.load({
             onClick: () => props.onAccess(computer),
           }, t('badge.bots', { used, total })),
           capabilities.map((capability) => h('span', {
-            key: `cap-${capability}`,
+            key: `cap-${capability.id}`,
             className: 'dshc-capChip',
-          }, capabilityLabel(capability))),
+            title: capability.title === null ? undefined : capability.title,
+          }, capability.label)),
           modeLabel !== null
             ? h('span', { key: 'mode', className: 'dshc-modeHint' }, modeLabel)
             : null,
@@ -3110,12 +3155,10 @@ window.__ModuleLoader__.load({
         const agentVersion = typeof status.agentVersion === 'string' && status.agentVersion !== ''
           ? status.agentVersion
           : '';
-        const capabilities = Array.isArray(status.capabilities)
-          ? status.capabilities.filter((capability) => typeof capability === 'string' && capability !== '')
-          : [];
+        const capabilities = derivedCapabilityChips(status);
         const agentParts = [];
         if (agentVersion !== '') agentParts.push(`agent ${agentVersion}`);
-        if (capabilities.length > 0) agentParts.push(capabilities.map(capabilityLabel).join(' / '));
+        if (capabilities.length > 0) agentParts.push(capabilities.map((chip) => chip.label).join(' / '));
         const drift = status.updateRequired === true || status.drift === true;
         body = h('div', null,
           h('div', { className: 'dshc-runtimeName', title: name }, name),
