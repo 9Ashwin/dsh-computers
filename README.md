@@ -46,14 +46,14 @@ dsh plugin install github:9Ashwin/dsh-computers
 **npm 安装**：插件市场 → 已安装 → 「检查更新」即可，或者在 CLI 里装具体版本：
 
 ```bash
-dsh plugin install dsh-computers@1.7.0
+dsh plugin install dsh-computers@1.7.1
 ```
 
 **GitHub 安装**：profile 里是按 spec + commit 固定的（`github:user/repo` 或 `#v1.0.2`），所以
 
 - 用**同一个 spec** 再装一次只会得到 `already-installed`（这就是「再安装没法更新」的原因）；
 - 装 **tag** 会被冻住，市场永远检测不到更新；装**分支**（不带 `#`）才能被市场「检查更新」发现新提交；
-- 手动升级到某个版本要**换 spec**：`dsh plugin install github:9Ashwin/dsh-computers#v1.7.0`。
+- 手动升级到某个版本要**换 spec**：`dsh plugin install github:9Ashwin/dsh-computers#v1.7.1`。
 
 > 更新完记得重启 Host 并刷新页面，具体见 [docs/deploy.md](./docs/deploy.md)。
 
@@ -175,7 +175,7 @@ relay:
 - 自动生成并持久化 `hubId` 到 `<stateDir>/relay.json`（0600）——重置电脑列表不会让别人的收藏地址失效
 - 设置 → 电脑 → 本机地址 出现一行 **中继**：`https://dsh-relay.nextai.show/r/hub_xxx`，连接成功时是推荐地址
 - 别的电脑把「服务器地址」填成这个 URL + 加入密钥即可接入；手机浏览器直接打开它就是完整 UI（含 WebSocket）
-- **设置页里直接开关**（v1.6.1）：中继卡片上的「启用」开关现场拨号/断开，不用改配置文件
+- **全部在界面里配**（v1.7.1）：高级 → 中继 → 填地址 → 启用，现场拨号/换址；`cordis.patch.yml` 可以完全留空
 - 中继断开时该行标「未监听」并回落推荐，不会给你连不上的地址
 - 安全边界：hub 侧 bridge 只打本机 `127.0.0.1:<自己的端口>`（拒绝绝对 URL、`..`、强制 Host），中继看不到浏览器登录态
 - 部署（systemd + nginx + 证书）见 [docs/relay-deploy.md](./docs/relay-deploy.md)，协议见 [PROTOCOL.md](./PROTOCOL.md) §12

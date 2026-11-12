@@ -33,12 +33,17 @@ export const name = 'dsh-computers'
 export const inject = ['tools', 'webServer']
 
 /** Version reported by `/api/dsh-computers/health` (and asserted by the smoke harness). */
-export const PLUGIN_VERSION = '1.7.0'
+export const PLUGIN_VERSION = '1.7.1'
 
 /** The machine agent bundle, served at request time (never imported). */
 const AGENT_URL = new URL('./agent/dsh-computers-agent.mjs', import.meta.url)
 
-/** Protocol defaults (PROTOCOL §8); `''` means "use the default". */
+/**
+ * `role` is an ADVANCED escape hatch, not part of the normal setup: the plugin
+ * mounts everything (`both`) with an empty config, and the settings page owns
+ * the relay/runtime setup. The key stays accepted so an operator who wants a
+ * pure controller (`hub`) or a pure controlled machine (`runtime`) can say so.
+ */
 const ROLES = Object.freeze(['hub', 'runtime', 'both'])
 
 const DEFAULTS = Object.freeze({
@@ -307,10 +312,12 @@ export function apply(ctx, config) {
   // The hubId is the address other machines bookmark, so it lives in its own
   // relay.json (never state.json: resetting the computer registry must not
   // orphan an address already handed out). The same document carries the UI
-  // on/off override (v1.6.1): config keeps deployment facts only, so toggling
-  // the relay from the settings page persists here and never needs a
-  // cordis.patch.yml edit. It is read unconditionally — a deployment that sets
-  // `relay: { url }` and leaves `enabled` off must still see a persisted "on".
+  // on/off override (v1.6.1) and the UI relay address (v1.7.1): config keeps
+  // optional deployment facts, and the normal path is to set both up from the
+  // settings page with an EMPTY plugin config. It is read unconditionally — a
+  // deployment that sets `relay: { url }` and leaves `enabled` off must still
+  // see a persisted "on", and a UI address must still be used when the config
+  // has none.
   const persistedIdentity = readRelayIdentity(stateDir, { onWarn })
   const relayConfig = Object.freeze({
     ...resolved.relay,
@@ -321,20 +328,27 @@ export function apply(ctx, config) {
   const enabledOverride = persistedIdentity === null || typeof persistedIdentity.enabled !== 'boolean'
     ? null
     : persistedIdentity.enabled
+  // null = follow `relay.url` from the config; a string is the persisted UI address.
+  const urlOverride = persistedIdentity === null ? null : persistedIdentity.url
   const effectiveRelayEnabled = enabledOverride === null ? resolved.relay.enabled : enabledOverride
   const relay = createRelay({
     ctx,
     config: relayConfig,
     // null = follow the config default; a boolean is the persisted UI switch.
     enabledOverride,
+    // null = follow the config `relay.url`; a string is the persisted UI address.
+    urlOverride,
     // Fired when the manager mints an id: persist it before the first dial so
-    // the published address survives a restart (the write keeps the override).
+    // the published address survives a restart (the write keeps the overrides).
     onHubId: (hubId) => {
       writeRelayIdentity(stateDir, { hubId }, { onWarn })
     },
     // The settings switch: persist the override so it survives a plugin reload,
     // then the manager applies it live (dial or dispose) without one.
     onEnabled: (enabled, hubId) => writeRelayIdentity(stateDir, { hubId, enabled }, { onWarn }),
+    // The settings address (v1.7.1): `''` clears the override so the config
+    // value applies again. Persisted before the re-dial, so a reload keeps it.
+    onUrl: (url, hubId) => writeRelayIdentity(stateDir, { hubId, url: url === '' ? null : url }, { onWarn }),
     log: (level, message) => {
       // The link is chatty about reconnects; only surface warnings/errors, and
       // never let the relay's logging take the plugin down.

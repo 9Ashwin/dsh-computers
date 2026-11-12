@@ -832,9 +832,10 @@ v1.6.1 起另有 `enabledSource: 'ui' | 'config'` 与 `canEnable: boolean`（未
 | 路由 | 语义 |
 | --- | --- |
 | `GET /api/dsh-computers/relay` | 返回 `/state.relay`（轻量轮询） |
-| `POST /api/dsh-computers/relay/enable` | body `{ enabled: boolean }`；持久化覆盖到 `relay.json.enabled`，**现场启停**链路，无需重载插件 |
+| `POST /api/dsh-computers/relay/enable` | body `{ enabled?, url? }`；持久化覆盖到 `relay.json`（`enabled` / `url`），**现场启停与换址**，无需重载插件。`url:''` 清除覆盖回落配置 |
 
-`relay.json` 为 `{ version, hubId, createdAt, enabled: boolean | null }`；`null` = 跟随配置默认值。
+`relay.json` 为 `{ version, hubId, createdAt, enabled: boolean | null, url: string | null }`；`null` = 跟随配置默认值。
+v1.7.1 起 `url` 也能在界面里配置（`/state.relay.urlSource: 'ui' | 'config'`），所以 `cordis.patch.yml` 可以完全留空。
 
 ### 12.7 enroll 返回的 `serverUrl`
 

@@ -28,7 +28,11 @@
  * fleet.json, `/state.fleet` publishing the token as a URL fragment only, a
  * join-token enroll answering the advertised serverUrl, rotation invalidating
  * the old token while keeping the relay hubId, and runtime/connect accepting
- * the pasted `…#join=` string.
+ * the pasted `…#join=` string; plus the v1.7.1 UI-owned relay address: an
+ * EMPTY config mounts and serves `/state`, `resolveConfig({})` is a valid
+ * deployment (role stays an optional escape hatch), and POST /relay/enable
+ * accepts `{ enabled?, url? }` — url override round trip in 0600 relay.json,
+ * re-dial on change with the same hubId, clear → config fallback, bad url 400.
  */
 
 import assert from 'node:assert/strict'
@@ -4569,6 +4573,7 @@ async function phaseR(root) {
 const RELAY_OFF = Object.freeze({
   enabled: false,
   enabledSource: 'config',
+  urlSource: 'config',
   canEnable: false,
   configured: false,
   hubId: '',
@@ -4792,11 +4797,12 @@ async function phaseS(root) {
       assert.ok(existsSync(identityFile), 'relay.json must be written when the id is minted')
       assert.equal(statSync(identityFile).mode & 0o777, 0o600, `relay.json must be 0600, got 0${(statSync(identityFile).mode & 0o777).toString(8)}`)
       const identity = JSON.parse(readFileSync(identityFile, 'utf8'))
-      assert.deepEqual(Object.keys(identity).sort(), ['createdAt', 'enabled', 'hubId', 'version'])
+      assert.deepEqual(Object.keys(identity).sort(), ['createdAt', 'enabled', 'hubId', 'url', 'version'])
       assert.equal(identity.version, 1)
       assert.equal(identity.hubId, hubId)
       // No UI decision yet: the switch follows the config default.
       assert.equal(identity.enabled, null)
+      assert.equal(identity.url, null, 'no UI address yet: relay.json keeps url null')
       assert.ok(Number.isFinite(Date.parse(identity.createdAt)), 'createdAt must be ISO')
       // Never in state.json: resetting the registry must not orphan the address.
       assert.equal(readFileSync(join(relayDir, 'state.json'), 'utf8').includes(hubId), false, 'the hubId must not live in state.json')
@@ -5164,7 +5170,7 @@ async function phaseT(root) {
       const rejected = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { enabled: true } })
       assert.equal(rejected.status, 400)
       assert.equal(rejected.data.error, 'relay-not-configured')
-      assert.match(rejected.data.message, /relay\.url is not configured/)
+      assert.match(rejected.data.message, /no relay address is configured/)
       assert.match(rejected.data.message, /wss:\/\//, 'the rejection names an example relay address')
       assert.equal(fake.links.length, 0, 'a rejected enable never dials')
       assert.equal(existsSync(join(dir, 'relay.json')), false, 'a rejected enable persists nothing')
@@ -5540,6 +5546,296 @@ async function phaseU(root) {
   })
 }
 
+// ---------------------------------------------------------------------------
+// Phase V — v1.7.1: relay url from the UI, config becomes optional
+// ---------------------------------------------------------------------------
+
+async function phaseV(root) {
+  await check('relay url: resolveConfig({}) is a valid deployment and mounts everything', async () => {
+    // No config at all: documented defaults, no throw, nothing to write down.
+    const empty = resolveConfig({})
+    assert.equal(empty.role, 'both', 'role defaults to both, so nothing has to be configured')
+    assert.equal(empty.relay.enabled, false)
+    assert.equal(empty.relay.url, '')
+    // `role` stays accepted as an advanced escape hatch (not part of setup).
+    assert.equal(resolveConfig({ role: 'hub' }).role, 'hub')
+    assert.equal(resolveConfig({ role: 'runtime' }).role, 'runtime')
+    assert.equal(resolveConfig(undefined).role, 'both')
+    assert.throws(() => resolveConfig({ role: 'controller' }), /role must be one of/)
+
+    // Literally `{}`: state lives under $DSH_HOME/computers, everything else is
+    // configured from the WebUI at runtime. (The env var is read at apply time.)
+    const home = join(root, 'v-empty-home')
+    const stateDir = join(home, 'computers')
+    const previousHome = process.env.DSH_HOME
+    process.env.DSH_HOME = home
+    const fake = fakeRelayDepsFactory()
+    let app
+    try {
+      app = await mount({}, { relayDeps: fake.deps })
+      const state = (await call(app.origin, `${API}/state`)).data
+      assert.equal(state.role, 'both')
+      assert.deepEqual(state.relay, RELAY_OFF, 'an empty config serves the documented disabled relay shape')
+      assert.deepEqual(state.computers, [])
+      assert.equal(typeof state.serverUrl, 'string')
+      assert.notEqual(state.serverUrl, '', 'the hub advertises a direct address even with no config')
+      // The whole surface is mounted: hub API, relay switch and the tools.
+      assert.ok(app.fake.routes.has(`${API}/relay`), 'GET /relay is mounted')
+      assert.ok(app.fake.routes.has(`${API}/relay/enable`), 'POST /relay/enable is mounted')
+      assert.ok(app.fake.routes.has(`${API}/agent/enroll`), 'the hub API is mounted')
+      assert.ok(app.fake.tools.has('computer_list'), 'computer_list is registered')
+      assert.ok(app.fake.tools.has('computer_exec'), 'computer_exec is registered')
+      assert.ok(existsSync(join(stateDir, 'state.json')), 'the registry defaults under $DSH_HOME/computers')
+      assert.equal(existsSync(join(stateDir, 'relay.json')), false, 'an empty config persists nothing')
+      assert.equal(fake.links.length, 0, 'an empty config never dials')
+      assert.equal((await call(app.origin, `${API}/health`)).status, 200)
+    } finally {
+      if (app !== undefined) await app.close()
+      if (previousHome === undefined) delete process.env.DSH_HOME
+      else process.env.DSH_HOME = previousHome
+    }
+  })
+
+  await check('relay url: the UI address alone sets the relay up (no config url)', async () => {
+    const dir = join(root, 'v-ui-url')
+    const fake = fakeRelayDepsFactory()
+    const app = await mount({ ...FAST_CONFIG, stateDir: dir, relay: {} }, { relayDeps: fake.deps })
+    try {
+      const before = await relayOf(app.origin)
+      assert.equal(before.url, '')
+      assert.equal(before.urlSource, 'config')
+      assert.equal(before.canEnable, false, 'nothing to enable yet')
+
+      // Persist the address only: no dial yet (the relay is off), but the UI
+      // can now offer the switch — this is the "no config at all" path.
+      const setUrl = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { url: 'https://dsh-relay.nextai.show/' } })
+      assert.equal(setUrl.status, 200)
+      assert.equal(setUrl.data.url, RELAY_URL, 'the address is normalised to wss://')
+      assert.equal(setUrl.data.urlSource, 'ui')
+      assert.equal(setUrl.data.canEnable, true, 'a UI address makes the switch usable')
+      assert.equal(setUrl.data.enabled, false)
+      assert.equal(setUrl.data.state, 'disabled')
+      assert.equal(fake.links.length, 0, 'setting the address does not enable the relay')
+      const afterUrl = readRelayDoc(dir)
+      assert.equal(afterUrl.url, RELAY_URL, 'the UI address is persisted 0600')
+      assert.equal(afterUrl.enabled, null, 'the switch still follows the config default')
+      assert.equal(afterUrl.hubId, '', 'no hubId is minted until the relay is enabled')
+      assert.equal((await call(app.origin, `${API}/relay`)).data.url, RELAY_URL, 'GET /relay reflects it')
+
+      // Enable: the id is minted and the link dials the UI address.
+      const enabled = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { enabled: true } })
+      assert.equal(enabled.status, 200)
+      assert.equal(enabled.data.enabled, true)
+      assert.equal(enabled.data.state, 'connecting')
+      assert.match(enabled.data.hubId, HUB_ID_SHAPE)
+      assert.equal(enabled.data.url, RELAY_URL)
+      assert.equal(enabled.data.urlSource, 'ui')
+      assert.equal(enabled.data.publicUrl, `https://dsh-relay.nextai.show/r/${enabled.data.hubId}`)
+      assert.equal(fake.links.length, 1, 'enabling dials the UI address')
+      assert.equal(fake.links[0].options.relayUrl, RELAY_URL)
+      const doc = readRelayDoc(dir)
+      assert.equal(doc.enabled, true)
+      assert.equal(doc.url, RELAY_URL)
+      assert.equal(doc.hubId, enabled.data.hubId)
+      const state = (await call(app.origin, `${API}/state`)).data
+      assert.equal(state.relay.url, RELAY_URL)
+      assert.equal(state.relay.urlSource, 'ui')
+      assert.equal(state.relay.publicUrl, enabled.data.publicUrl)
+    } finally {
+      await app.close()
+    }
+  })
+
+  await check('relay url: the UI address survives a reload with no config url', async () => {
+    const dir = join(root, 'v-reload')
+    const first = fakeRelayDepsFactory()
+    const firstApp = await mount({ ...FAST_CONFIG, stateDir: dir, relay: {} }, { relayDeps: first.deps })
+    let hubId
+    try {
+      const enabled = await call(firstApp.origin, `${API}/relay/enable`, {
+        method: 'POST', body: { enabled: true, url: 'https://dsh-relay.nextai.show' },
+      })
+      assert.equal(enabled.status, 200)
+      hubId = enabled.data.hubId
+      assert.equal(first.links.length, 1)
+    } finally {
+      await firstApp.close()
+    }
+
+    // A fresh manager with an EMPTY relay config must read the persisted
+    // address + switch and reconnect on load — no cordis.patch.yml edit.
+    const second = fakeRelayDepsFactory()
+    const secondApp = await mount({ ...FAST_CONFIG, stateDir: dir, relay: {} }, { relayDeps: second.deps })
+    try {
+      const relay = await waitFor(() => relayOf(secondApp.origin), (value) => value.state === 'connecting', 4000, 'persisted UI relay')
+      assert.equal(relay.enabled, true)
+      assert.equal(relay.enabledSource, 'ui')
+      assert.equal(relay.url, RELAY_URL)
+      assert.equal(relay.urlSource, 'ui', 'the persisted UI address is used with no config url')
+      assert.equal(relay.canEnable, true)
+      assert.equal(relay.hubId, hubId, 'the address identity survives the reload')
+      assert.equal(second.links.length, 1, 'the persisted switch auto-dials')
+      assert.equal(second.links[0].options.relayUrl, RELAY_URL)
+      assert.equal(second.links[0].options.hubId, hubId)
+    } finally {
+      await secondApp.close()
+    }
+  })
+
+  await check('relay url: one POST { enabled, url } sets up and dials with no config', async () => {
+    const dir = join(root, 'v-once')
+    const fake = fakeRelayDepsFactory()
+    const app = await mount({ ...FAST_CONFIG, stateDir: dir, relay: {} }, { relayDeps: fake.deps })
+    try {
+      const response = await call(app.origin, `${API}/relay/enable`, {
+        method: 'POST', body: { enabled: true, url: 'https://dsh-relay.nextai.show' },
+      })
+      assert.equal(response.status, 200)
+      assert.equal(response.data.enabled, true)
+      assert.equal(response.data.state, 'connecting')
+      assert.equal(response.data.url, RELAY_URL)
+      assert.equal(response.data.urlSource, 'ui')
+      assert.match(response.data.hubId, HUB_ID_SHAPE)
+      assert.equal(fake.links.length, 1)
+      assert.equal(fake.links[0].options.relayUrl, RELAY_URL)
+      const doc = readRelayDoc(dir)
+      assert.equal(doc.enabled, true)
+      assert.equal(doc.url, RELAY_URL)
+      assert.equal(doc.hubId, response.data.hubId)
+    } finally {
+      await app.close()
+    }
+  })
+
+  await check('relay url: changing it while connected re-dials with the same hubId', async () => {
+    const dir = join(root, 'v-change')
+    const fake = fakeRelayDepsFactory()
+    const app = await mount({
+      ...FAST_CONFIG,
+      stateDir: dir,
+      relay: { enabled: true, url: RELAY_URL },
+    }, { relayDeps: fake.deps })
+    try {
+      const before = await waitFor(() => relayOf(app.origin), (relay) => relay.state === 'connecting', 4000, 'config relay')
+      const hubId = before.hubId
+      assert.equal(before.urlSource, 'config')
+      fake.links[0].set({ state: 'open', connectedAt: Date.now() })
+      await waitFor(() => relayOf(app.origin), (relay) => relay.state === 'connected', 5000, 'connected relay')
+
+      const nextUrl = 'wss://relay2.nextai.show'
+      const changed = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { url: nextUrl } })
+      assert.equal(changed.status, 200)
+      assert.equal(changed.data.url, nextUrl)
+      assert.equal(changed.data.urlSource, 'ui')
+      assert.equal(changed.data.enabled, true, 'changing the address keeps the relay on')
+      assert.equal(changed.data.hubId, hubId, 'the hubId survives an address change')
+      assert.equal(changed.data.state, 'connecting', 'the new link is dialling')
+      assert.equal(changed.data.publicUrl, `https://relay2.nextai.show/r/${hubId}`)
+      assert.equal(fake.links.length, 2, 'the change dials a fresh link')
+      assert.equal(fake.links[0].stopped >= 1, true, 'the old link is disposed first')
+      assert.equal(fake.links[1].options.relayUrl, nextUrl)
+      assert.equal(fake.links[1].options.hubId, hubId)
+      // Re-posting the same address does not disturb the live link.
+      const same = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { url: nextUrl } })
+      assert.equal(same.status, 200)
+      assert.equal(same.data.url, nextUrl)
+      assert.equal(fake.links.length, 2, 'the same address does not re-dial')
+      const doc = readRelayDoc(dir)
+      assert.equal(doc.url, nextUrl)
+      assert.equal(doc.hubId, hubId)
+      assert.equal(doc.enabled, null, 'an address change does not touch the switch override')
+    } finally {
+      await app.close()
+    }
+  })
+
+  await check('relay url: clearing the override falls back to the config address', async () => {
+    const dir = join(root, 'v-clear')
+    const fake = fakeRelayDepsFactory()
+    const app = await mount({
+      ...FAST_CONFIG,
+      stateDir: dir,
+      relay: { enabled: true, url: RELAY_URL },
+    }, { relayDeps: fake.deps })
+    try {
+      const before = await waitFor(() => relayOf(app.origin), (relay) => relay.state === 'connecting', 4000, 'config relay')
+      const hubId = before.hubId
+      const overridden = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { url: 'https://relay2.nextai.show' } })
+      assert.equal(overridden.status, 200)
+      assert.equal(overridden.data.urlSource, 'ui')
+      assert.equal(fake.links.length, 2)
+
+      const cleared = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { url: '' } })
+      assert.equal(cleared.status, 200)
+      assert.equal(cleared.data.url, RELAY_URL, 'the config address applies again')
+      assert.equal(cleared.data.urlSource, 'config')
+      assert.equal(cleared.data.canEnable, true)
+      assert.equal(cleared.data.enabled, true)
+      assert.equal(cleared.data.hubId, hubId, 'clearing the address keeps the identity')
+      assert.equal(fake.links.length, 3, 'clearing re-dials the config address')
+      assert.equal(fake.links[2].options.relayUrl, RELAY_URL)
+      assert.equal(fake.links[2].options.hubId, hubId)
+      assert.equal(readRelayDoc(dir).url, null, 'the override is cleared from relay.json')
+    } finally {
+      await app.close()
+    }
+
+    // With no config address either, clearing leaves nothing to dial.
+    const noneDir = join(root, 'v-clear-none')
+    const noneFake = fakeRelayDepsFactory()
+    const none = await mount({ ...FAST_CONFIG, stateDir: noneDir, relay: {} }, { relayDeps: noneFake.deps })
+    try {
+      assert.equal((await call(none.origin, `${API}/relay/enable`, { method: 'POST', body: { url: RELAY_URL } })).status, 200)
+      const cleared = await call(none.origin, `${API}/relay/enable`, { method: 'POST', body: { url: '' } })
+      assert.equal(cleared.status, 200)
+      assert.equal(cleared.data.url, '')
+      assert.equal(cleared.data.urlSource, 'config')
+      assert.equal(cleared.data.canEnable, false, 'nothing is left to enable')
+      assert.equal(noneFake.links.length, 0)
+      assert.equal(existsSync(join(noneDir, 'relay.json')), false, 'clearing the last override removes relay.json')
+      // Enabling with a clear in the same body still has nothing to dial.
+      const enableClear = await call(none.origin, `${API}/relay/enable`, { method: 'POST', body: { enabled: true, url: '' } })
+      assert.equal(enableClear.status, 400)
+      assert.equal(enableClear.data.error, 'relay-not-configured')
+      assert.equal(existsSync(join(noneDir, 'relay.json')), false, 'the rejected enable persists nothing')
+    } finally {
+      await none.close()
+    }
+  })
+
+  await check('relay url: a bad url is 400 with the normaliser message and changes nothing', async () => {
+    const dir = join(root, 'v-bad')
+    const fake = fakeRelayDepsFactory()
+    const app = await mount({ ...FAST_CONFIG, stateDir: dir, relay: {} }, { relayDeps: fake.deps })
+    try {
+      const cases = [
+        ['ftp://relay.nextai.show', /ws:\/\/ or wss:\/\//],
+        ['relay.nextai.show', /absolute/],
+        ['wss://relay.nextai.show/ws', /must not carry a path/],
+      ]
+      for (const [url, pattern] of cases) {
+        const response = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { url } })
+        assert.equal(response.status, 400, `url ${url} must be refused`)
+        assert.equal(response.data.error, 'invalid-url')
+        assert.match(response.data.message, pattern, 'the normaliser owns the message')
+      }
+      const notString = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: { url: 42 } })
+      assert.equal(notString.status, 400)
+      assert.equal(notString.data.error, 'bad-request')
+      assert.match(notString.data.message, /url must be a string/)
+      const nothing = await call(app.origin, `${API}/relay/enable`, { method: 'POST', body: {} })
+      assert.equal(nothing.status, 400)
+      assert.equal(nothing.data.error, 'bad-request')
+      assert.match(nothing.data.message, /enabled or url/)
+      assert.equal(fake.links.length, 0, 'a rejected url never dials')
+      assert.equal(existsSync(join(dir, 'relay.json')), false, 'a rejected url persists nothing')
+      assert.equal((await relayOf(app.origin)).url, '')
+    } finally {
+      await app.close()
+    }
+  })
+}
+
 watchdog.unref()
 
 const root = mkdtempSync(join(tmpdir(), 'dshc-smoke-'))
@@ -5566,6 +5862,7 @@ try {
   await phaseS(root)
   await phaseT(root)
   await phaseU(root)
+  await phaseV(root)
 } finally {
   rmSync(root, { recursive: true, force: true })
   clearTimeout(watchdog)

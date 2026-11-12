@@ -254,12 +254,22 @@ window.__ModuleLoader__.load({
       'relay.status.failed': '失败',
       'relay.status.disabled': '已停用',
       'relay.connecting': '正在连接中继…',
-      'relay.failedLine': '中继连接失败：{message}。检查 relay.url 和服务器上的中继服务是否在运行',
+      'relay.failedLine': '中继连接失败：{message}。检查中继服务是否在运行',
       'relay.unknownError': '未知错误',
       'relay.hint': '别的电脑和手机用这个地址连到这台电脑，不需要公网 IP 或开放端口',
       'relay.enable': '启用',
-      'relay.disabledHint': '先在配置里填 relay.url（例如 wss://dsh-relay.nextai.show）',
+      /* The setup button; same word as the switch label in zh, but en needs
+       * the verb for a button and the state word for the switch. */
+      'relay.enableAction': '启用',
+      /* The 中继 card sets itself up here: no config file, no restart. */
+      'relay.urlField': '中继地址',
+      'relay.urlPlaceholder': 'wss://dsh-relay.nextai.show',
+      'relay.edit': '修改',
+      'relay.save': '保存',
+      'relay.cancel': '取消',
+      'relay.upgradeHint': '这台机器还不支持在界面上配置中继，请升级插件',
       'relay.enableFailed': '切换中继失败：{message}',
+      'relay.saveFailed': '保存中继地址失败：{message}',
       'target.offline': '离线',
       'target.failed': '切换失败：{message}',
     };
@@ -447,12 +457,20 @@ window.__ModuleLoader__.load({
       'relay.status.failed': 'Failed',
       'relay.status.disabled': 'Disabled',
       'relay.connecting': 'Connecting to the relay…',
-      'relay.failedLine': 'Relay connection failed: {message}. Check relay.url and whether the relay service on the server is running',
+      'relay.failedLine': 'Relay connection failed: {message}. Check whether the relay service is running',
       'relay.unknownError': 'unknown error',
       'relay.hint': 'Other computers and phones use this address to reach this computer — no public IP or open port needed',
       'relay.enable': 'Enabled',
-      'relay.disabledHint': 'Add relay.url in the config first (for example wss://dsh-relay.nextai.show)',
+      'relay.enableAction': 'Enable',
+      /* The relay card sets itself up here: no config file, no restart. */
+      'relay.urlField': 'Relay address',
+      'relay.urlPlaceholder': 'wss://dsh-relay.nextai.show',
+      'relay.edit': 'Change',
+      'relay.save': 'Save',
+      'relay.cancel': 'Cancel',
+      'relay.upgradeHint': 'This machine cannot configure the relay from the UI yet — please upgrade the plugin',
       'relay.enableFailed': 'Could not change the relay: {message}',
+      'relay.saveFailed': 'Could not save the relay address: {message}',
       'target.offline': 'Offline',
       'target.failed': 'Could not switch: {message}',
     };
@@ -1675,11 +1693,15 @@ window.__ModuleLoader__.load({
 }
 /* The card inherits .dshc-copyStack / .dshc-hint; scope the spacing so the
  * shared primitives keep their own defaults elsewhere. */
+.dshc-relayCard .dshc-relayAddr { margin-top: 10px; }
 .dshc-relayCard .dshc-relayUrl { margin-top: 10px; }
 .dshc-relayCard .dshc-relayHint { margin-top: 10px; }
-/* The actionable config hint carries a long wss:// token; let it wrap at the
- * narrow (≈420 px) settings column instead of forcing the card wider. */
-.dshc-relayCard .dshc-relayConfigHint { overflow-wrap: anywhere; }
+/* The address input sits on the same baseline as its action button(s); the
+ * upgrade hint carries a long sentence and wraps at the narrow settings
+ * column instead of forcing the card wider. */
+.dshc-relayForm { align-items: flex-end; }
+.dshc-relayFormActions { display: flex; flex: none; gap: 8px; }
+.dshc-relayCard .dshc-relayUpgrade { overflow-wrap: anywhere; }
 
 /* Composer menu: the manage-access row replaces the old muted footer. */
 .dshc-menuSep {
@@ -2202,9 +2224,12 @@ window.__ModuleLoader__.load({
         signal,
       }),
       runtimeDisconnect: (signal) => requestJson(API.runtimeDisconnect, { method: 'POST', body: {}, signal }),
-      relayEnable: (enabled, signal) => requestJson(API.relayEnable, {
+      /* The 中继 card's whole setup path: `{ enabled }` flips the switch,
+       * `{ url }` persists a UI override (and re-dials), and
+       * `{ enabled: true, url }` is the one-click first setup. */
+      relayEnable: (payload, signal) => requestJson(API.relayEnable, {
         method: 'POST',
-        body: { enabled },
+        body: payload,
         signal,
       }),
       readSelection: (sessionId, signal) => requestJson(
@@ -3649,9 +3674,10 @@ window.__ModuleLoader__.load({
       useLocaleRevision();
       const [view, setView] = React.useState({ phase: 'loading', data: null });
       const [runtime, setRuntime] = React.useState({ phase: 'idle', data: null });
-      /* Relay switch state: `target` overlays the host's `enabled` while the
-       * POST is in flight, `error` is the inline failure line. */
-      const [relayToggle, setRelayToggle] = React.useState({ target: null, error: null });
+      /* Relay setup state: `pending` is the optimistic overlay for the POST
+       * in flight (`enabled` and/or `url`), `error` is the inline failure
+       * line. One state drives the switch, 启用 and 修改 alike. */
+      const [relayAction, setRelayAction] = React.useState({ pending: null, error: null });
       const [relayBusy, setRelayBusy] = React.useState(false);
       const relayBusyRef = React.useRef(false);
       /* Bumped when a relay POST starts and again when it settles. A /state
@@ -3703,8 +3729,14 @@ window.__ModuleLoader__.load({
               data: currentRelay === null ? next : { ...next, relay: currentRelay },
             };
           });
-          /* A fresh poll is authoritative: reconcile and clear the error. */
-          if (!staleRelay) setRelayToggle({ target: null, error: null });
+          /* A fresh poll is authoritative: reconcile and clear the error,
+           * except an address the server rejected — that one stays until the
+           * user corrects it (or cancels), so it cannot vanish unread. */
+          if (!staleRelay) {
+            setRelayAction((current) => (current.sticky === true
+              ? current
+              : { pending: null, error: null }));
+          }
           /* The local runtime card exists only where §10.5 routes do (§10.1). */
           if (roleOf(next) !== 'hub' && !runtimeRequested.current) {
             runtimeRequested.current = true;
@@ -3718,37 +3750,49 @@ window.__ModuleLoader__.load({
       }, [loadRuntime]);
 
       /**
-       * Turn the relay on/off (PROTOCOL relay): optimistic switch, the host's
-       * returned `state.relay` reconciles immediately, a failure reverts and
-       * leaves an inline error until the next successful poll.
-       * @param {boolean} next - desired `enabled`.
+       * Configure the relay (PROTOCOL relay): `{ enabled }` flips the switch,
+       * `{ url }` persists a UI override and re-dials, `{ enabled, url }` is
+       * the one-click first setup. Optimistic overlay, the host's returned
+       * `state.relay` reconciles immediately, a failure reverts and leaves an
+       * inline error (the server's message) until the next successful poll.
+       * @param {object} payload - `enabled` and/or `url`.
+       * @returns {Promise<boolean>} whether the host accepted the change.
        */
-      const toggleRelay = React.useCallback(async (next) => {
-        const wanted = next === true;
-        if (relayBusyRef.current) return;
+      const submitRelay = React.useCallback(async (payload) => {
+        if (payload === null || typeof payload !== 'object' || relayBusyRef.current) return false;
+        const body = {};
+        if (typeof payload.enabled === 'boolean') body.enabled = payload.enabled;
+        if (typeof payload.url === 'string') body.url = payload.url.trim();
+        if (body.enabled === undefined && body.url === undefined) return false;
+        const saving = body.enabled === undefined;
         relayBusyRef.current = true;
         relayEpoch.current += 1;
         setRelayBusy(true);
-        setRelayToggle({ target: wanted, error: null });
+        setRelayAction({ pending: body, error: null });
         try {
-          const result = await scope.current.run((signal) => api.relayEnable(wanted, signal));
-          if (!alive.current) return;
+          const result = await scope.current.run((signal) => api.relayEnable(body, signal));
+          if (!alive.current) return false;
           relayEpoch.current += 1;
           if (result !== null && typeof result === 'object') {
-            setRelayToggle({ target: null, error: null });
+            setRelayAction({ pending: null, error: null });
             setView((current) => {
               const currentData = current.data !== null && typeof current.data === 'object' ? current.data : {};
               return { ...current, data: { ...currentData, relay: result } };
             });
           } else {
             /* Empty answer: keep the optimistic value until the next poll. */
-            setRelayToggle({ target: wanted, error: null });
+            setRelayAction({ pending: body, error: null });
           }
+          return true;
         } catch (error) {
-          if (!alive.current) return;
-          if (error && error.name === 'AbortError') return;
+          if (error && error.name === 'AbortError') return false;
           relayEpoch.current += 1;
-          setRelayToggle({ target: null, error: t('relay.enableFailed', { message: messageOf(error) }) });
+          setRelayAction({
+            pending: null,
+            error: t(saving ? 'relay.saveFailed' : 'relay.enableFailed', { message: messageOf(error) }),
+            sticky: saving,
+          });
+          return false;
         } finally {
           relayBusyRef.current = false;
           if (alive.current) setRelayBusy(false);
@@ -3814,15 +3858,37 @@ window.__ModuleLoader__.load({
       const baseRelay = data !== null && data.relay !== null && typeof data.relay === 'object'
         ? data.relay
         : null;
-      /* Optimistic overlay while a relay POST is in flight: the switch and
-       * the 本机地址 line follow the user's intent until a fresh poll lands. */
-      const relayTarget = relayToggle.target;
-      const relay = baseRelay !== null && typeof relayTarget === 'boolean'
+      /* Optimistic overlay while a relay POST is in flight: the switch, the
+       * relay address and the 本机地址 line follow the user's intent until a
+       * fresh poll lands. `url` also covers a first-time setup, so the card
+       * leaves its input form as soon as the address is submitted. */
+      const relayPending = relayAction.pending;
+      const pendingEnabled = relayPending !== null && typeof relayPending.enabled === 'boolean'
+        ? relayPending.enabled
+        : null;
+      const pendingUrl = relayPending !== null && typeof relayPending.url === 'string'
+        ? relayPending.url
+        : null;
+      const relay = baseRelay !== null && (pendingEnabled !== null || pendingUrl !== null)
         ? {
           ...baseRelay,
-          enabled: relayTarget,
-          state: relayTarget ? 'connecting' : 'disabled',
-          lastError: null,
+          ...(pendingEnabled !== null
+            ? {
+              enabled: pendingEnabled,
+              state: pendingEnabled ? 'connecting' : 'disabled',
+              lastError: null,
+            }
+            : {}),
+          ...(pendingUrl !== null
+            ? {
+              /* The public address belongs to the old endpoint: hide it until
+               * the host re-dials and reports the new one. */
+              url: pendingUrl,
+              publicUrl: '',
+              lastError: null,
+              ...(baseRelay.enabled === true ? { state: 'connecting' } : {}),
+            }
+            : {}),
         }
         : baseRelay;
 
@@ -3980,8 +4046,11 @@ window.__ModuleLoader__.load({
               key: 'relay',
               relay,
               busy: relayBusy,
-              error: relayToggle.error,
-              onToggle: (next) => { void toggleRelay(next); },
+              error: relayAction.error,
+              onToggle: (next) => submitRelay({ enabled: next === true }),
+              onEnable: (url) => submitRelay({ enabled: true, url }),
+              onSaveUrl: (url) => submitRelay({ url }),
+              onDismissError: () => setRelayAction({ pending: null, error: null }),
             }))
           : null,
         layer);
@@ -4373,40 +4442,75 @@ window.__ModuleLoader__.load({
     }
 
     /**
+     * Which source the effective relay url came from, when the host reports
+     * it: `'ui'` is the override this card saved, `'config'` is the file
+     * default. Hosts that predate the url override send nothing.
+     * @param {object|null} relay - `state.relay`.
+     * @returns {string|null} `'ui'`, `'config'` or null.
+     */
+    function relayUrlSourceOf(relay) {
+      if (relay === null || typeof relay !== 'object') return null;
+      return relay.urlSource === 'ui' || relay.urlSource === 'config' ? relay.urlSource : null;
+    }
+
+    /**
      * Whether the 中继 card has anything to say. An enabled relay always
-     * renders. A disabled one renders when the host reports `canEnable`, so
-     * the 启用 switch can turn it on from here; a host that predates the
-     * switch (no `canEnable` field) keeps the old quiet-when-off behaviour,
-     * and a host with no `state.relay` at all renders nothing.
+     * renders. A disabled one renders when the host reports `urlSource` (the
+     * card is then the setup surface, even with no address yet) or the older
+     * `canEnable`; a host that predates both keeps the quiet-when-off
+     * behaviour, and a host with no `state.relay` at all renders nothing.
      * @param {object|null} relay - `state.relay`.
      * @returns {boolean} whether to render the card.
      */
     function relayCardVisible(relay) {
       if (relay === null || typeof relay !== 'object') return false;
       if (relay.enabled === true) return true;
+      if (relayUrlSourceOf(relay) !== null) return true;
       return typeof relay.canEnable === 'boolean';
     }
 
     /**
      * 「中继」 card under the 本机地址 block: the relay link that makes this
      * machine reachable from other machines and phones without a public IP or
-     * an open port, plus the 启用 switch that replaces editing
-     * `cordis.patch.yml` by hand.
-     * @param {object} props - `relay` (`state.relay`), `busy`, `error`, `onToggle(enabled)`.
+     * an open port. The card is self-sufficient — it takes the relay address,
+     * enables it, and changes it, so setting the relay up is one click here
+     * instead of editing a config file.
+     * @param {object} props - `relay` (`state.relay`), `busy`, `error`,
+     *   `onToggle(enabled)`, `onEnable(url)`, `onSaveUrl(url)`.
      * @returns {object|null} card element, or null when the host is silent.
      */
     function RelayCard(props) {
       const relay = props.relay;
+      /* 修改 reveals the address input again; the draft survives a rejected
+       * POST so the user can correct it in place. */
+      const [editing, setEditing] = React.useState(false);
+      const [draft, setDraft] = React.useState('');
       if (!relayCardVisible(relay)) return null;
       const phase = relayPhaseOf(relay);
       const enabled = relay.enabled === true;
-      /* The host reports `canEnable` only once it knows the enable route.
-       * A host without the field predates the switch: keep its card
-       * informational instead of offering a POST that cannot work. */
-      const switchable = typeof relay.canEnable === 'boolean';
-      const canEnable = relay.canEnable !== false;
+      const urlSource = relayUrlSourceOf(relay);
+      /* A host that reports `urlSource` accepts `{ url }` overrides; older
+       * hosts only know the enable route, so their card stays switch-only. */
+      const urlCapable = urlSource !== null;
+      /* On an old host `canEnable` is the only signal: true means the
+       * enable route exists, false means the host cannot do it from here.
+       * On a url-capable host the card owns the setup, so `canEnable:false`
+       * just means "no address yet" and the form below is the way forward. */
+      const legacySwitchable = relay.canEnable === true;
       const busy = props.busy === true;
       const error = typeof props.error === 'string' && props.error !== '' ? props.error : null;
+      const effectiveUrl = typeof relay.url === 'string' ? relay.url.trim() : '';
+      const hasUrl = effectiveUrl !== '';
+      /* No address yet: the input + 启用 is the whole setup. 修改 opens the
+       * same form over an existing address, with 保存/取消. */
+      const formMode = !urlCapable ? null : (!hasUrl ? 'enable' : (editing ? 'edit' : null));
+      /* The switch is the view-mode control; the one exception is an enabled
+       * relay whose address was cleared (the host stays enabled and failed),
+       * where the user must still be able to turn it off next to the form. */
+      const showSwitch = formMode === null
+        ? (urlCapable ? hasUrl : legacySwitchable)
+        : (urlCapable && !hasUrl && enabled);
+      const showUpgrade = !urlCapable && relay.canEnable === false;
       const dotState = phase === 'connected'
         ? 'running'
         : (phase === 'failed' ? 'failed' : (phase === 'disabled' ? 'stopped' : 'connecting'));
@@ -4428,11 +4532,43 @@ window.__ModuleLoader__.load({
       const source = relay.enabledSource === 'ui' || relay.enabledSource === 'config'
         ? relay.enabledSource
         : undefined;
+
+      const submitToggle = async () => {
+        if (busy || typeof props.onToggle !== 'function') return;
+        await props.onToggle(!enabled);
+      };
+      const submitEnable = async () => {
+        if (busy || typeof props.onEnable !== 'function' || draft.trim() === '') return;
+        const ok = await props.onEnable(draft.trim());
+        if (ok === true) setDraft('');
+      };
+      const submitSave = async () => {
+        if (busy || typeof props.onSaveUrl !== 'function') return;
+        const ok = await props.onSaveUrl(draft);
+        if (ok === true) {
+          setEditing(false);
+          setDraft('');
+        }
+      };
+      const startEdit = () => {
+        setDraft(effectiveUrl);
+        setEditing(true);
+      };
+      const cancelEdit = () => {
+        setEditing(false);
+        setDraft('');
+        if (typeof props.onDismissError === 'function') props.onDismissError();
+      };
+      const submitForm = () => {
+        void (formMode === 'edit' ? submitSave() : submitEnable());
+      };
+
       return h('div', {
         className: 'dshc-card2 dshc-relayCard',
         'data-state': phase,
         'data-enabled': enabled ? 'true' : 'false',
         'data-source': source,
+        'data-url-source': urlSource,
       },
         h('div', { className: 'dshc-card2Head' },
           h('span', { className: 'dshc-card2Title' }, t('relay.title')),
@@ -4444,6 +4580,10 @@ window.__ModuleLoader__.load({
             h('span', { className: 'dshc-runtimeMetaKey' }, t('relay.hubLabel')),
             h('code', { className: 'dshc-relayId', title: hubId }, hubId))
           : null,
+        urlCapable && hasUrl
+          ? h('div', { className: 'dshc-copyStack dshc-relayAddr' },
+            h(CopyRow, { label: t('relay.urlField'), value: effectiveUrl, stacked: true }))
+          : null,
         publicUrl !== ''
           ? h('div', { className: 'dshc-copyStack dshc-relayUrl' },
             h(CopyRow, { label: t('relay.urlLabel'), value: publicUrl, stacked: true }))
@@ -4452,7 +4592,44 @@ window.__ModuleLoader__.load({
           ? h('p', { className: 'dshc-relayLine', 'data-kind': 'failed' },
             t('relay.failedLine', { message: relayMessageOf(relay) }))
           : null,
-        switchable
+        formMode !== null
+          ? h('div', { className: 'dshc-formRow dshc-relayForm' },
+            h('label', { className: 'dshc-field' },
+              h('span', { className: 'dshc-fieldLabel' }, t('relay.urlField')),
+              h('input', {
+                className: 'dshc-input',
+                type: 'url',
+                value: draft,
+                placeholder: t('relay.urlPlaceholder'),
+                'aria-label': t('relay.urlField'),
+                autoComplete: 'off',
+                spellCheck: false,
+                disabled: busy,
+                onChange: (event) => { setDraft(event.target.value); },
+                onKeyDown: (event) => {
+                  if (event && event.key === 'Enter') {
+                    event.preventDefault();
+                    submitForm();
+                  }
+                },
+              })),
+            h('div', { className: 'dshc-relayFormActions' },
+              formMode === 'edit'
+                ? h('button', {
+                  type: 'button',
+                  className: 'dshc-ghost',
+                  disabled: busy,
+                  onClick: cancelEdit,
+                }, t('relay.cancel'))
+                : null,
+              h('button', {
+                type: 'button',
+                className: 'dshc-primary dshc-formSubmit',
+                disabled: busy || (formMode === 'enable' && draft.trim() === ''),
+                onClick: submitForm,
+              }, formMode === 'edit' ? t('relay.save') : t('relay.enableAction'))))
+          : null,
+        showSwitch
           ? h('div', { className: 'dshc-runtimeActions' },
             h('div', { className: 'dshc-switchLabel' },
               h('button', {
@@ -4461,15 +4638,23 @@ window.__ModuleLoader__.load({
                 role: 'switch',
                 'aria-checked': enabled ? 'true' : 'false',
                 'aria-label': t('relay.enable'),
-                disabled: busy || !canEnable,
-                onClick: busy || !canEnable || typeof props.onToggle !== 'function'
+                disabled: busy,
+                onClick: busy || typeof props.onToggle !== 'function'
                   ? undefined
-                  : () => { props.onToggle(!enabled); },
+                  : () => { void submitToggle(); },
               }, h('span', { className: 'dshc-switchThumb' })),
-              h('span', null, t('relay.enable'))))
+              h('span', null, t('relay.enable'))),
+            urlCapable && typeof props.onSaveUrl === 'function'
+              ? h('button', {
+                type: 'button',
+                className: 'dshc-textBtn dshc-relayEdit',
+                disabled: busy,
+                onClick: startEdit,
+              }, t('relay.edit'))
+              : null)
           : null,
-        switchable && !canEnable
-          ? h('p', { className: 'dshc-hint dshc-relayHint dshc-relayConfigHint' }, t('relay.disabledHint'))
+        showUpgrade
+          ? h('p', { className: 'dshc-hint dshc-relayHint dshc-relayUpgrade' }, t('relay.upgradeHint'))
           : null,
         h('p', { className: 'dshc-hint dshc-relayHint' }, t('relay.hint')),
         error !== null ? h('p', { className: 'dshc-formError', role: 'alert' }, error) : null);
