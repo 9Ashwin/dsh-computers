@@ -53,7 +53,7 @@ dsh plugin install dsh-computers@1.7.1
 
 - 用**同一个 spec** 再装一次只会得到 `already-installed`（这就是「再安装没法更新」的原因）；
 - 装 **tag** 会被冻住，市场永远检测不到更新；装**分支**（不带 `#`）才能被市场「检查更新」发现新提交；
-- 手动升级到某个版本要**换 spec**：`dsh plugin install github:9Ashwin/dsh-computers#v1.9.0`。
+- 手动升级到某个版本要**换 spec**：`dsh plugin install github:9Ashwin/dsh-computers#v1.9.1`。
 
 > 更新完记得重启 Host 并刷新页面，具体见 [docs/deploy.md](./docs/deploy.md)。
 
@@ -130,6 +130,22 @@ tail -f ~/.dsh-computers/agent.log
 - **流式**：长命令的分块输出会随帧回传（含心跳），后台任务的输出可在 DSH 的任务里查看。
 - **超时转后台**：前台命令超时默认不杀（`promoteOnTimeout: true`），而是转入后台任务并返回 jobId，之后用内置的 `job_output` / `job_kill` 接管。
 - **激活时机**：新电脑要等 agent 首次建流后才出现在列表（从生成密钥到真正连上之间，弹窗会一直显示"等待电脑连接…"）。
+
+## 2.7 一把钥匙 + 任意机器执行（v1.9.1）
+
+**登录只要一把钥匙**（随时可在 高级 → 账号中心 复制）：
+
+```
+账号密钥  dshk_6d56dbd4988a3fe3_887d4f25dd9318bce58b4a47f46c664c
+```
+
+**本地电脑真能执行了**：插件在本机起一个独立的自运行时，「本地电脑」不再是占位。
+
+**跨机执行**：输入框选择器里选「账号里的电脑」= 在**那台机器**上执行，
+走 `<entryUrl>/api/dsh-computers/fleet/exec`，用账号密钥鉴权，不需要逐台配对。
+
+**被控开关**：设置 → 接入 → 账号里的电脑，本机那行有开关。
+关掉后别人能看到你、但不能在你机器上执行（`403 not-controllable`）。
 
 ## 2.8 远端技能进斜杠菜单（v1.9.0）
 

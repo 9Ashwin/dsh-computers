@@ -947,3 +947,44 @@ v1.7.2 起 `joinUrl` **永远不是回环地址**：它要粘到另一台机器�
 
 `{ computer?: string }` → `{ computers: [{ id, name, online, skillCount }], skills: [{ computer, name, catalogName, description, whenToUse, path, online }] }`。
 与 `computer_list` 同一套授权（operation `list`）。
+
+## 16 账号密钥、自运行时与跨机执行（v1.9.1）
+
+### 16.1 一把钥匙
+
+账号密钥是**自描述**的复合串，不需要服务端额外查表：
+
+```
+dshk_<16 hex 账号体>_<32 hex 密钥体>        例：dshk_6d56dbd4988a3fe3_887d4f25…
+```
+
+- `POST /api/fleet/accounts` 返回 `{ accountId, secret, key }`
+- 任何接受 secret 的地方都接受 `x-fleet-key: dshk_…` 或 body 里的 `key`（优先级：body key → header key → body secret → header secret）
+- 格式错误 → `400 invalid-key`；key 里的账号与路径账号不一致 → `401 invalid-secret`
+- 服务端仍然**只存 sha256**，无法反推 key；key 存在插件侧的 `account.json`（0600），所以界面可以随时显示/复制
+
+### 16.2 自运行时（本地电脑可执行）
+
+主控机器自己也要有一个运行时，否则「本地电脑」只是个占位。
+
+- 插件在 hub 面挂载时自动起一个**独立 agent 子进程**（不是内嵌，互不干扰）：
+  `node <pkg>/agent/dsh-computers-agent.mjs run`，凭据由插件写入
+  `${stateDir}/self-runtime/config.json`（0600），走 loopback `#join=` 注册
+- 崩溃退避：5 分钟内最多自动重启 3 次（1s/2s/4s），之后 `state: 'failed'` 并给出原因
+- 日志保留最后 ~50 行（凭据已擦除）
+- `GET /api/dsh-computers/self` → `{ controllable, runtime: { state, pid, since, lastError, computerId, logs } }`
+- `POST /api/dsh-computers/account/controllable { enabled }` → 启停自运行时并持久化到 `account.json`
+
+### 16.3 跨机执行
+
+每台 hub 暴露一个机器面 API，用**自己的账号密钥**鉴权：
+
+| 路由 | 语义 |
+| --- | --- |
+| `POST /api/dsh-computers/fleet/exec` | `{ command, cwd?, timeoutMs? }` → `{ ok, exitCode, stdout, stderr, durationMs, timedOut, truncated, computerId }` |
+| `POST /api/dsh-computers/fleet/fs` | `{ op, payload }` → agent 的 fs 结果 |
+
+- 鉴权：`x-fleet-key` / `x-fleet-secret`，常数时间比较；**不接受浏览器 cookie**，不是浏览器路由
+- `403 not-controllable`（这台机器关了被控）、`503 self-runtime-unavailable`（自运行时没跑）、`401 invalid-key`
+- 工具侧路由：`null` 选中 = 本地电脑 → 自运行时；`acct:<machineId>` → `<entryUrl>/api/dsh-computers/fleet/*` 带 `x-fleet-key`；
+  `computer_list` / `computer_skills` 会把账号设备合并进来并标 `via: 'account'`

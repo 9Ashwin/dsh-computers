@@ -36,7 +36,7 @@
  */
 
 import assert from 'node:assert/strict'
-import { spawnSync } from 'node:child_process'
+import { spawn as spawnChild, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { createServer, request as httpRequest } from 'node:http'
@@ -67,8 +67,14 @@ import {
 } from '../lib/fleet-identity.js'
 import {
   ACCOUNT_VERSION, MACHINE_ID_PATTERN, accountFile, deriveRelayPorts, discoverRelayCandidates,
-  machineFile, normalizeRelayBase, readAccountIdentity, readMachineId,
+  formatAccountKey, machineFile, normalizeRelayBase, parseAccountKey, readAccountControllable,
+  readAccountIdentity, readMachineId, writeAccountControllable,
 } from '../lib/account.js'
+// v1.9.1: the relay's canonical key formatter/parser — the host copies its
+// format, so the smoke asserts the two halves agree instead of trusting a copy.
+import { formatFleetKey, parseFleetKey as parseRelayFleetKey } from '../lib/relay/accounts.js'
+// v1.9.1: the local (self) runtime that makes the composer's 本地电脑 executable.
+import { createSelfRuntime, MAX_RESTARTS, SELF_CONFIG_NAME, SELF_DIR_NAME } from '../lib/self-runtime.js'
 import * as contracts from '../lib/contracts.js'
 import {
   DENY_CODES, OPERATIONS, OPERATION_REQUIREMENTS, TOOL_OPERATIONS,
@@ -184,6 +190,10 @@ function createFakeContext() {
     // Account-center seam (v1.8.0): a short heartbeat so the 60 s registration
     // loop is assertable without waiting a minute.
     accountDeps: undefined,
+    // Self-runtime seam (v1.9.1): `autoStart: false` by default, so the other
+    // phases never spawn a real agent child; phase Y overrides it with a fake
+    // agent path, short backoffs and a counting spawner.
+    selfRuntimeDeps: { autoStart: false },
     tools: {
       register(definition) {
         if (tools.has(definition.name)) throw new Error(`duplicate tool ${definition.name}`)
@@ -282,7 +292,7 @@ function withoutHealth(list) {
   return list.map(({ health, ...rest }) => rest)
 }
 
-async function mount(config, { addressDeps, webServerHost, tunnelExec, hubDeps, relayDeps, accountDeps, skills } = {}) {
+async function mount(config, { addressDeps, webServerHost, tunnelExec, hubDeps, relayDeps, accountDeps, selfRuntimeDeps, skills } = {}) {
   const fake = createFakeContext()
   if (addressDeps !== undefined) fake.ctx.addressDeps = addressDeps
   // R5b test seam: an injected clock + short lease for the presence sweep.
@@ -291,6 +301,8 @@ async function mount(config, { addressDeps, webServerHost, tunnelExec, hubDeps, 
   if (relayDeps !== undefined) fake.ctx.relayDeps = relayDeps
   // v1.8.0 account seam: a short heartbeat interval for the smoke run.
   if (accountDeps !== undefined) fake.ctx.accountDeps = accountDeps
+  // v1.9.1 self-runtime seam: fake agent path / spawner / backoffs (phase Y).
+  if (selfRuntimeDeps !== undefined) fake.ctx.selfRuntimeDeps = selfRuntimeDeps
   // v1.9.0 skills seam: a fake `skills` service, so the provider registration
   // (and its disposer) is observable without a real DSH composition.
   if (skills !== undefined) fake.setService('skills', skills)
@@ -1084,7 +1096,9 @@ async function phaseB(root) {
 
     await check('computer_exec: bad arguments are rejected', async () => {
       const execTool = app.fake.tools.get('computer_exec')
-      await assert.rejects(execTool.execute({ command: 'ls' }, {}), /no computer selected/)
+      // v1.9.1: an unset pin means 「本地电脑」, whose runtime is not running in
+      // this fixture — that is the actionable error, not "no computer selected".
+      await assert.rejects(execTool.execute({ command: 'ls' }, {}), /本地电脑的运行时没启动/)
       await assert.rejects(execTool.execute({ computer: 'Mac mini 2', command: '   ' }, {}), /requires "command"/)
       await assert.rejects(execTool.execute({ computer: 'Mac mini 2', command: 'ls', timeoutMs: 'soon' }, {}), /"timeoutMs" must be a finite number/)
     })
@@ -2256,12 +2270,14 @@ async function phaseH(root) {
 
     await check('computer_exec: no pin and no argument is an actionable error', async () => {
       const anonymous = execTool.execute({ command: 'echo nope' }, { signal: new AbortController().signal })
-      await assert.rejects(anonymous, /no computer selected: pass `computer` .*pick a target computer in the composer/)
+      // v1.9.1: no pin = 「本地电脑」; this fixture has no local runtime, so the
+      // message tells the user how to turn 被控 on.
+      await assert.rejects(anonymous, /本地电脑的运行时没启动：设置 → 电脑 → 高级 里把被控打开/)
       const otherSession = execTool.execute(
         { command: 'echo nope' },
         { signal: new AbortController().signal, agent: { id: 'sess_without_a_pin' } },
       )
-      await assert.rejects(otherSession, /no computer selected/)
+      await assert.rejects(otherSession, /本地电脑的运行时没启动/)
       // An empty string computer is treated as "not provided" → selection, not a hard error.
       const emptyArg = await runExec({ computer: '   ', command: 'echo blank' }, firstSse, firstToken, sessionId, 'echo blank')
       assert.equal(emptyArg.value.computer.id, firstId)
@@ -2280,7 +2296,8 @@ async function phaseH(root) {
         .then((value) => ({ value }), (error) => ({ error }))
       const settled = await outcome
       assert.ok(settled.error)
-      assert.match(settled.error.message, /no computer selected/)
+      // With the pin gone the tool falls back to 「本地电脑」 (no local runtime here).
+      assert.match(settled.error.message, /本地电脑的运行时没启动/)
     })
 
     await check('selection: validation and unknown ids', async () => {
@@ -5871,6 +5888,29 @@ function fakeFleetSecret() {
   return `dshf_${randomBytes(16).toString('hex')}`
 }
 
+/** The composite key the relay mints beside the pair (v1.9.1). */
+function fakeFleetKey(accountId, secret) {
+  return `dshk_${String(accountId).replace(/^acct_/, '')}_${String(secret).replace(/^dshf_/, '')}`
+}
+
+/**
+ * The credential one fake-relay request presents, in either form the real relay
+ * accepts: `x-fleet-key`/body `key` (composite) or `x-fleet-secret`/body
+ * `secret`. Returns `{ accountId, secret }`, `{ invalidKey: true }` or
+ * `{ secret: '' }` when nothing usable was sent.
+ */
+function presentedFleetCredential(req, body = {}) {
+  const rawKey = typeof body.key === 'string' ? body.key : req.headers['x-fleet-key']
+  const key = typeof rawKey === 'string' ? rawKey.trim() : ''
+  if (key !== '') {
+    const match = /^dshk_([0-9a-f]{16})_([0-9a-f]{32})$/.exec(key)
+    if (match === null) return { invalidKey: true, secret: '' }
+    return { accountId: `acct_${match[1]}`, secret: `dshf_${match[2]}` }
+  }
+  const rawSecret = typeof body.secret === 'string' ? body.secret : req.headers['x-fleet-secret']
+  return { secret: typeof rawSecret === 'string' ? rawSecret.trim() : '' }
+}
+
 /**
  * A local fake relay/account center:
  * `GET /health`, `POST /api/fleet/accounts`, and the account's device directory.
@@ -5927,7 +5967,8 @@ async function createFakeAccountCenter({ adminKey = '', hangDevices = false } = 
       const secret = fakeFleetSecret()
       const name = typeof body.name === 'string' && body.name.trim() !== '' ? body.name.trim() : 'Smoke Account'
       state.accounts.set(accountId, { secret, name, devices: new Map() })
-      accountJson(res, 201, { accountId, secret, name })
+      // The real relay mints the composite key beside the pair (v1.9.1).
+      accountJson(res, 201, { accountId, secret, key: fakeFleetKey(accountId, secret), name })
       return
     }
 
@@ -5947,8 +5988,16 @@ async function createFakeAccountCenter({ adminKey = '', hangDevices = false } = 
         } catch {
           body = {}
         }
-        const presented = typeof body.secret === 'string' ? body.secret : (req.headers['x-fleet-secret'] ?? '')
-        if (presented !== account.secret) {
+        const credential = presentedFleetCredential(req, body)
+        if (credential.invalidKey === true) {
+          accountJson(res, 400, { error: 'invalid-key', message: 'a fleet key looks like dshk_<16 hex>_<32 hex>' })
+          return
+        }
+        if (credential.accountId !== undefined && credential.accountId !== accountId) {
+          accountJson(res, 401, { error: 'invalid-secret', message: 'the key names another account' })
+          return
+        }
+        if (credential.secret !== account.secret) {
           accountJson(res, 401, { error: 'invalid-secret', message: 'wrong account secret' })
           return
         }
@@ -5967,7 +6016,16 @@ async function createFakeAccountCenter({ adminKey = '', hangDevices = false } = 
         state.deviceLists += 1
         // A hanging relay: the plugin must give up after its 2 s budget.
         if (state.hangDevices) return
-        if (req.headers['x-fleet-secret'] !== account.secret) {
+        const credential = presentedFleetCredential(req, {})
+        if (credential.invalidKey === true) {
+          accountJson(res, 400, { error: 'invalid-key', message: 'a fleet key looks like dshk_<16 hex>_<32 hex>' })
+          return
+        }
+        if (credential.accountId !== undefined && credential.accountId !== accountId) {
+          accountJson(res, 401, { error: 'invalid-secret', message: 'the key names another account' })
+          return
+        }
+        if (credential.secret !== account.secret) {
           accountJson(res, 401, { error: 'invalid-secret', message: 'wrong account secret' })
           return
         }
@@ -5979,13 +6037,16 @@ async function createFakeAccountCenter({ adminKey = '', hangDevices = false } = 
           hubId: device.hubId,
           entryUrl: device.entryUrl,
           online: nowMs - Date.parse(device.lastSeenAt) <= 120_000,
+          // v1.9.1: republished by every machine; absent means allowed.
+          controllable: device.controllable !== false,
           lastSeenAt: device.lastSeenAt,
         }))
         accountJson(res, 200, { devices })
         return
       }
       if (req.method === 'DELETE' && machinePath !== null) {
-        if (req.headers['x-fleet-secret'] !== account.secret) {
+        const credential = presentedFleetCredential(req, {})
+        if (credential.secret !== account.secret) {
           accountJson(res, 401, { error: 'invalid-secret', message: 'wrong account secret' })
           return
         }
@@ -6040,6 +6101,95 @@ async function seedRelayAccount(relay, name = 'Seeded Account') {
   return await response.json()
 }
 
+/** Register one device row directly on a fake relay (account-target fixtures). */
+async function seedRelayDevice(relay, accountId, device, { lastSeenAt, controllable } = {}) {
+  const account = relay.accounts.get(accountId)
+  assert.ok(account !== undefined, 'the fake relay must know the account')
+  const response = await fetch(`${relay.origin}/api/fleet/accounts/${encodeURIComponent(accountId)}/devices`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-fleet-secret': account.secret },
+    body: JSON.stringify({ device }),
+  })
+  assert.equal(response.status, 200, 'the fake relay must register the device')
+  // Post-registration knobs: a stale heartbeat (offline) or a 被控 opt-out.
+  const row = account.devices.get(device.machineId)
+  if (lastSeenAt !== undefined) row.lastSeenAt = lastSeenAt
+  if (controllable !== undefined) row.controllable = controllable
+  return row
+}
+
+/**
+ * A fake PEER hub: another machine's dsh-computers plugin, reachable at
+ * `<entryUrl>/api/dsh-computers/fleet/...`. It records every request so the
+ * smoke can assert exactly what the local hub sent (body and credential).
+ */
+async function createFakePeerHub({ key = '', controllable = true } = {}) {
+  const state = { key, controllable, requests: [], server: null, origin: '' }
+  state.server = createServer(async (req, res) => {
+    let url
+    try {
+      url = new URL(typeof req.url === 'string' ? req.url : '/', 'http://peer.invalid')
+    } catch {
+      accountJson(res, 400, { error: 'bad-request' })
+      return
+    }
+    let body = {}
+    try {
+      const text = req.method === 'POST' ? await readRequestBody(req) : ''
+      body = text === '' ? {} : JSON.parse(text)
+    } catch {
+      body = {}
+    }
+    state.requests.push({ method: req.method, path: url.pathname, headers: req.headers, body })
+    if (req.method !== 'POST') {
+      accountJson(res, 405, { error: 'method-not-allowed' })
+      return
+    }
+    if (req.headers['x-fleet-key'] !== state.key) {
+      accountJson(res, 401, { error: 'invalid-key', message: 'the key does not match this machine' })
+      return
+    }
+    if (state.controllable !== true) {
+      accountJson(res, 403, { error: 'not-controllable', message: '被控 is off' })
+      return
+    }
+    if (url.pathname === '/api/dsh-computers/fleet/exec') {
+      accountJson(res, 200, {
+        ok: true,
+        exitCode: 0,
+        stdout: `peer:${String(body.command ?? '')}\n`,
+        stderr: '',
+        durationMs: 7,
+        timedOut: false,
+        truncated: false,
+        computerId: 'cmp_peer',
+      })
+      return
+    }
+    if (url.pathname === '/api/dsh-computers/fleet/fs') {
+      accountJson(res, 200, {
+        ok: true,
+        path: typeof body.payload?.path === 'string' ? body.payload.path : '',
+        text: 'peer file\n',
+        lines: 1,
+        bytes: 10,
+        truncated: false,
+      })
+      return
+    }
+    accountJson(res, 404, { error: 'not-found' })
+  })
+  await new Promise((resolve) => state.server.listen(0, '127.0.0.1', resolve))
+  state.origin = `http://127.0.0.1:${state.server.address().port}`
+  state.close = async () => {
+    await new Promise((resolve) => {
+      state.server.close(() => resolve())
+      state.server.closeAllConnections?.()
+    })
+  }
+  return state
+}
+
 /** Whether a TCP port can be bound (i.e. nothing is listening on it). */
 function isPortFree(port) {
   return new Promise((resolve) => {
@@ -6091,6 +6241,10 @@ async function phaseW(root) {
       // the only way to log the other machines in.
       assert.match(created.data.secret, /^dshf_[0-9a-f]{32}$/, 'create returns the one-time secret')
       assert.equal(readAccountDoc(dir).secret, created.data.secret)
+      // v1.9.1: the composite key is part of the create answer (and stored), so
+      // the UI can show it at any time — only the bare secret is one-time.
+      assert.match(created.data.key, /^dshk_[0-9a-f]{16}_[0-9a-f]{32}$/, 'create returns the composite key')
+      assert.equal(readAccountDoc(dir).key, created.data.key)
 
       // …and never again: neither /account nor /state carries it.
       const reread = await call(app.origin, `${API}/account`)
@@ -7054,6 +7208,874 @@ async function phaseX(root) {
   })
 }
 
+// ---------------------------------------------------------------------------
+// Phase Y — self runtime (v1.9.1): 本地电脑 is executable + the 被控 switch
+// ---------------------------------------------------------------------------
+
+/**
+ * A stand-in for the machine agent. The real CLI contract is
+ * `node <agent> run` with `DSH_COMPUTERS_HOME` pointing at the isolated
+ * identity (the manager writes that config); this file only has to behave like
+ * a long-running process — or, with `crash`, like a process that dies at once.
+ */
+function writeFakeAgent(file, { crash = false, exitCode = 3 } = {}) {
+  writeFileSync(file, crash
+    ? `process.exit(${exitCode})\n`
+    : [
+      "process.on('SIGTERM', () => process.exit(0))",
+      "process.on('SIGINT', () => process.exit(0))",
+      "console.log('fake agent: connected')",
+      'setInterval(() => {}, 1000)',
+      '',
+    ].join('\n'))
+}
+
+/** The isolated agent identity the self-runtime writes (agent schema v1, 0600). */
+function readSelfConfig(dir) {
+  const file = join(dir, SELF_DIR_NAME, SELF_CONFIG_NAME)
+  assert.ok(existsSync(file), `the isolated agent config must exist at ${file}`)
+  const mode = statSync(file).mode & 0o777
+  assert.equal(mode, 0o600, `the isolated agent config must be 0600, got 0${mode.toString(8)}`)
+  return JSON.parse(readFileSync(file, 'utf8'))
+}
+
+/** Resolve once the pid is gone (or after the budget; never throws). */
+async function waitForGone(pid, timeoutMs = 3000) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0)
+    } catch {
+      return
+    }
+    await sleep(25)
+  }
+}
+
+/** A spawner that counts calls and still starts the real child. */
+function countingSpawn() {
+  const state = { calls: 0, spawn: null }
+  state.spawn = (...args) => {
+    state.calls += 1
+    return spawnChild(...args)
+  }
+  return state
+}
+
+/** The registry record the self-runtime enrolled (read straight from state.json). */
+function selfRegistryRecord(dir, computerId) {
+  let doc
+  try {
+    doc = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'))
+  } catch {
+    return null
+  }
+  return (doc.computers ?? []).find((computer) => computer.id === computerId) ?? null
+}
+
+async function phaseY(root) {
+  const agentPath = join(root, 'fake-agent.mjs')
+  writeFakeAgent(agentPath)
+
+  const dir = join(root, 'y-self')
+  const app = await mount({ ...FAST_CONFIG, stateDir: dir }, {
+    selfRuntimeDeps: { autoStart: false, agentPath, pollMs: 10, portWaitMs: 3000, stopGraceMs: 500 },
+  })
+  let runningPid = null
+  try {
+    await check('self-runtime: /self and /state.account.self expose the stopped default', async () => {
+      const self = await call(app.origin, `${API}/self`)
+      assert.equal(self.status, 200)
+      assert.deepEqual(self.data, {
+        controllable: true,
+        runtime: { state: 'stopped', pid: null, since: null, lastError: null, computerId: null, logs: [] },
+      })
+      const state = await call(app.origin, `${API}/state`)
+      assert.equal(state.status, 200)
+      assert.deepEqual(state.data.account.self, self.data, '/state.account.self mirrors /self')
+      assert.equal(state.data.account.controllable, true, 'a fresh machine is controllable')
+
+      // Both routes sit behind the same browser gate as every other §4 route.
+      app.fake.setGate({ requestRejection: () => 401, trustedHosts: [] })
+      assert.equal((await call(app.origin, `${API}/self`)).status, 401)
+      assert.equal((await call(app.origin, `${API}/account/controllable`, {
+        method: 'POST',
+        body: { enabled: true },
+      })).status, 401)
+      app.fake.setGate(undefined)
+    })
+
+    await check('self-runtime: the 被控 switch enrolls this machine and starts the local runtime', async () => {
+      const started = await call(app.origin, `${API}/account/controllable`, {
+        method: 'POST',
+        body: { enabled: true },
+      })
+      assert.equal(started.status, 200)
+      assert.equal(started.data.controllable, true)
+      assert.equal(started.data.self.controllable, true)
+      assert.equal(started.data.self.runtime.state, 'running')
+      assert.ok(Number.isSafeInteger(started.data.self.runtime.pid), 'a running runtime reports its pid')
+      assert.equal(typeof started.data.self.runtime.since, 'string', 'a running runtime reports its start time')
+      assert.equal(started.data.self.runtime.lastError, null)
+      assert.match(started.data.self.runtime.computerId, /^cmp_[0-9a-f]{12}$/)
+      assert.ok(Array.isArray(started.data.self.runtime.logs))
+      runningPid = started.data.self.runtime.pid
+      assert.doesNotThrow(() => process.kill(runningPid, 0), 'the agent child is alive')
+
+      // The child runs with an ISOLATED identity: its own config under the state
+      // dir, dialling this hub over loopback, never ~/.dsh-computers.
+      const config = readSelfConfig(dir)
+      assert.equal(config.version, 1)
+      assert.equal(config.serverUrl, `http://127.0.0.1:${new URL(app.origin).port}`)
+      assert.equal(config.computerId, started.data.self.runtime.computerId)
+      assert.match(config.token, /^dshc_[A-Za-z0-9_-]+$/)
+      assert.equal(config.joinToken, readFleetIdentity(dir).joinToken, 'the fleet token is kept for a re-enroll')
+
+      // The hub enrolled its OWN machine: it now exists in its own registry.
+      const record = selfRegistryRecord(dir, config.computerId)
+      assert.ok(record !== null, 'the hub registry must contain its own machine')
+      assert.equal(record.mode, 'embedded')
+      assert.equal(readAccountDoc(dir).controllable, true, 'the switch is persisted in account.json')
+    })
+
+    await check('self-runtime: turning 被控 off stops the process and persists the switch', async () => {
+      const stopped = await call(app.origin, `${API}/account/controllable`, {
+        method: 'POST',
+        body: { enabled: false },
+      })
+      assert.equal(stopped.status, 200)
+      assert.equal(stopped.data.controllable, false)
+      assert.equal(stopped.data.self.runtime.state, 'stopped')
+      assert.equal(stopped.data.self.runtime.pid, null)
+      assert.equal(readAccountControllable(dir), false)
+      assert.equal(readAccountDoc(dir).controllable, false)
+      await waitForGone(runningPid)
+      assert.equal((await call(app.origin, `${API}/self`)).data.controllable, false)
+
+      // A non-boolean body is the protocol's 400 and changes nothing.
+      const bad = await call(app.origin, `${API}/account/controllable`, { method: 'POST', body: { enabled: 'yes' } })
+      assert.equal(bad.status, 400)
+      assert.equal(bad.data.error, 'bad-request')
+      assert.equal(readAccountControllable(dir), false, 'a rejected switch changes nothing')
+    })
+
+    await check('self-runtime: restart() replaces the process', async () => {
+      const port = Number(new URL(app.origin).port)
+      const runtime = createSelfRuntime({
+        ctx: { webServer: { port } },
+        stateDir: dir,
+        joinToken: () => readFleetIdentity(dir).joinToken,
+        deps: { agentPath, pollMs: 10, portWaitMs: 2000, stopGraceMs: 500 },
+      })
+      try {
+        const first = await runtime.start()
+        assert.equal(first.state, 'running')
+        assert.ok(Number.isSafeInteger(first.pid))
+        const second = await runtime.restart()
+        assert.equal(second.state, 'running')
+        assert.notEqual(second.pid, first.pid, 'restart spawns a new child')
+        await waitForGone(first.pid)
+        const stopped = await runtime.stop()
+        assert.equal(stopped.state, 'stopped')
+        assert.equal(stopped.pid, null)
+        await waitForGone(second.pid)
+        // Re-enrolling (start, restart, and the switch above) must REPLACE the
+        // local machine's registry record, never stack duplicate 本地电脑 rows.
+        const doc = JSON.parse(readFileSync(join(dir, 'state.json'), 'utf8'))
+        const local = doc.computers.filter((computer) => computer.id === second.computerId)
+        assert.equal(local.length, 1, 'the local machine keeps exactly one registry record')
+        assert.equal(doc.computers.length, 1, 'no duplicate local computers across re-enrolls')
+      } finally {
+        await runtime.dispose()
+      }
+    })
+  } finally {
+    await app.close()
+  }
+
+  await check('self-runtime: controllable:false at load does not start (no child spawned)', async () => {
+    const offDir = join(root, 'y-off')
+    mkdirSync(offDir, { recursive: true })
+    assert.equal(writeAccountControllable(offDir, false), true)
+    const spawner = countingSpawn()
+    const off = await mount({ ...FAST_CONFIG, stateDir: offDir }, {
+      selfRuntimeDeps: { autoStart: true, agentPath, spawn: spawner.spawn, pollMs: 10, portWaitMs: 2000 },
+    })
+    try {
+      await sleep(250)
+      const self = await call(off.origin, `${API}/self`)
+      assert.equal(self.status, 200)
+      assert.equal(self.data.controllable, false, 'the persisted switch wins at load')
+      assert.equal(self.data.runtime.state, 'stopped')
+      assert.equal(spawner.calls, 0, 'no agent child is spawned for a non-controllable machine')
+      assert.equal(existsSync(join(offDir, SELF_DIR_NAME)), false, 'no isolated identity is written either')
+      assert.equal((await call(off.origin, `${API}/state`)).data.account.self.controllable, false)
+    } finally {
+      await off.close()
+    }
+  })
+
+  await check('self-runtime: a crash loop backs off and gives up after 3 restarts', async () => {
+    const crashDir = join(root, 'y-crash')
+    const crashAgent = join(root, 'crash-agent.mjs')
+    writeFakeAgent(crashAgent, { crash: true, exitCode: 3 })
+    const spawner = countingSpawn()
+    const crashing = await mount({ ...FAST_CONFIG, stateDir: crashDir }, {
+      selfRuntimeDeps: {
+        autoStart: true,
+        agentPath: crashAgent,
+        spawn: spawner.spawn,
+        pollMs: 10,
+        portWaitMs: 2000,
+        restartDelays: [10, 10, 10],
+        stopGraceMs: 300,
+      },
+    })
+    try {
+      const runtime = await waitFor(
+        async () => (await call(crashing.origin, `${API}/self`)).data.runtime,
+        (value) => value.state === 'failed',
+        5000,
+        'the self-runtime to give up after its restart budget',
+      )
+      assert.match(runtime.lastError, /keeps crashing/i, 'the reason is surfaced')
+      assert.match(runtime.lastError, /3 restarts/)
+      assert.equal(spawner.calls, MAX_RESTARTS + 1, 'the initial start plus exactly 3 automatic restarts')
+      assert.equal(runtime.pid, null)
+      // Giving up is not an apply() failure: the page still works.
+      assert.equal((await call(crashing.origin, `${API}/state`)).status, 200)
+    } finally {
+      await crashing.close()
+    }
+  })
+
+  await check('self-runtime: a failed start never throws into apply()', async () => {
+    const missingDir = join(root, 'y-missing')
+    // Both start paths are broken: spawning is blocked AND the embedded loop is
+    // unavailable. apply() must still return and the failure must be reported.
+    const mounted = await mount({ ...FAST_CONFIG, stateDir: missingDir }, {
+      selfRuntimeDeps: {
+        autoStart: true,
+        spawn: () => {
+          throw new Error('spawn is blocked in this host')
+        },
+        startRuntime: () => {
+          throw new Error('the embedded runtime is unavailable')
+        },
+        pollMs: 10,
+        portWaitMs: 2000,
+      },
+    })
+    try {
+      const runtime = await waitFor(
+        async () => (await call(mounted.origin, `${API}/self`)).data.runtime,
+        (value) => value.state === 'failed',
+        5000,
+        'the failed start to be reported',
+      )
+      assert.match(runtime.lastError, /could not start/i)
+      const state = await call(mounted.origin, `${API}/state`)
+      assert.equal(state.status, 200, '/state still answers after a failed self-runtime start')
+      assert.equal(state.data.account.self.runtime.state, 'failed')
+    } finally {
+      await mounted.close()
+    }
+  })
+
+  await check('self-runtime: falls back to the embedded loop when spawning is unavailable', async () => {
+    const embeddedDir = join(root, 'y-embedded')
+    const calls = { start: 0, stop: 0, options: null }
+    const embeddedApp = await mount({ ...FAST_CONFIG, stateDir: embeddedDir }, {
+      selfRuntimeDeps: {
+        autoStart: true,
+        // The documented "spawn unavailable" host: child processes are refused.
+        spawn: () => {
+          throw new Error('spawn is blocked in this host')
+        },
+        startRuntime: (options) => {
+          calls.start += 1
+          calls.options = options
+          return { stop: async () => { calls.stop += 1 } }
+        },
+        pollMs: 10,
+        portWaitMs: 2000,
+      },
+    })
+    try {
+      const runtime = await waitFor(
+        async () => (await call(embeddedApp.origin, `${API}/self`)).data.runtime,
+        (value) => value.state === 'running',
+        5000,
+        'the embedded fallback to take over',
+      )
+      assert.equal(calls.start, 1, 'the embedded loop is started exactly once')
+      assert.equal(runtime.pid, null, 'no child process owns an embedded loop')
+      assert.match(calls.options.serverUrl, /^http:\/\/127\.0\.0\.1:\d+$/)
+      assert.equal(calls.options.computerId, runtime.computerId)
+      assert.match(calls.options.token, /^dshc_[A-Za-z0-9_-]+$/)
+      assert.equal(calls.options.mode, 'embedded')
+      // The same 被控 switch tears the embedded loop down again.
+      const off = await call(embeddedApp.origin, `${API}/account/controllable`, {
+        method: 'POST',
+        body: { enabled: false },
+      })
+      assert.equal(off.data.self.runtime.state, 'stopped')
+      assert.equal(calls.stop, 1, 'the embedded loop is stopped with the switch')
+    } finally {
+      await embeddedApp.close()
+    }
+  })
+
+  await check('self-runtime: the device registration carries controllable', async () => {
+    const acctDir = join(root, 'y-account')
+    const relay = await createFakeAccountCenter()
+    const acctApp = await mount({ ...FAST_CONFIG, stateDir: acctDir, publicUrl: 'https://dsh.example.com' }, {
+      accountDeps: { heartbeatMs: 60_000 },
+      selfRuntimeDeps: { autoStart: false, agentPath, pollMs: 10, portWaitMs: 2000 },
+    })
+    try {
+      const created = await call(acctApp.origin, `${API}/account/create`, {
+        method: 'POST',
+        body: { relayUrl: relay.origin },
+      })
+      assert.equal(created.status, 200)
+      assert.equal(created.data.controllable, true, 'the default flag is published')
+      assert.equal(created.data.devices[0].controllable, true)
+      assert.equal(relay.registrations.at(-1).device.controllable, true)
+
+      const off = await call(acctApp.origin, `${API}/account/controllable`, {
+        method: 'POST',
+        body: { enabled: false },
+      })
+      assert.equal(off.status, 200)
+      assert.equal(off.data.controllable, false)
+      assert.equal(off.data.devices[0].controllable, false, 'this machine’s row reflects the switch')
+      assert.equal(relay.registrations.at(-1).device.controllable, false, 'republished to the directory')
+      assert.equal(readAccountDoc(acctDir).controllable, false)
+
+      // Logging out and back in must not reset the switch.
+      await call(acctApp.origin, `${API}/account/logout`, { method: 'POST' })
+      const back = await call(acctApp.origin, `${API}/account/login`, {
+        method: 'POST',
+        body: {
+          relayUrl: relay.origin,
+          accountId: created.data.accountId,
+          secret: created.data.secret,
+        },
+      })
+      assert.equal(back.status, 200)
+      assert.equal(back.data.controllable, false, 'logging in does not reset the 被控 switch')
+      assert.equal(readAccountDoc(acctDir).controllable, false)
+      assert.equal(back.data.devices[0].controllable, false)
+    } finally {
+      await acctApp.close()
+      await relay.close()
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Phase Z — v1.9.1: one account key, the machine-facing fleet API, and tools
+// routing for 「本地电脑」 and `acct:<machineId>` targets.
+// ---------------------------------------------------------------------------
+
+async function phaseZ(root) {
+  const agentPath = join(root, 'z-fake-agent.mjs')
+  writeFakeAgent(agentPath)
+
+  // ---- part 1: login with ONE composite key --------------------------------
+  // One fake relay per part: the real relay's bootstrap rule allows exactly one
+  // account without an admin key, and each part wants its own clean directory.
+  const relay = await createFakeAccountCenter()
+  const loginDir = join(root, 'z-login')
+  const loginApp = await mount({
+    ...FAST_CONFIG,
+    stateDir: loginDir,
+    publicUrl: 'https://dsh.example.com',
+  }, { accountDeps: { heartbeatMs: 60_000 } })
+  try {
+    const seeded = await seedRelayAccount(relay, 'Key Account')
+    assert.match(seeded.key, /^dshk_[0-9a-f]{16}_[0-9a-f]{32}$/, 'the fake relay mints the composite key')
+
+    await check('account key: the host format matches the relay’s canonical key format', async () => {
+      assert.equal(formatFleetKey(seeded.accountId, seeded.secret), seeded.key)
+      assert.deepEqual(parseRelayFleetKey(seeded.key), {
+        ok: true,
+        accountId: seeded.accountId,
+        secret: seeded.secret,
+      })
+      assert.deepEqual(parseAccountKey(seeded.key), {
+        ok: true,
+        accountId: seeded.accountId,
+        secret: seeded.secret,
+      })
+      assert.equal(formatAccountKey(seeded.accountId, seeded.secret), seeded.key)
+      // Both halves reject the same malformed shapes.
+      for (const bad of ['dshk_bad', 'dshk_0123456789abcdef', 'dshk_0123456789abcdef_0123', ` ${seeded.key.slice(0, 20)} `]) {
+        assert.equal(parseAccountKey(bad).ok, false, `the host must reject ${JSON.stringify(bad)}`)
+        assert.equal(parseRelayFleetKey(bad).ok, false, `the relay must reject ${JSON.stringify(bad)}`)
+      }
+    })
+
+    await check('account key: login with one pasted key, /account shows it and never the secret', async () => {
+      const loggedIn = await call(loginApp.origin, `${API}/account/login`, {
+        method: 'POST',
+        body: { relayUrl: relay.origin, key: seeded.key },
+      })
+      assert.equal(loggedIn.status, 200)
+      assert.equal(loggedIn.data.loggedIn, true)
+      assert.equal(loggedIn.data.accountId, seeded.accountId)
+      assert.equal(loggedIn.data.key, seeded.key, 'login answers with the composite key')
+      assert.equal(loggedIn.data.secret, undefined, 'login never echoes the bare secret')
+
+      // The key is persisted beside the pair (0600) and re-served at any time.
+      const doc = readAccountDoc(loginDir)
+      assert.equal(doc.key, seeded.key, 'account.json stores the key')
+      assert.equal(doc.secret, seeded.secret)
+      const reread = await call(loginApp.origin, `${API}/account`)
+      assert.equal(reread.status, 200)
+      assert.equal(reread.data.key, seeded.key)
+      assert.equal(reread.data.secret, undefined)
+      assert.ok(!reread.text.includes(seeded.secret), 'the bare secret must never leave the host')
+      const state = await call(loginApp.origin, `${API}/state`)
+      assert.equal(state.data.account.key, seeded.key, '/state mirrors the key for the UI')
+      assert.ok(!state.text.includes(seeded.secret))
+    })
+
+    await check('account key: a malformed key is 400 invalid-key and persists nothing', async () => {
+      const bad = await call(loginApp.origin, `${API}/account/login`, {
+        method: 'POST',
+        body: { relayUrl: relay.origin, key: 'dshk_not-a-real-key' },
+      })
+      assert.equal(bad.status, 400)
+      assert.equal(bad.data.error, 'invalid-key')
+      assert.match(bad.data.message, /dshk_/)
+      assert.equal(readAccountDoc(loginDir).key, seeded.key, 'the existing login is untouched')
+
+      // A key plus a disagreeing accountId is the client's mistake, not a login.
+      const mismatch = await call(loginApp.origin, `${API}/account/login`, {
+        method: 'POST',
+        body: { relayUrl: relay.origin, key: seeded.key, accountId: 'acct_0000000000000000' },
+      })
+      assert.equal(mismatch.status, 400)
+      assert.equal(mismatch.data.error, 'invalid-key')
+    })
+
+    await check('account key: the legacy accountId + secret pair still logs in', async () => {
+      await call(loginApp.origin, `${API}/account/logout`, { method: 'POST' })
+      const back = await call(loginApp.origin, `${API}/account/login`, {
+        method: 'POST',
+        body: { relayUrl: relay.origin, accountId: seeded.accountId, secret: seeded.secret },
+      })
+      assert.equal(back.status, 200)
+      assert.equal(back.data.loggedIn, true)
+      assert.equal(back.data.key, seeded.key, 'the key is derived from the pair')
+      assert.equal(readAccountDoc(loginDir).key, seeded.key)
+    })
+  } finally {
+    await loginApp.close()
+    await relay.close()
+  }
+
+  // ---- part 2: machine-facing fleet API on the hub -------------------------
+  const fleetRelay = await createFakeAccountCenter()
+  const fleetDir = join(root, 'z-fleet')
+  const fleetApp = await mount({
+    ...FAST_CONFIG,
+    stateDir: fleetDir,
+    publicUrl: 'https://dsh.example.com',
+  }, {
+    accountDeps: { heartbeatMs: 60_000 },
+    selfRuntimeDeps: { autoStart: false, agentPath, pollMs: 10, portWaitMs: 3000, stopGraceMs: 500 },
+  })
+  const fleetSse = []
+  try {
+    const account = await seedRelayAccount(fleetRelay, 'Fleet Account')
+    const login = await call(fleetApp.origin, `${API}/account/login`, {
+      method: 'POST',
+      body: { relayUrl: fleetRelay.origin, key: account.key },
+    })
+    assert.equal(login.status, 200)
+    // The 被控 switch starts the local runtime; its isolated identity then
+    // connects over loopback. The smoke plays the agent on that stream.
+    const on = await call(fleetApp.origin, `${API}/account/controllable`, { method: 'POST', body: { enabled: true } })
+    assert.equal(on.status, 200)
+    assert.equal(on.data.self.runtime.state, 'running')
+    const selfConfig = readSelfConfig(fleetDir)
+    const sse = await openSse(fleetApp.origin, `${API}/agent/events`, { authorization: `Bearer ${selfConfig.token}` })
+    fleetSse.push(sse)
+    await sse.nextEvent('hello', 2000)
+
+    /** Answer the pending exec event on the local runtime's stream. */
+    const answerExec = async (event, stdout) => {
+      const posted = await raw(fleetApp.origin, `${API}/agent/results`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${selfConfig.token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({
+          requestId: event.data.requestId,
+          ok: true,
+          exitCode: 0,
+          signal: null,
+          stdout,
+          stderr: '',
+          durationMs: 5,
+          truncated: false,
+          timedOut: false,
+          error: null,
+        }),
+      })
+      assert.equal(posted.status, 200)
+    }
+
+    await check('fleet: exec with the account key runs on this machine’s local runtime', async () => {
+      const pending = call(fleetApp.origin, `${API}/fleet/exec`, {
+        method: 'POST',
+        headers: { 'x-fleet-key': account.key },
+        body: { command: 'echo fleet', cwd: '/tmp', timeoutMs: 5000 },
+      }).then((value) => ({ value }), (error) => ({ error }))
+      const event = await sse.nextEvent('exec', 3000)
+      assert.equal(event.data.command, 'echo fleet')
+      assert.equal(event.data.cwd, '/tmp')
+      await answerExec(event, 'fleet hi\n')
+      const settled = await pending
+      assert.ok(settled.value, settled.error && settled.error.message)
+      const response = settled.value
+      assert.equal(response.status, 200)
+      assert.equal(response.data.ok, true)
+      assert.equal(response.data.exitCode, 0)
+      assert.equal(response.data.stdout, 'fleet hi\n')
+      assert.equal(response.data.computerId, selfConfig.computerId, 'the answer names the local runtime computer')
+    })
+
+    await check('fleet: auth — wrong key 401, no credential 401, cookie is not a credential, GET is 405', async () => {
+      const before = sse.events.filter((event) => event.name === 'exec').length
+      const wrong = await call(fleetApp.origin, `${API}/fleet/exec`, {
+        method: 'POST',
+        headers: { 'x-fleet-key': 'dshk_0000000000000000_00000000000000000000000000000000' },
+        body: { command: 'echo nope' },
+      })
+      assert.equal(wrong.status, 401)
+      assert.equal(wrong.data.error, 'invalid-key')
+
+      const missing = await call(fleetApp.origin, `${API}/fleet/exec`, { method: 'POST', body: { command: 'echo nope' } })
+      assert.equal(missing.status, 401)
+      assert.equal(missing.data.error, 'unauthorized')
+
+      const cookieOnly = await call(fleetApp.origin, `${API}/fleet/exec`, {
+        method: 'POST',
+        headers: { cookie: 'dsh_session=smoke; other=1' },
+        body: { command: 'echo nope' },
+      })
+      assert.equal(cookieOnly.status, 401, 'a browser cookie must not authenticate a machine-facing route')
+      assert.equal(cookieOnly.data.error, 'unauthorized')
+
+      const wrongSecret = await call(fleetApp.origin, `${API}/fleet/exec`, {
+        method: 'POST',
+        headers: { 'x-fleet-secret': fakeFleetSecret() },
+        body: { command: 'echo nope' },
+      })
+      assert.equal(wrongSecret.status, 401)
+      assert.equal(wrongSecret.data.error, 'invalid-key')
+
+      const get = await raw(fleetApp.origin, `${API}/fleet/exec`, { headers: { 'x-fleet-key': account.key } })
+      assert.equal(get.status, 405)
+      assert.match(String(get.headers.allow), /POST/)
+
+      const badBody = await call(fleetApp.origin, `${API}/fleet/exec`, {
+        method: 'POST',
+        headers: { 'x-fleet-key': account.key },
+        body: { command: '   ' },
+      })
+      assert.equal(badBody.status, 400)
+      assert.equal(badBody.data.error, 'bad-request')
+      assert.equal(sse.events.filter((event) => event.name === 'exec').length, before, 'no exec event for a refused request')
+    })
+
+    await check('fleet: the x-fleet-secret form authenticates too', async () => {
+      const pending = call(fleetApp.origin, `${API}/fleet/exec`, {
+        method: 'POST',
+        headers: { 'x-fleet-secret': account.secret },
+        body: { command: 'echo by-secret' },
+      }).then((value) => ({ value }), (error) => ({ error }))
+      const event = await sse.nextEvent('exec', 3000)
+      assert.equal(event.data.command, 'echo by-secret')
+      await answerExec(event, 'secret ok\n')
+      const settled = await pending
+      assert.ok(settled.value, settled.error && settled.error.message)
+      assert.equal(settled.value.status, 200)
+      assert.equal(settled.value.data.stdout, 'secret ok\n')
+    })
+
+    await check('fleet: fs dispatches through the hub and returns the agent payload', async () => {
+      const pending = call(fleetApp.origin, `${API}/fleet/fs`, {
+        method: 'POST',
+        headers: { 'x-fleet-key': account.key },
+        body: { op: 'read', payload: { path: '/etc/hostname' } },
+      }).then((value) => ({ value }), (error) => ({ error }))
+      const event = await sse.nextEvent('fs', 3000)
+      assert.equal(event.data.op, 'read')
+      // The wire frame is flattened (`{ requestId, op, ...payload }`).
+      assert.equal(event.data.path, '/etc/hostname')
+      const posted = await raw(fleetApp.origin, `${API}/agent/fs/result`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${selfConfig.token}`, 'content-type': 'application/json' },
+        body: JSON.stringify({ requestId: event.data.requestId, ok: true, path: '/etc/hostname', text: 'smoke\n', lines: 1, bytes: 6, truncated: false }),
+      })
+      assert.equal(posted.status, 200)
+      const settled = await pending
+      assert.ok(settled.value, settled.error && settled.error.message)
+      assert.equal(settled.value.status, 200)
+      assert.equal(settled.value.data.ok, true)
+      assert.equal(settled.value.data.text, 'smoke\n')
+
+      const badOp = await call(fleetApp.origin, `${API}/fleet/fs`, {
+        method: 'POST',
+        headers: { 'x-fleet-key': account.key },
+        body: { op: 'destroy', payload: {} },
+      })
+      assert.equal(badOp.status, 400)
+      assert.equal(badOp.data.error, 'bad-request')
+    })
+
+    await check('fleet: routes are machine-facing — the browser gate does not apply', async () => {
+      fleetApp.fake.setGate({ requestRejection: () => 401, trustedHosts: [] })
+      assert.equal((await call(fleetApp.origin, `${API}/state`)).status, 401, 'browser routes are gated')
+      const pending = call(fleetApp.origin, `${API}/fleet/exec`, {
+        method: 'POST',
+        headers: { 'x-fleet-key': account.key },
+        body: { command: 'echo ungated' },
+      }).then((value) => ({ value }), (error) => ({ error }))
+      const event = await sse.nextEvent('exec', 3000)
+      await answerExec(event, 'ungated ok\n')
+      const settled = await pending
+      assert.ok(settled.value, settled.error && settled.error.message)
+      assert.equal(settled.value.status, 200, 'the fleet API does not pass through the browser gate')
+      fleetApp.fake.setGate(undefined)
+    })
+
+    await check('tools: a null pin (本地电脑) resolves to the self-runtime computer', async () => {
+      const execTool = fleetApp.fake.tools.get('computer_exec')
+      const outcome = execTool.execute({ command: 'echo local' }, { signal: new AbortController().signal })
+        .then((value) => ({ value }), (error) => ({ error }))
+      const event = await sse.nextEvent('exec', 3000)
+      assert.equal(event.data.command, 'echo local')
+      await answerExec(event, 'local hi\n')
+      const settled = await outcome
+      assert.ok(settled.value, `expected success, got ${settled.error && settled.error.message}`)
+      assert.equal(settled.value.computer.id, selfConfig.computerId, '本地电脑 is the hub’s own runtime record')
+      assert.equal(settled.value.stdout, 'local hi\n')
+
+      const listTool = fleetApp.fake.tools.get('computer_list')
+      const value = await listTool.execute({}, {})
+      const local = value.computers.find((computer) => computer.id === selfConfig.computerId)
+      assert.ok(local !== undefined, 'the local runtime is listed')
+      assert.equal(local.via, 'registry')
+      assert.equal(local.online, true)
+    })
+
+    await check('fleet: 被控 off answers 403 not-controllable', async () => {
+      const off = await call(fleetApp.origin, `${API}/account/controllable`, { method: 'POST', body: { enabled: false } })
+      assert.equal(off.status, 200)
+      assert.equal(off.data.self.runtime.state, 'stopped')
+      const refused = await call(fleetApp.origin, `${API}/fleet/exec`, {
+        method: 'POST',
+        headers: { 'x-fleet-key': account.key },
+        body: { command: 'echo nope' },
+      })
+      assert.equal(refused.status, 403)
+      assert.equal(refused.data.error, 'not-controllable')
+      assert.match(refused.data.message, /被控/)
+    })
+  } finally {
+    for (const client of fleetSse) client.close()
+    await fleetApp.close()
+    await fleetRelay.close()
+  }
+
+  // ---- part 3: a machine with no running local runtime ---------------------
+  const downRelay = await createFakeAccountCenter()
+  const downDir = join(root, 'z-down')
+  const downApp = await mount({ ...FAST_CONFIG, stateDir: downDir }, {
+    accountDeps: { heartbeatMs: 60_000 },
+    selfRuntimeDeps: { autoStart: false, agentPath, pollMs: 10, portWaitMs: 1000 },
+  })
+  try {
+    const account = await seedRelayAccount(downRelay, 'Down Account')
+    await call(downApp.origin, `${API}/account/login`, {
+      method: 'POST',
+      body: { relayUrl: downRelay.origin, key: account.key },
+    })
+    await check('fleet: a stopped self-runtime answers 503 self-runtime-unavailable', async () => {
+      const refused = await call(downApp.origin, `${API}/fleet/exec`, {
+        method: 'POST',
+        headers: { 'x-fleet-key': account.key },
+        body: { command: 'echo nope' },
+      })
+      assert.equal(refused.status, 503)
+      assert.equal(refused.data.error, 'self-runtime-unavailable')
+      assert.match(refused.data.message, /被控/)
+
+      const execTool = downApp.fake.tools.get('computer_exec')
+      await assert.rejects(
+        execTool.execute({ command: 'echo nope' }, { signal: new AbortController().signal }),
+        /本地电脑的运行时没启动：设置 → 电脑 → 高级 里把被控打开/,
+      )
+    })
+  } finally {
+    await downApp.close()
+    await downRelay.close()
+  }
+
+  // ---- part 4: account devices as targets (`acct:<machineId>`) -------------
+  const peerRelay = await createFakeAccountCenter()
+  const peer = await createFakePeerHub()
+  const peerDir = join(root, 'z-peer')
+  const peerApp = await mount({ ...FAST_CONFIG, stateDir: peerDir, publicUrl: 'https://peer.example.com' }, {
+    accountDeps: { heartbeatMs: 60_000 },
+    selfRuntimeDeps: { autoStart: false, agentPath, pollMs: 10, portWaitMs: 1000 },
+  })
+  try {
+    const account = await seedRelayAccount(peerRelay, 'Peer Account')
+    peer.key = account.key
+    const onlineId = 'mach_0123456789abcdef'
+    const offlineId = 'mach_fedcba9876543210'
+    const lockedId = 'mach_aaaabbbbccccdddd'
+    await seedRelayDevice(peerRelay, account.accountId, {
+      machineId: onlineId,
+      name: 'Peer Mac',
+      platform: 'darwin',
+      hubId: 'hub_peer',
+      entryUrl: peer.origin,
+      controllable: true,
+    })
+    await seedRelayDevice(peerRelay, account.accountId, {
+      machineId: offlineId,
+      name: 'Sleepy Mac',
+      platform: 'linux',
+      hubId: 'hub_sleep',
+      entryUrl: peer.origin,
+      controllable: true,
+    }, { lastSeenAt: new Date(Date.now() - 10 * 60_000).toISOString() })
+    await seedRelayDevice(peerRelay, account.accountId, {
+      machineId: lockedId,
+      name: 'Locked Mac',
+      platform: 'win32',
+      hubId: 'hub_lock',
+      entryUrl: peer.origin,
+      controllable: false,
+    })
+    const login = await call(peerApp.origin, `${API}/account/login`, {
+      method: 'POST',
+      body: { relayUrl: peerRelay.origin, key: account.key },
+    })
+    assert.equal(login.status, 200)
+    const sessionId = 'sess_z_peer'
+
+    await check('account targets: the selection route accepts acct:<machineId>', async () => {
+      const targetId = `acct:${onlineId}`
+      const pinned = await call(peerApp.origin, `${API}/selection`, { method: 'POST', body: { sessionId, computerId: targetId } })
+      assert.equal(pinned.status, 200)
+      assert.equal(pinned.data.computerId, targetId)
+      assert.equal(pinned.data.computer.id, targetId)
+      assert.equal(pinned.data.computer.name, 'Peer Mac')
+      assert.equal(pinned.data.computer.online, true)
+      assert.equal(pinned.data.computer.platformLabel, 'macOS')
+      const read = await call(peerApp.origin, `${API}/selection?sessionId=${encodeURIComponent(sessionId)}`)
+      assert.deepEqual(read.data, pinned.data)
+      const unknown = await call(peerApp.origin, `${API}/selection`, {
+        method: 'POST',
+        body: { sessionId, computerId: 'acct:mach_0000000000000000' },
+      })
+      assert.equal(unknown.status, 404)
+    })
+
+    await check('account targets: computer_list merges the account directory (via: account)', async () => {
+      const listTool = peerApp.fake.tools.get('computer_list')
+      const value = await listTool.execute({}, { agent: { id: sessionId } })
+      const byName = new Map(value.computers.map((computer) => [computer.name, computer]))
+      assert.ok(byName.has('Peer Mac'), 'the account device is listed')
+      const peerRow = byName.get('Peer Mac')
+      assert.equal(peerRow.via, 'account')
+      assert.equal(peerRow.id, `acct:${onlineId}`)
+      assert.equal(peerRow.online, true)
+      assert.equal(peerRow.platformLabel, 'macOS')
+      assert.equal(byName.get('Sleepy Mac').online, false)
+      assert.equal(byName.get('Locked Mac').via, 'account')
+      assert.equal(value.selectedComputerId, `acct:${onlineId}`)
+      const content = listTool.output.render({}, value)
+      assert.ok(content[0].text.includes('Peer Mac'))
+      assert.ok(content[0].text.includes('account'))
+    })
+
+    await check('account targets: exec routes to the peer hub with the account key', async () => {
+      const execTool = peerApp.fake.tools.get('computer_exec')
+      const outcome = execTool.execute({ command: 'echo peer' }, { signal: new AbortController().signal, agent: { id: sessionId } })
+        .then((value) => ({ value }), (error) => ({ error }))
+      const settled = await outcome
+      assert.ok(settled.value, `expected success, got ${settled.error && settled.error.message}`)
+      assert.equal(settled.value.computer.id, `acct:${onlineId}`)
+      assert.equal(settled.value.computer.name, 'Peer Mac')
+      assert.equal(settled.value.stdout, 'peer:echo peer\n')
+      assert.equal(settled.value.ok, true)
+      const request = peer.requests.at(-1)
+      assert.equal(request.path, '/api/dsh-computers/fleet/exec')
+      assert.equal(request.headers['x-fleet-key'], account.key, 'the peer receives the account key')
+      assert.equal(request.body.command, 'echo peer')
+
+      // An explicit name resolves to the same account device.
+      const byName = await execTool.execute({ computer: 'Peer Mac', command: 'echo named' }, { signal: new AbortController().signal })
+      assert.equal(byName.computer.id, `acct:${onlineId}`)
+      assert.equal(byName.stdout, 'peer:echo named\n')
+    })
+
+    await check('account targets: file tools route through the peer fleet fs API', async () => {
+      const readTool = peerApp.fake.tools.get('computer_read')
+      const value = await readTool.execute({ computer: 'Peer Mac', path: '/etc/hostname' }, { signal: new AbortController().signal })
+      assert.equal(value.computer.id, `acct:${onlineId}`)
+      assert.equal(value.text, 'peer file\n')
+      const request = peer.requests.at(-1)
+      assert.equal(request.path, '/api/dsh-computers/fleet/fs')
+      assert.equal(request.body.op, 'read')
+      assert.equal(request.body.payload.path, '/etc/hostname')
+    })
+
+    await check('account targets: offline and not-controllable devices fail with clear errors', async () => {
+      const execTool = peerApp.fake.tools.get('computer_exec')
+      const offline = await execTool.execute({ computer: 'Sleepy Mac', command: 'echo nope' }, { signal: new AbortController().signal })
+        .then((value) => ({ value }), (error) => ({ error }))
+      assert.ok(offline.error, 'an offline device must not run')
+      assert.match(offline.error.message, /offline/)
+      const locked = await execTool.execute({ computer: 'Locked Mac', command: 'echo nope' }, { signal: new AbortController().signal })
+        .then((value) => ({ value }), (error) => ({ error }))
+      assert.ok(locked.error, 'a non-controllable device must not run')
+      assert.match(locked.error.message, /被控/)
+      assert.equal(
+        peer.requests.filter((request) => request.body && request.body.command === 'echo nope').length,
+        0,
+        'neither request reached the peer',
+      )
+    })
+
+    await check('account targets: computer_skills includes account devices with via: account', async () => {
+      const tool = peerApp.fake.tools.get('computer_skills')
+      const value = await tool.execute({}, {})
+      const row = value.computers.find((computer) => computer.id === `acct:${onlineId}`)
+      assert.ok(row !== undefined)
+      assert.equal(row.via, 'account')
+      assert.equal(row.online, true)
+      assert.equal(row.skillCount, 0)
+      const content = tool.output.render({}, value)
+      assert.ok(content[0].text.includes('Peer Mac'))
+      assert.ok(content[0].text.includes('account device'))
+    })
+  } finally {
+    await peerApp.close()
+    await peer.close()
+    await peerRelay.close()
+  }
+}
+
 watchdog.unref()
 const root = mkdtempSync(join(tmpdir(), 'dshc-smoke-'))
 let exitCode = 0
@@ -7082,6 +8104,8 @@ try {
   await phaseV(root)
   await phaseW(root)
   await phaseX(root)
+  await phaseY(root)
+  await phaseZ(root)
 } finally {
   rmSync(root, { recursive: true, force: true })
   clearTimeout(watchdog)

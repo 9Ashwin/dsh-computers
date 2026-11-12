@@ -68,6 +68,10 @@ window.__ModuleLoader__.load({
       accountLogin: 'api/dsh-computers/account/login',
       accountLogout: 'api/dsh-computers/account/logout',
       accountDiscover: 'api/dsh-computers/account/discover',
+      /* 被控 (controllable): toggles THIS machine's own flag in the account
+       * directory. Hosts that predate it answer 404 — the UI degrades to the
+       * read-only label. */
+      accountControllable: 'api/dsh-computers/account/controllable',
       /* Per-session target computer for the composer chip (task-9 host side). */
       selection: 'api/dsh-computers/selection',
       /* Access rules (task-11 host side): which computers a session may use,
@@ -172,11 +176,12 @@ window.__ModuleLoader__.load({
       'account.modesLabel': '接入方式',
       'account.mode.account': '登录账号',
       'account.mode.address': '接入地址',
-      'account.login.hint': '用同一个账号登录的电脑会自动出现在彼此的列表里，不需要逐台配对。',
-      'account.login.accountId': '账号 ID',
-      'account.login.accountIdPlaceholder': 'acct_…',
-      'account.login.secret': '密码',
-      'account.login.secretPlaceholder': 'dshf_…',
+      'account.login.hint': '用同一个账号密钥登录的电脑会自动出现在彼此的列表里，不需要逐台配对。',
+      /* v1.9.1: ONE pasted account key (`dshk_<16hex>_<32hex>`) instead of the
+       * old 账号 ID + 密码 pair. The client only checks the shape as a hint. */
+      'account.login.key': '账号密钥',
+      'account.login.keyPlaceholder': 'dshk_…',
+      'account.login.keyShape': '这看起来不像账号密钥（一般以 dshk_ 开头），仍会提交给服务器。',
       'account.login.relay': '中继地址',
       'account.login.relayPlaceholder': 'wss://relay.example.com',
       'account.login.relayHint': '账号中心所在的中继地址',
@@ -195,8 +200,15 @@ window.__ModuleLoader__.load({
       'account.devices.thisMachine': '本机',
       'account.devices.unknown': '未知设备',
       'account.platform.unknown': '未知系统',
+      /* 被控 (controllable): whether other machines in the account may run
+       * commands on this one. Only THIS machine can flip it. */
+      'account.devices.controllable': '被控',
+      'account.devices.allowed': '允许被控',
+      'account.devices.blocked': '不允许被控',
+      'account.devices.controllableAria': '允许账号里的其他电脑控制「{name}」',
+      'account.devices.controllableFailed': '切换被控状态失败：{message}',
       'account.center.title': '账号中心',
-      'account.center.hint': '在这台机器上创建账号中心，其他电脑用账号 ID 和密码登录，就能互相看到并连过来。',
+      'account.center.hint': '在这台机器上创建账号中心，其他电脑用账号密钥登录，就能互相看到并连过来。',
       'account.center.create': '创建账号中心',
       'account.center.creating': '创建中…',
       'account.center.adminKey': '管理员密钥（可选）',
@@ -207,11 +219,14 @@ window.__ModuleLoader__.load({
       'account.center.cancel': '取消',
       'account.center.failed': '创建账号中心失败：{message}',
       'account.center.created': '账号中心已创建',
-      'account.center.createdHint': '其他电脑在 设置 → 电脑 → 接入 → 登录账号 里填这个账号 ID 和密码。',
-      'account.center.warning': '密码只显示这一次，也是其他电脑登录这个账号的唯一方式，请立刻保存。',
-      'account.center.accountId': '账号 ID',
-      'account.center.password': '密码',
+      'account.center.createdHint': '其他电脑在 设置 → 电脑 → 接入 → 登录账号 里粘贴这串账号密钥。',
       'account.center.loggedIn': '这台机器已登录账号',
+      /* The account key is retrievable at any time (v1.9.1): the card always
+       * shows it with a copy button — that is how another machine is added. */
+      'account.key.label': '账号密钥',
+      'account.key.warning': '任何拿到这串密钥的人都能加入这个账号，请妥善保管。',
+      'account.key.highlight': '这是你的账号密钥，随时可以回来复制',
+      'account.key.unsupported': '这台机器还不支持查看密钥，请升级插件',
       'runtime.hint': '加入密钥来自服务器「连接电脑」弹窗，只能用一次，15 分钟内有效。',
       'runtime.serverLabel': '服务器地址',
       'runtime.serverPlaceholder': 'https://dsh.example.com',
@@ -319,6 +334,10 @@ window.__ModuleLoader__.load({
       'relay.saveFailed': '保存中继地址失败：{message}',
       'target.offline': '离线',
       'target.failed': '切换失败：{message}',
+      /* Account devices in the picker: a second group after the local ones. */
+      'target.accountGroup': '账号里的电脑',
+      'target.notControllable': '不允许被控',
+      'target.deviceGone': '选中的电脑已不在账号里，已切回本地电脑',
     };
 
     const en = {
@@ -414,11 +433,12 @@ window.__ModuleLoader__.load({
       'account.modesLabel': 'Join method',
       'account.mode.account': 'Sign in',
       'account.mode.address': 'Join address',
-      'account.login.hint': 'Computers signed into the same account show up in each other’s list automatically — no per-machine pairing.',
-      'account.login.accountId': 'Account ID',
-      'account.login.accountIdPlaceholder': 'acct_…',
-      'account.login.secret': 'Password',
-      'account.login.secretPlaceholder': 'dshf_…',
+      'account.login.hint': 'Computers signed in with the same account key show up in each other’s list automatically — no per-machine pairing.',
+      /* v1.9.1: ONE pasted account key (`dshk_<16hex>_<32hex>`) instead of the
+       * old 账号 ID + 密码 pair. The client only checks the shape as a hint. */
+      'account.login.key': 'Account key',
+      'account.login.keyPlaceholder': 'dshk_…',
+      'account.login.keyShape': 'That does not look like an account key (it usually starts with dshk_) — it will still be sent to the server.',
       'account.login.relay': 'Relay address',
       'account.login.relayPlaceholder': 'wss://relay.example.com',
       'account.login.relayHint': 'Relay address of the account center',
@@ -437,8 +457,13 @@ window.__ModuleLoader__.load({
       'account.devices.thisMachine': 'This machine',
       'account.devices.unknown': 'Unknown device',
       'account.platform.unknown': 'Unknown system',
+      'account.devices.controllable': 'Controllable',
+      'account.devices.allowed': 'Controllable',
+      'account.devices.blocked': 'Not controllable',
+      'account.devices.controllableAria': 'Let other computers in this account control “{name}”',
+      'account.devices.controllableFailed': 'Could not change controllability: {message}',
       'account.center.title': 'Account center',
-      'account.center.hint': 'Create the account center on this machine; other computers sign in with the account ID and password and can then see and reach each other.',
+      'account.center.hint': 'Create the account center on this machine; other computers sign in with the account key and can then see and reach each other.',
       'account.center.create': 'Create account center',
       'account.center.creating': 'Creating…',
       'account.center.adminKey': 'Admin key (optional)',
@@ -449,11 +474,14 @@ window.__ModuleLoader__.load({
       'account.center.cancel': 'Cancel',
       'account.center.failed': 'Could not create the account center: {message}',
       'account.center.created': 'Account center created',
-      'account.center.createdHint': 'On another computer, open Settings → Computers → Join → Sign in and enter this account ID and password.',
-      'account.center.warning': 'This password is shown only once and is the only way to sign other computers into this account — save it now.',
-      'account.center.accountId': 'Account ID',
-      'account.center.password': 'Password',
+      'account.center.createdHint': 'On another computer, open Settings → Computers → Join → Sign in and paste this account key.',
       'account.center.loggedIn': 'This machine is signed in as',
+      /* The account key is retrievable at any time (v1.9.1): the card always
+       * shows it with a copy button — that is how another machine is added. */
+      'account.key.label': 'Account key',
+      'account.key.warning': 'Anyone with this key can join this account — keep it safe.',
+      'account.key.highlight': 'This is your account key — come back here to copy it any time',
+      'account.key.unsupported': 'This machine cannot show the key yet — please update the plugin',
       'runtime.hint': 'The join key comes from the server’s “Connect computer” dialog; single use, valid for 15 minutes.',
       'runtime.serverLabel': 'Server URL',
       'runtime.serverPlaceholder': 'https://dsh.example.com',
@@ -559,6 +587,9 @@ window.__ModuleLoader__.load({
       'relay.saveFailed': 'Could not save the relay address: {message}',
       'target.offline': 'Offline',
       'target.failed': 'Could not switch: {message}',
+      'target.accountGroup': 'Computers in this account',
+      'target.notControllable': 'Not controllable',
+      'target.deviceGone': 'The selected computer left the account; switched back to the local computer',
     };
 
     /* Active translate seat, wired by apply() to the locale service. The
@@ -1248,8 +1279,12 @@ window.__ModuleLoader__.load({
 .dshc-accountModes { margin-bottom: 11px; }
 .dshc-accountHint { margin: 9px 0 0; }
 .dshc-accountForm .dshc-field { flex: 1 1 150px; }
+.dshc-accountForm .dshc-accountKeyField { flex: 1 1 220px; }
 .dshc-accountForm .dshc-accountRelayField { flex: 1 1 220px; }
 .dshc-accountRelayHint { margin: 7px 0 0; }
+/* v1.9.1: the account key is the only credential field; the shape hint is
+ * advisory (the host still receives whatever was pasted). */
+.dshc-accountKeyShapeHint { margin: 7px 0 0; color: var(--dsw-alias-state-warn-primary); }
 .dshc-accountLine {
   display: flex;
   flex-wrap: wrap;
@@ -1257,6 +1292,7 @@ window.__ModuleLoader__.load({
   gap: 10px;
   min-width: 0;
 }
+.dshc-accountLine--spaced { margin-top: 10px; }
 .dshc-accountText {
   display: inline-flex;
   align-items: baseline;
@@ -1277,6 +1313,17 @@ window.__ModuleLoader__.load({
   font-size: 12px;
   line-height: 18px;
 }
+/* The account id under the key: small, secondary, never the headline. */
+.dshc-accountSecondary {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  line-height: 16px;
+}
+.dshc-accountSecondary .dshc-accountId { color: var(--dsw-alias-label-secondary); }
 .dshc-accountLogout { margin-left: auto; }
 .dshc-deviceList {
   display: flex;
@@ -1298,7 +1345,30 @@ window.__ModuleLoader__.load({
   min-width: 0;
   padding: 7px 2px;
 }
-.dshc-deviceRow + .dshc-deviceRow { border-top: 1px solid var(--dsw-alias-border-l1); }
+/* One wrapper per device: the row plus its inline 被控 error line. */
+.dshc-deviceRowWrap { display: flex; flex-direction: column; min-width: 0; }
+.dshc-deviceRowWrap + .dshc-deviceRowWrap { border-top: 1px solid var(--dsw-alias-border-l1); }
+.dshc-deviceControl {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+}
+.dshc-deviceControllable {
+  flex: none;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11.5px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+.dshc-deviceControllable[data-on="false"] { color: var(--dsw-alias-state-warn-primary); }
+.dshc-deviceError {
+  margin: 0 0 7px 14px;
+  color: var(--dsw-alias-state-error-primary);
+  font-size: 11.5px;
+  line-height: 16px;
+  overflow-wrap: anywhere;
+}
 .dshc-deviceDot {
   flex: none;
   width: 6px;
@@ -1368,16 +1438,30 @@ window.__ModuleLoader__.load({
   font-weight: 500;
 }
 .dshc-accountCredentials .dshc-copyStack { margin-top: 9px; }
+/* v1.9.1: the key is always available, so the "shown once" box is gone. This
+ * is the one-line warning that the key is a credential. */
 .dshc-accountWarning {
-  margin: 11px 0 0;
+  margin: 9px 0 0;
+  color: var(--dsw-alias-state-warn-primary);
+  font-size: 11.5px;
+  line-height: 17px;
+  overflow-wrap: anywhere;
+}
+/* Create success only: the key row is highlighted once with the "come back to
+ * copy it any time" line. */
+.dshc-accountKeyHighlight {
+  margin: 9px 0 0;
   padding: 9px 11px;
   border: 1px solid var(--dsw-alias-border-l1);
   border-radius: 10px;
   background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-1));
-  color: var(--dsw-alias-state-warn-primary);
+  color: var(--dsw-alias-brand-primary);
   font-size: 12px;
   line-height: 18px;
+  font-weight: 500;
 }
+/* A host too old to return the key: the same row shape, muted text, no field. */
+.dshc-accountKeyMissingHint { padding-left: 0; }
 .dshc-accountCreatedHint { margin: 9px 0 0; }
 .dshc-accountCenter { margin-top: 12px; }
 
@@ -1472,6 +1556,17 @@ window.__ModuleLoader__.load({
   cursor: pointer;
 }
 .dshc-menuItem:disabled { cursor: not-allowed; opacity: 0.45; }
+/* Account-device rows stay focusable (aria-disabled) so the row's reason can
+ * be read; a click is ignored by the handler. */
+.dshc-menuItem[aria-disabled="true"] { cursor: not-allowed; }
+.dshc-menuItem[aria-disabled="true"] .dshc-menuName { color: var(--dsw-alias-label-secondary); }
+.dshc-menuGroup {
+  padding: 6px 7px 2px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 11px;
+  line-height: 15px;
+  font-weight: 500;
+}
 @media (hover: hover) {
   .dshc-menuItem:hover:not(:disabled) {
     background: var(--dsw-alias-interactive-bg-hover, var(--dsw-alias-bg-layer-2));
@@ -2290,6 +2385,9 @@ window.__ModuleLoader__.load({
   .dshc-groupHead { flex-wrap: wrap; }
   .dshc-accountLine { align-items: flex-start; }
   .dshc-accountLogout { margin-left: 0; }
+  /* 420px: the 被控 label + switch must not push 在线/离线 off the row. */
+  .dshc-devicePlatform { display: none; }
+  .dshc-deviceControl { gap: 5px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .dshc-detailsSummary::after { transition: none; }
@@ -2439,6 +2537,13 @@ window.__ModuleLoader__.load({
       }),
       logoutAccount: (signal) => requestJson(API.accountLogout, { method: 'POST', body: {}, signal }),
       discoverAccount: (signal) => requestJson(API.accountDiscover, { signal }),
+      /* `{ enabled }` toggles this machine's own 被控 flag; the host answers
+       * with the account status (same shape as GET /account). */
+      setControllable: (enabled, signal) => requestJson(API.accountControllable, {
+        method: 'POST',
+        body: { enabled: enabled === true },
+        signal,
+      }),
       readSelection: (sessionId, signal) => requestJson(
         `${API.selection}?sessionId=${encodeURIComponent(sessionId)}`,
         { signal },
@@ -3618,6 +3723,20 @@ window.__ModuleLoader__.load({
       return fragment.startsWith('join=') && fragment.slice('join='.length).trim() !== '';
     }
 
+    /**
+     * The account id carried inside a composite account key
+     * (`dshk_<accountIdHex16>_<secretHex32>`): the key is self-describing, so
+     * the UI can still name the account when an older host answers a login
+     * without `accountId`. Returns '' for any other shape.
+     * @param {string} value - the pasted account key.
+     * @returns {string} `acct_<16hex>` or ''.
+     */
+    function accountIdFromKey(value) {
+      if (typeof value !== 'string') return '';
+      const match = /^dshk_([0-9a-f]{16})_/i.exec(value.trim());
+      return match === null ? '' : `acct_${match[1].toLowerCase()}`;
+    }
+
     /** Human label for a device platform id (the relay stores os ids). */
     function platformLabelOf(platform) {
       const value = typeof platform === 'string' ? platform.trim() : '';
@@ -3630,19 +3749,69 @@ window.__ModuleLoader__.load({
     }
 
     /**
-     * One read-only device row in the account's device list.
-     * @param {object} props - `device` (`account.devices[]`), `thisMachineId`.
+     * Whether a device in the account directory is 被控 (other machines may
+     * execute on it). The host may not send the field yet: absent means
+     * allowed, the documented default.
+     * @param {object|null} device - one `account.devices[]` entry.
+     * @returns {boolean} the effective flag.
+     */
+    function deviceControllable(device) {
+      return device !== null && typeof device === 'object' && typeof device.controllable === 'boolean'
+        ? device.controllable
+        : true;
+    }
+
+    /** Stable id of a directory device (`''` when the host sent none). */
+    function deviceMachineId(device) {
+      return device !== null && typeof device === 'object' && typeof device.machineId === 'string'
+        ? device.machineId
+        : '';
+    }
+
+    /** Display name of a directory device (never empty). */
+    function deviceName(device) {
+      const name = device !== null && typeof device === 'object' && typeof device.name === 'string'
+        ? device.name
+        : '';
+      return name !== '' ? name : t('account.devices.unknown');
+    }
+
+    /**
+     * One device row in the account's device list.
+     *
+     * THIS machine's row carries the real 被控 switch (it is the only machine
+     * allowed to flip its own flag); every other row shows the read-only
+     * 允许被控 / 不允许被控 state. `controllable` is the effective value — the
+     * card passes the optimistic one while a toggle is in flight.
+     * @param {object} props - `device`, `thisMachineId`, `controllable`,
+     *   `pending`, `error`, `onToggle`.
      * @returns {object} row element.
      */
     function DeviceRow(props) {
       const device = props.device !== null && typeof props.device === 'object' ? props.device : {};
-      const machineId = typeof device.machineId === 'string' ? device.machineId : '';
-      const name = typeof device.name === 'string' && device.name !== ''
-        ? device.name
-        : t('account.devices.unknown');
+      const machineId = deviceMachineId(device);
+      const name = deviceName(device);
       const online = device.online === true;
       const isThisMachine = props.thisMachineId !== '' && machineId === props.thisMachineId;
-      return h('div', { className: 'dshc-deviceRow', 'data-online': online ? 'true' : 'false' },
+      const controllable = props.controllable === undefined ? deviceControllable(device) : props.controllable === true;
+      const label = t(controllable ? 'account.devices.allowed' : 'account.devices.blocked');
+      const control = isThisMachine
+        ? h(SwitchControl, {
+          checked: controllable,
+          disabled: props.pending === true,
+          label: t('account.devices.controllableAria', { name }),
+          onChange: () => {
+            if (typeof props.onToggle === 'function') props.onToggle(!controllable);
+          },
+        })
+        : null;
+      return h('div', { className: 'dshc-deviceRowWrap' },
+        h('div', {
+          className: 'dshc-deviceRow',
+          'data-online': online ? 'true' : 'false',
+          'data-controllable': controllable ? 'true' : 'false',
+          'data-self': isThisMachine ? 'true' : 'false',
+        },
         h('span', {
           className: 'dshc-deviceDot',
           'data-online': online ? 'true' : 'false',
@@ -3651,19 +3820,29 @@ window.__ModuleLoader__.load({
         h('span', { className: 'dshc-deviceName', title: name }, name),
         h('span', { className: 'dshc-devicePlatform' }, platformLabelOf(device.platform)),
         h('span', { className: 'dshc-deviceState' }, online ? t('online') : t('offline')),
+        h('span', { className: 'dshc-deviceControl' },
+          h('span', {
+            className: 'dshc-deviceControllable',
+            'data-on': controllable ? 'true' : 'false',
+          }, label),
+          control),
         isThisMachine
           ? h('span', { className: 'dshc-deviceThis' }, t('account.devices.thisMachine'))
+          : null),
+        props.error
+          ? h('p', { className: 'dshc-deviceError', role: 'alert' }, props.error)
           : null);
     }
 
     /**
      * 「接入」 card (PROTOCOL §10.6 + account): two ways in.
      *
-     * 「登录账号」 (primary): sign into the relay's account center with an
-     * account ID + password. Every machine signed into the same account sees
-     * the others in the account's device directory, so there is no per-machine
-     * pairing. 「接入地址」 keeps the v1.7.0 one-address flow unchanged (the
-     * demoted 服务器地址 + 加入密钥 form included).
+     * 「登录账号」 (primary): sign into the relay's account center by pasting
+     * ONE account key (`dshk_…`) and keeping the relay address. Every machine
+     * signed into the same account sees the others in the account's device
+     * directory, so there is no per-machine pairing. 「接入地址」 keeps the
+     * v1.7.0 one-address flow unchanged (the demoted 服务器地址 + 加入密钥 form
+     * included).
      *
      * Logged in: one line — 已登录 <accountId> + the device count + 退出登录 —
      * followed by the account's device list (read-only in this version).
@@ -3695,13 +3874,19 @@ window.__ModuleLoader__.load({
       const [serverUrl, setServerUrl] = React.useState('');
       const [key, setKey] = React.useState('');
       const [keyMode, setKeyMode] = React.useState(false);
-      const [accountId, setAccountId] = React.useState('');
-      const [secret, setSecret] = React.useState('');
+      /* v1.9.1: ONE pasted account key (`dshk_…`) replaces the old 账号 ID +
+       * 密码 pair. The host owns the format; the client only hints at it. */
+      const [accountKey, setAccountKey] = React.useState('');
       const [relayUrl, setRelayUrl] = React.useState('');
       const relayTouched = React.useRef(false);
       const [busy, setBusy] = React.useState(false);
       const [failure, setFailure] = React.useState(null);
       const [confirming, setConfirming] = React.useState(false);
+      /* 被控 toggle of THIS machine: `value` is the optimistic override while
+       * the POST is in flight (null = trust the host's device row), `busy`
+       * disables the switch, `error` is the inline revert message. */
+      const [control, setControl] = React.useState({ value: null, busy: false, error: null });
+      const controlBusy = React.useRef(false);
       const alive = React.useRef(true);
       const scope = React.useRef(null);
       if (scope.current === null) scope.current = createScope();
@@ -3724,23 +3909,28 @@ window.__ModuleLoader__.load({
       /* The account tab leads; an already-joined machine keeps showing its
        * 接入地址 line first, so upgrading never hides the working state. */
       const effectiveTab = tab !== null ? tab : (loggedIn || !configured ? 'account' : 'address');
-      const canSubmitLogin = accountId.trim() !== '' && secret.trim() !== '' && relayUrl.trim() !== '';
+      /* The account key is the only credential: paste it, keep the relay, sign
+       * in. A value that does not start with `dshk_` is only a hint — the host
+       * is the one that decides (it still may accept another shape). */
+      const accountKeyTrimmed = accountKey.trim();
+      const accountKeyLooksValid = accountKeyTrimmed === '' || accountKeyTrimmed.startsWith('dshk_');
+      const canSubmitLogin = accountKeyTrimmed !== '' && relayUrl.trim() !== '';
       const canSubmitAddress = keyMode
         ? (serverUrl.trim() !== '' && key.trim() !== '')
         : address.trim() !== '';
 
       const submitLogin = async () => {
         if (busy || !canSubmitLogin) return;
-        const payload = { relayUrl: relayUrl.trim(), accountId: accountId.trim(), secret: secret.trim() };
+        const payload = { relayUrl: relayUrl.trim(), key: accountKeyTrimmed };
         setBusy(true);
         setFailure(null);
         try {
           const next = await scope.current.run((signal) => api.loginAccount(payload, signal));
           if (!alive.current) return;
-          setSecret('');
+          setAccountKey('');
           const id = next !== null && typeof next === 'object' && typeof next.accountId === 'string'
             ? next.accountId
-            : payload.accountId;
+            : accountIdFromKey(payload.key);
           if (typeof props.onAccount === 'function') {
             props.onAccount(next, t('account.loggedIn.notice', { accountId: id }));
           }
@@ -3807,6 +3997,36 @@ window.__ModuleLoader__.load({
         }
       };
 
+      /* Optimistic 被控 switch: the row flips immediately, the host's account
+       * status reconciles on success, and a failure reverts the row while
+       * keeping an inline error (a host without the route answers 404). */
+      const toggleControllable = async (enabled) => {
+        if (controlBusy.current) return;
+        controlBusy.current = true;
+        setControl({ value: enabled === true, busy: true, error: null });
+        try {
+          const next = await scope.current.run((signal) => api.setControllable(enabled, signal));
+          if (!alive.current) return;
+          const applied = next !== null && typeof next === 'object';
+          if (typeof props.onAccount === 'function' && applied) {
+            props.onAccount(next, null);
+          }
+          /* A host that answers nothing keeps the optimistic value; one that
+           * answers the status hands the truth back to the row. */
+          setControl({ value: applied ? null : enabled === true, busy: false, error: null });
+        } catch (error) {
+          if (!alive.current) return;
+          if (error && error.name === 'AbortError') return;
+          setControl({
+            value: null,
+            busy: false,
+            error: t('account.devices.controllableFailed', { message: messageOf(error) }),
+          });
+        } finally {
+          controlBusy.current = false;
+        }
+      };
+
       const enterSubmits = (submit) => (event) => {
         if (event.key === 'Enter') {
           event.preventDefault();
@@ -3825,6 +4045,12 @@ window.__ModuleLoader__.load({
         relayTouched.current = true;
         setRelayUrl(value);
       };
+
+      /* 被控: only THIS machine's row gets the live switch; the others are
+       * read-only. `control.value` is the optimistic override in flight. */
+      const thisDevice = devices.find((device) => thisMachineId !== ''
+        && deviceMachineId(device) === thisMachineId) || null;
+      const thisControllable = control.value !== null ? control.value : deviceControllable(thisDevice);
 
       let body;
       if (loggedIn) {
@@ -3847,42 +4073,37 @@ window.__ModuleLoader__.load({
           devices.length > 0
             ? h('div', { className: 'dshc-deviceList' },
               h('div', { className: 'dshc-deviceListHead' }, t('account.devices.title')),
-              devices.map((device, index) => h(DeviceRow, {
-                key: (device && typeof device.machineId === 'string' && device.machineId !== '')
-                  ? device.machineId
-                  : `device-${index}`,
-                device,
-                thisMachineId,
-              })))
+              devices.map((device, index) => {
+                const machineId = deviceMachineId(device);
+                const isThisMachine = thisMachineId !== '' && machineId === thisMachineId;
+                return h(DeviceRow, {
+                  key: machineId !== '' ? machineId : `device-${index}`,
+                  device,
+                  thisMachineId,
+                  controllable: isThisMachine ? thisControllable : deviceControllable(device),
+                  pending: isThisMachine && control.busy,
+                  error: isThisMachine ? control.error : null,
+                  onToggle: isThisMachine ? (enabled) => { void toggleControllable(enabled); } : undefined,
+                });
+              }))
             : h('p', { className: 'dshc-hint dshc-accountEmpty' }, t('account.devices.empty')));
       } else if (effectiveTab === 'account') {
         body = h('div', null,
           h('p', { className: 'dshc-hint dshc-accountHint' }, t('account.login.hint')),
           h('div', { className: 'dshc-formRow dshc-joinForm dshc-accountForm' },
-            h('label', { className: 'dshc-field' },
-              h('span', { className: 'dshc-fieldLabel' }, t('account.login.accountId')),
+            /* v1.9.1: ONE field — the pasted account key. The account id and
+             * the secret live inside it (`dshk_<id>_<secret>`). */
+            h('label', { className: 'dshc-field dshc-accountKeyField' },
+              h('span', { className: 'dshc-fieldLabel' }, t('account.login.key')),
               h('input', {
-                className: 'dshc-input dshc-accountIdInput',
+                className: 'dshc-input dshc-accountKeyInput',
                 type: 'text',
                 autoComplete: 'off',
                 spellCheck: false,
-                value: accountId,
-                placeholder: t('account.login.accountIdPlaceholder'),
+                value: accountKey,
+                placeholder: t('account.login.keyPlaceholder'),
                 disabled: busy,
-                onChange: (event) => setAccountId(event.target.value),
-                onKeyDown: enterSubmits(submitLogin),
-              })),
-            h('label', { className: 'dshc-field' },
-              h('span', { className: 'dshc-fieldLabel' }, t('account.login.secret')),
-              h('input', {
-                className: 'dshc-input dshc-accountSecretInput',
-                type: 'password',
-                autoComplete: 'off',
-                spellCheck: false,
-                value: secret,
-                placeholder: t('account.login.secretPlaceholder'),
-                disabled: busy,
-                onChange: (event) => setSecret(event.target.value),
+                onChange: (event) => setAccountKey(event.target.value),
                 onKeyDown: enterSubmits(submitLogin),
               })),
             h('label', { className: 'dshc-field dshc-accountRelayField' },
@@ -3905,7 +4126,14 @@ window.__ModuleLoader__.load({
               disabled: busy || !canSubmitLogin,
               onClick: () => { void submitLogin(); },
             }, busy ? t('account.login.submitting') : t('account.login.submit'))),
-          h('p', { className: 'dshc-hint dshc-accountRelayHint' }, t('account.login.relayHint')));
+          h('p', { className: 'dshc-hint dshc-accountRelayHint' }, t('account.login.relayHint')),
+          /* Shape hint only: the host still receives whatever was pasted. */
+          accountKeyLooksValid
+            ? null
+            : h('p', {
+              className: 'dshc-hint dshc-accountKeyShapeHint',
+              role: 'status',
+            }, t('account.login.keyShape')));
       } else {
         let addressBody;
         if (status === null && (view.phase === 'loading' || view.phase === 'idle')) {
@@ -4101,11 +4329,15 @@ window.__ModuleLoader__.load({
      * Signed out it is one quiet line + 创建账号中心; the form (relay address
      * pre-filled from the local discovery, optional admin key and name) only
      * appears on request, so 高级 stays quiet by default. On success the host
-     * answers with the account ID and the password — the password is the only
-     * way to sign other machines in and is shown exactly once, so it gets copy
-     * buttons and a warning. Signed in it shows the account and 退出登录.
+     * answers with the composite account key (`dshk_…`) — and that key is
+     * retrievable AT ANY TIME (v1.9.1): `GET /account` returns it, so a fresh
+     * mount renders the same copyable row. That is how another machine is added
+     * later, so the key is never "shown once": it gets a copy button, the
+     * account id as small secondary text and one line saying anyone holding the
+     * key can join. A host too old to return `key` gets a muted upgrade hint
+     * instead of an empty field.
      * @param {object} props - `account` (`{phase, data}`), `discover`,
-     *   `created` (`{accountId, secret}` or null), `onNeedAccount`,
+     *   `created` (`{accountId, key}` or null), `onNeedAccount`,
      *   `onNeedDiscover`, `onCreated(created, status)`, `onAccount(status, message)`.
      * @returns {object} card element.
      */
@@ -4157,10 +4389,10 @@ window.__ModuleLoader__.load({
           const accountId = next !== null && typeof next === 'object' && typeof next.accountId === 'string'
             ? next.accountId
             : '';
-          const secret = next !== null && typeof next === 'object' && typeof next.secret === 'string'
-            ? next.secret
+          const key = next !== null && typeof next === 'object' && typeof next.key === 'string'
+            ? next.key
             : '';
-          if (typeof props.onCreated === 'function') props.onCreated({ accountId, secret }, next);
+          if (typeof props.onCreated === 'function') props.onCreated({ accountId, key }, next);
           setForm(false);
           setAdminKey('');
           setName('');
@@ -4190,36 +4422,55 @@ window.__ModuleLoader__.load({
         }
       };
 
+      /* The key shown by the card: this page session's create response first
+       * (it is the freshest), else `GET /account` — which is what makes the key
+       * copyable at any time, including after a reload. */
+      const createdKey = created !== null && typeof created.key === 'string' ? created.key : '';
+      const liveKey = account !== null && typeof account.key === 'string' ? account.key : '';
+      const keyValue = createdKey !== '' ? createdKey : liveKey;
+      const accountIdText = created !== null && typeof created.accountId === 'string' && created.accountId !== ''
+        ? created.accountId
+        : (account !== null && typeof account.accountId === 'string' ? account.accountId : '');
+      /* No key at all means the host predates v1.9.1: say so instead of
+       * rendering an empty copyable field. */
+      const keyBlock = keyValue !== ''
+        ? h(CopyRow, { label: t('account.key.label'), value: keyValue, stacked: true })
+        : h('div', { className: 'dshc-copyRow dshc-accountKeyMissing' },
+          h('div', { className: 'dshc-copyRowTop' },
+            h('span', { className: 'dshc-copyRowKey' }, t('account.key.label'))),
+          h('p', { className: 'dshc-copyRowHint dshc-accountKeyMissingHint' }, t('account.key.unsupported')));
+      const accountLine = h('p', { className: 'dshc-accountSecondary' },
+        h('span', null, `${t('account.center.loggedIn')} `),
+        h('code', {
+          className: 'dshc-accountId',
+          title: accountIdText,
+        }, accountIdText !== '' ? accountIdText : '—'));
+
+      /* The key is a credential: the warning belongs to it, so it is only
+       * rendered next to a real key (an old host gets the upgrade hint only). */
+      const keyWarning = keyValue !== ''
+        ? h('p', { className: 'dshc-accountWarning' }, t('account.key.warning'))
+        : null;
+
       let body;
       if (created !== null) {
-        const accountId = typeof created.accountId === 'string' ? created.accountId : '';
-        const secret = typeof created.secret === 'string' ? created.secret : '';
+        /* Create success: the same always-available key row, highlighted once
+         * with the "come back any time" line (v1.9.1 — no more "shown once"). */
         body = h('div', { className: 'dshc-accountCredentials' },
           h('p', { className: 'dshc-accountCreated' }, t('account.center.created')),
-          h('div', { className: 'dshc-copyStack' },
-            h(CopyRow, {
-              key: 'accountId',
-              label: t('account.center.accountId'),
-              value: accountId,
-              stacked: true,
-            }),
-            h(CopyRow, {
-              key: 'secret',
-              label: t('account.center.password'),
-              value: secret,
-              stacked: true,
-            })),
-          h('p', { className: 'dshc-accountWarning', role: 'alert' }, t('account.center.warning')),
+          h('div', { className: 'dshc-copyStack' }, keyBlock),
+          keyValue !== ''
+            ? h('p', { className: 'dshc-accountKeyHighlight', role: 'status' }, t('account.key.highlight'))
+            : null,
+          keyWarning,
+          h('div', { className: 'dshc-accountLine dshc-accountLine--spaced' }, accountLine),
           h('p', { className: 'dshc-hint dshc-accountCreatedHint' }, t('account.center.createdHint')));
       } else if (loggedIn) {
         body = h('div', null,
-          h('div', { className: 'dshc-accountLine' },
-            h('span', { className: 'dshc-accountText' },
-              h('span', null, t('account.center.loggedIn')),
-              h('code', {
-                className: 'dshc-accountId',
-                title: typeof account.accountId === 'string' ? account.accountId : '',
-              }, typeof account.accountId === 'string' && account.accountId !== '' ? account.accountId : '—')),
+          h('div', { className: 'dshc-copyStack' }, keyBlock),
+          keyWarning,
+          h('div', { className: 'dshc-accountLine dshc-accountLine--spaced' },
+            accountLine,
             h('button', {
               type: 'button',
               className: 'dshc-textBtn dshc-accountCenterLogout',
@@ -5573,6 +5824,10 @@ window.__ModuleLoader__.load({
       useLocaleRevision();
       const sessionId = props && typeof props.sessionId === 'string' ? props.sessionId : '';
       const [view, setView] = React.useState({ phase: 'loading', role: null, computers: [] });
+      /* Account directory: the other machines signed into the same account are
+       * selectable targets (`acct:<machineId>`). `known` stays false until the
+       * host answers, so an older host simply offers the local computers. */
+      const [account, setAccount] = React.useState({ known: false, loggedIn: false, machineId: '', devices: [] });
       const [selection, setSelection] = React.useState({ computerId: null, computer: null });
       const [open, setOpen] = React.useState(false);
       const [anchor, setAnchor] = React.useState(null);
@@ -5588,6 +5843,8 @@ window.__ModuleLoader__.load({
       const initialFocus = React.useRef(0);
       const failureTimer = React.useRef(null);
       const noticeTimer = React.useRef(null);
+      const accountRequested = React.useRef(false);
+      const goneCleared = React.useRef(null);
       if (scope.current === null) scope.current = createScope();
 
       const applySelection = React.useCallback((result) => {
@@ -5614,6 +5871,32 @@ window.__ModuleLoader__.load({
         }
       }, [sessionId]);
 
+      /* Account status → the picker's second group. A payload without the
+       * account (older host, logged out) is still authoritative: `known`
+       * lets the chip fall back to 本地电脑 when a target vanishes. */
+      const applyAccount = React.useCallback((payload) => {
+        if (payload === null || typeof payload !== 'object') return;
+        setAccount({
+          known: true,
+          loggedIn: payload.loggedIn === true,
+          machineId: typeof payload.machineId === 'string' ? payload.machineId : '',
+          devices: Array.isArray(payload.devices)
+            ? payload.devices.filter((device) => device !== null && typeof device === 'object')
+            : [],
+        });
+      }, []);
+
+      const loadAccount = React.useCallback(async () => {
+        if (sessionId === '') return;
+        try {
+          const payload = await scope.current.run((signal) => api.readAccount(signal));
+          if (!alive.current) return;
+          applyAccount(payload);
+        } catch (error) {
+          /* A host without the account route keeps `known: false`. */
+        }
+      }, [applyAccount, sessionId]);
+
       /* One /state + /selection round per tick; a state failure hides the chip
        * (there is no honest target to display). */
       const load = React.useCallback(async () => {
@@ -5637,6 +5920,14 @@ window.__ModuleLoader__.load({
           role,
           computers: state && Array.isArray(state.computers) ? state.computers : [],
         });
+        /* /state may already carry the account; otherwise ask once. */
+        if (state && state.account !== null && typeof state.account === 'object') {
+          accountRequested.current = true;
+          applyAccount(state.account);
+        } else if (!accountRequested.current) {
+          accountRequested.current = true;
+          void loadAccount();
+        }
         try {
           const current = await scope.current.run((signal) => api.readSelection(sessionId, signal));
           if (!alive.current || pending.current) return;
@@ -5644,7 +5935,7 @@ window.__ModuleLoader__.load({
         } catch (error) {
           /* A selection read failure keeps the last known target on screen. */
         }
-      }, [applySelection, sessionId]);
+      }, [applyAccount, applySelection, loadAccount, sessionId]);
 
       React.useEffect(() => {
         alive.current = true;
@@ -5676,11 +5967,58 @@ window.__ModuleLoader__.load({
       const computers = view.computers;
       const selectedId = selection.computerId;
       const selectedComputer = selection.computer;
-      const currentLabel = selectedId === null || selectedId === ''
-        ? t('target.cloud')
-        : (selectedComputer && typeof selectedComputer.name === 'string' && selectedComputer.name !== ''
-          ? selectedComputer.name
-          : t('target.cloud'));
+      /* `acct:<machineId>` names a directory device; anything else names a
+       * locally connected computer. A target that no longer resolves falls
+       * back to 本地电脑 — the effect below also clears the stored selection. */
+      const selectedMachineId = typeof selectedId === 'string' && selectedId.slice(0, 5) === 'acct:'
+        ? selectedId.slice(5)
+        : '';
+      const selectedDevice = selectedMachineId === ''
+        ? null
+        : (account.devices.find((device) => deviceMachineId(device) === selectedMachineId) || null);
+      const currentLabel = (() => {
+        if (selectedId === null || selectedId === '') return t('target.cloud');
+        if (selectedMachineId !== '') {
+          return selectedDevice !== null ? deviceName(selectedDevice) : t('target.cloud');
+        }
+        if (selectedComputer && typeof selectedComputer.name === 'string' && selectedComputer.name !== '') {
+          return selectedComputer.name;
+        }
+        const local = computers.find((computer) => String(computer.id || '') === String(selectedId));
+        const localName = local !== undefined && typeof local.name === 'string' ? local.name : '';
+        return localName !== '' ? localName : t('target.cloud');
+      })();
+
+      /* The account's other machines: selectable targets pinned as
+       * `acct:<machineId>`. Offline or 不被控 rows are listed but disabled,
+       * with the reason on the row. */
+      const accountRows = account.loggedIn
+        ? account.devices
+          .filter((device) => {
+            const machineId = deviceMachineId(device);
+            if (machineId === '') return false;
+            return account.machineId === '' || machineId !== account.machineId;
+          })
+          .map((device) => {
+            const machineId = deviceMachineId(device);
+            const online = device.online === true;
+            const controllable = deviceControllable(device);
+            const reasons = [];
+            if (!online) reasons.push(t('target.offline'));
+            if (!controllable) reasons.push(t('target.notControllable'));
+            return {
+              key: `acct-${machineId}`,
+              id: `acct:${machineId}`,
+              label: deviceName(device),
+              hint: platformLabelOf(device.platform),
+              computer: null,
+              device,
+              offline: !online,
+              disabled: reasons.length > 0,
+              reason: reasons.join(' · '),
+            };
+          })
+        : [];
 
       const menuRows = [
         {
@@ -5702,7 +6040,21 @@ window.__ModuleLoader__.load({
         hint: typeof computer.platformLabel === 'string' ? computer.platformLabel : '',
         computer,
         offline: computer.online !== true,
-      })));
+      })))
+        .concat(accountRows.length === 0
+          ? []
+          : [{ key: 'account-group', groupHeader: true, label: t('target.accountGroup') }].concat(accountRows));
+
+      /* DOM menuitem index of a row: group headers are not focusable items. */
+      const menuItemIndex = (row) => {
+        let index = 0;
+        for (const entry of menuRows) {
+          if (entry === row) return index;
+          if (entry.groupHeader !== true) index += 1;
+        }
+        return 0;
+      };
+      const menuItemCount = menuRows.filter((row) => row.groupHeader !== true).length;
 
       const menuItems = () => {
         if (menuRef.current === null || typeof menuRef.current.querySelectorAll !== 'function') return [];
@@ -5726,20 +6078,25 @@ window.__ModuleLoader__.load({
 
       const openMenu = (preferLast) => {
         void loadAccess();
+        /* Refresh the account directory so machines that just came online (or
+         * vanished) are reflected before the list is read. */
+        void loadAccount();
         const checked = menuRows.findIndex((row) => (row.id === null ? selectedId === null : row.id === selectedId));
-        initialFocus.current = preferLast ? menuRows.length - 1 : (checked >= 0 ? checked : 0);
+        initialFocus.current = preferLast
+          ? Math.max(0, menuItemCount - 1)
+          : (checked >= 0 ? menuItemIndex(menuRows[checked]) : 0);
         setFailure(null);
         setOpen(true);
       };
 
-      const showNotice = (text) => {
+      const showNotice = React.useCallback((text) => {
         setNotice(text);
         if (noticeTimer.current !== null) clearTimeout(noticeTimer.current);
         noticeTimer.current = setTimeout(() => {
           noticeTimer.current = null;
           if (alive.current) setNotice(null);
         }, 5000);
-      };
+      }, []);
 
       const closeMenu = (restoreFocus) => {
         setOpen(false);
@@ -5750,6 +6107,29 @@ window.__ModuleLoader__.load({
           /* ignore */
         }
       };
+
+      /* A selected account device that leaves the directory (or the account is
+       * signed out) must not strand the session: fall back to 本地电脑, say so
+       * once, and clear the stored target on the host. */
+      React.useEffect(() => {
+        const id = selection.computerId;
+        if (typeof id !== 'string' || id.slice(0, 5) !== 'acct:') return;
+        if (!account.known) return;
+        const machineId = id.slice(5);
+        if (machineId === '') return;
+        if (account.devices.some((device) => deviceMachineId(device) === machineId)) return;
+        setSelection({ computerId: null, computer: null });
+        if (goneCleared.current === id) return;
+        goneCleared.current = id;
+        showNotice(t('target.deviceGone'));
+        void (async () => {
+          try {
+            await scope.current.run((signal) => api.selectTarget(sessionId, null, signal));
+          } catch (error) {
+            /* The local fallback already happened; nothing else to do. */
+          }
+        })();
+      }, [account, selection.computerId, sessionId, showNotice]);
 
       /* Anchor above the chip, focus the checked row, and own the outside
        * dismissals while open. */
@@ -5834,6 +6214,7 @@ window.__ModuleLoader__.load({
 
       /* Optimistic switch: the chip moves first, then reverts on failure. */
       const choose = async (row) => {
+        if (row.disabled === true) return;
         if (view.phase !== 'ready' || sessionId === '' || pending.current) return;
         const previous = selection;
         const nextId = row.id;
@@ -5910,23 +6291,38 @@ window.__ModuleLoader__.load({
           onMouseDown: (event) => event.stopPropagation(),
         },
           menuRows.map((row) => {
+            if (row.groupHeader === true) {
+              return h('div', {
+                key: row.key,
+                className: 'dshc-menuGroup',
+                role: 'group',
+                'aria-label': row.label,
+              }, row.label);
+            }
             const checked = row.id === null ? selectedId === null : row.id === selectedId;
+            const disabled = row.disabled === true;
+            const isAccount = typeof row.id === 'string' && row.id.slice(0, 5) === 'acct:';
+            const reason = row.reason ? row.reason : (row.offline ? t('target.offline') : '');
             return h('button', {
               key: row.key,
               type: 'button',
               role: 'menuitemradio',
               'aria-checked': checked ? 'true' : 'false',
+              'aria-disabled': disabled ? 'true' : undefined,
               className: 'dshc-menuItem',
               'data-checked': checked ? 'true' : 'false',
               'data-offline': row.offline ? 'true' : 'false',
+              'data-account': isAccount ? 'true' : undefined,
+              'data-disabled': disabled ? 'true' : undefined,
               tabIndex: -1,
+              title: reason !== '' ? reason : undefined,
               onClick: () => { void choose(row); },
             },
               row.id === null ? h(IconCloud, { size: 14 }) : h(IconMonitor, { size: 14 }),
               h('span', { className: 'dshc-menuName' }, row.label),
               row.hint ? h('span', { className: 'dshc-menuHint' }, row.hint) : null,
               row.id === null ? null : h('span', { className: 'dshc-menuDot', 'data-offline': row.offline ? 'true' : 'false' }),
-              row.offline ? h('span', { className: 'dshc-menuHint' }, t('target.offline')) : null,
+              reason !== '' ? h('span', { className: 'dshc-menuHint dshc-menuReason' }, reason) : null,
               checked ? h(IconCheck, { size: 13, className: 'dshc-menuCheck' }) : null);
           }),
           h('div', { className: 'dshc-menuSep', role: 'separator' }),

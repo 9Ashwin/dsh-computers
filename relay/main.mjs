@@ -17,6 +17,11 @@
  * pairing. It never touches the tunnel: `/r/` and `/ws` behave exactly as
  * before, and a missing/corrupt accounts document cannot affect them.
  *
+ * Device routes accept three credential shapes (v1.9.1): the composite key
+ * `dshk_<accountId16>_<secret32>` in `x-fleet-key` or the body `key` (parsed
+ * into `{accountId, secret}`; the key's account must match the path), a bare
+ * secret in the body, or a bare secret in `x-fleet-secret`.
+ *
  * The relay is deliberately a dumb pipe: it forwards a browser or agent HTTP
  * request (or a WebSocket upgrade) through the hub's wire socket, streams the
  * answer back without buffering, and enforces the limits from design
@@ -52,6 +57,7 @@ import {
   MACHINE_ID_RE,
   constantTimeEqual,
   createAccountStore,
+  parseFleetKey,
 } from '../lib/relay/accounts.js'
 import { MAX_META_BYTES, MAX_PAYLOAD_BYTES } from '../lib/relay/wire.js'
 import {
@@ -861,28 +867,78 @@ export function createRelay(options = {}) {
       sendAccountError(req, res, { status: 400, code: created.code, message: created.message })
       return
     }
-    sendJson(res, 201, { accountId: created.accountId, secret: created.secret, name: created.name })
+    sendJson(res, 201, {
+      accountId: created.accountId,
+      secret: created.secret,
+      // One pasteable credential: `dshk_<accountId16>_<secret32>`. Additive —
+      // `accountId` + `secret` stay for older clients.
+      key: created.key,
+      name: created.name,
+    })
+  }
+
+  /** Shape a store auth failure as a wire failure (status + kebab-case code). */
+  function authFailure(failure) {
+    if (failure.ok) return failure
+    return {
+      ok: false,
+      status: accountFailureStatus(failure.code),
+      code: accountErrorCode(failure.code),
+      message: failure.message,
+    }
   }
 
   /**
-   * Authenticate a device route: the secret may travel in the body (POST) or in
-   * `x-fleet-secret` (GET/DELETE). Both are checked with a constant-time
-   * digest comparison inside the store.
+   * Resolve the composite key presented on a request, if any.
+   *
+   * Body `key` wins over `x-fleet-key` (the body is the more explicit form on
+   * POST). An empty string means "not sent". A non-string body field is
+   * returned as-is so the caller can reject it as malformed rather than
+   * silently falling back to secret auth.
+   * @returns {unknown} the raw key, or null when none was presented.
    */
-  function authenticateAccount(req, accountId, bodySecret) {
+  function presentedFleetKey(req, bodyKey) {
+    if (typeof bodyKey === 'string' && bodyKey !== '') return bodyKey
+    if (bodyKey !== undefined && bodyKey !== null) return bodyKey
+    const headerKey = headerValue(req.headers['x-fleet-key'])
+    return headerKey === null || headerKey === '' ? null : headerKey
+  }
+
+  /**
+   * Authenticate a device route. Three accepted forms, in this order:
+   *
+   * 1. the composite key in the body `key` field (POST) or `x-fleet-key`
+   *    (any method) — parsed into `{accountId, secret}`; the key's account id
+   *    must equal the path account id, otherwise 401 `invalid-secret`;
+   * 2. a bare secret in the body (POST);
+   * 3. a bare secret in `x-fleet-secret` (any method).
+   *
+   * A malformed key is 400 `invalid-key` — never silently downgraded to "no
+   * credential" — because a client that sends a key intends key auth. The
+   * digest comparison itself stays inside the store (constant-time).
+   */
+  function authenticateAccount(req, accountId, bodySecret, bodyKey) {
+    const key = presentedFleetKey(req, bodyKey)
+    if (key !== null) {
+      const parsed = parseFleetKey(key)
+      if (!parsed.ok) {
+        return { ok: false, status: 400, code: 'invalid-key', message: parsed.message }
+      }
+      if (parsed.accountId !== accountId) {
+        return {
+          ok: false,
+          status: 401,
+          code: 'invalid-secret',
+          message: 'the fleet key belongs to a different account',
+        }
+      }
+      return authFailure(accountStore.authenticate(accountId, parsed.secret))
+    }
+
     const secret = typeof bodySecret === 'string' && bodySecret !== ''
       ? bodySecret
       : headerValue(req.headers['x-fleet-secret'])
-    return accountStore.authenticate(accountId, secret)
-  }
-
-  /** Write the 401/404 for a failed account authentication. */
-  function sendAuthFailure(req, res, auth) {
-    sendAccountError(req, res, {
-      status: accountFailureStatus(auth.code),
-      code: accountErrorCode(auth.code),
-      message: auth.message,
-    })
+    return authFailure(accountStore.authenticate(accountId, secret))
   }
 
   /** `POST /api/fleet/accounts/<id>/devices` — upsert by `machineId`. */
@@ -892,9 +948,9 @@ export function createRelay(options = {}) {
       sendAccountError(req, res, body)
       return
     }
-    const auth = authenticateAccount(req, accountId, body.value.secret)
+    const auth = authenticateAccount(req, accountId, body.value.secret, body.value.key)
     if (!auth.ok) {
-      sendAuthFailure(req, res, auth)
+      sendAccountError(req, res, auth)
       return
     }
     const registered = accountStore.upsertDevice(accountId, body.value.device)
@@ -913,7 +969,7 @@ export function createRelay(options = {}) {
   function listDevicesRoute(req, res, accountId) {
     const auth = authenticateAccount(req, accountId, null)
     if (!auth.ok) {
-      sendAuthFailure(req, res, auth)
+      sendAccountError(req, res, auth)
       return
     }
     sendJson(res, 200, { devices: accountStore.listDevices(accountId) ?? [] })
@@ -923,7 +979,7 @@ export function createRelay(options = {}) {
   function deleteDeviceRoute(req, res, accountId, machineId) {
     const auth = authenticateAccount(req, accountId, null)
     if (!auth.ok) {
-      sendAuthFailure(req, res, auth)
+      sendAccountError(req, res, auth)
       return
     }
     if (!MACHINE_ID_RE.test(machineId)) {

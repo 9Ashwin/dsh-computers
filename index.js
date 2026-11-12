@@ -21,7 +21,8 @@ import { createTunnel } from './lib/tunnel.js'
 import { createRelay, normalizeRelayUrl } from './lib/relay-manager.js'
 import { HUB_ID_PATTERN, isHubId, readRelayIdentity, writeRelayIdentity } from './lib/relay-identity.js'
 import { createFleetIdentity } from './lib/fleet-identity.js'
-import { createAccountManager, machineNameOf, preferNonLoopback } from './lib/account.js'
+import { createAccountManager, machineNameOf, preferNonLoopback, readAccountControllable } from './lib/account.js'
+import { createSelfRuntime } from './lib/self-runtime.js'
 import { resolveBaseUrl } from './lib/http.js'
 import { createComputerSkills } from './lib/skills.js'
 import { createSelectionStore } from './lib/selection.js'
@@ -36,7 +37,7 @@ export const name = 'dsh-computers'
 export const inject = ['tools', 'webServer']
 
 /** Version reported by `/api/dsh-computers/health` (and asserted by the smoke harness). */
-export const PLUGIN_VERSION = '1.9.0'
+export const PLUGIN_VERSION = '1.9.1'
 
 /** The machine agent bundle, served at request time (never imported). */
 const AGENT_URL = new URL('./agent/dsh-computers-agent.mjs', import.meta.url)
@@ -295,6 +296,17 @@ export function apply(ctx, config) {
   } catch {
     accountDeps = {}
   }
+  // Self-runtime seam (v1.9.1): the smoke harness injects a fake agent path, a
+  // fake spawner and short backoffs so the child-process lifecycle is
+  // assertable without running the real agent. `autoStart: false` keeps the
+  // harness's other mounts from spawning children. Production never sets it.
+  let selfRuntimeDeps = {}
+  try {
+    const value = ctx === null || typeof ctx !== 'object' ? undefined : ctx.selfRuntimeDeps
+    if (value !== null && typeof value === 'object' && !Array.isArray(value)) selfRuntimeDeps = value
+  } catch {
+    selfRuntimeDeps = {}
+  }
   const onWarn = (message) => {
     try {
       // The host's logger is not part of the injected contract; a warning on
@@ -447,6 +459,26 @@ export function apply(ctx, config) {
       return () => account.dispose()
     }, 'dsh-computers: account center heartbeat')
 
+    // v1.9.1: this hub's OWN machine as an executable target. The composer's
+    // 「本地电脑」 is `computerId: null`, which used to have nothing behind it, so
+    // `computer_exec` answered "no computer selected". This manager keeps ONE
+    // isolated agent child enrolled in this hub over loopback: the local machine
+    // then appears in its own registry (activated once its stream lands) and is
+    // drivable like any other computer. The child has its own
+    // `DSH_COMPUTERS_HOME` under the state directory, so it can never interfere
+    // with the upstream runtime in lib/runtime.js (this machine may also be a
+    // controlled machine of another hub). Nothing here throws into apply(): a
+    // failed start settles into `state: 'failed'` and is reported by /self.
+    const selfRuntime = createSelfRuntime({
+      ctx,
+      stateDir,
+      version: PLUGIN_VERSION,
+      name: machineNameOf(resolved.relay.name),
+      joinToken: () => fleet.token(),
+      onWarn,
+      deps: selfRuntimeDeps,
+    })
+
     // Routes first (the browser page and the agents can arrive immediately),
     // then the tools and the prompt section.
     createRoutes({
@@ -464,9 +496,29 @@ export function apply(ctx, config) {
       relay,
       fleet,
       account,
+      selfRuntime,
       onWarn,
     })
     createTools({ ctx, config: resolved, store, hub, selections, access, fsOps, version: PLUGIN_VERSION, onWarn })
+
+    // Start the self-runtime at load unless the user turned 被控 off. The switch
+    // lives in account.json and survives restarts, so a disabled machine stays
+    // disabled; `autoStart: false` is the harness seam that keeps other smoke
+    // phases from spawning children.
+    ctx.effect(() => {
+      try {
+        let controllable = true
+        try {
+          controllable = readAccountControllable(stateDir, { onWarn })
+        } catch {
+          controllable = true
+        }
+        if (selfRuntimeDeps.autoStart !== false && controllable) void selfRuntime.autoStart()
+      } catch (error) {
+        onWarn(`dsh-computers: the self runtime could not auto-start: ${error && error.message ? error.message : error}`)
+      }
+      return () => selfRuntime.dispose()
+    }, 'dsh-computers: self runtime')
 
     // ---- remote skills in the slash menu (v1.9.0) ----------------------
     // Every connected computer's own skills become DSH skills named
