@@ -84,6 +84,7 @@ window.__ModuleLoader__.load({
       'empty.title': '还没有连接任何电脑',
       'empty.hint': '把「复制接入地址」得到的地址粘贴到另一台电脑的 设置 → 电脑 → 接入；那台机器没有 DSH 时，用下面的命令行接入。',
       'empty.cliAction': '没有 DSH 的机器？用命令行接入',
+      'join.blocked': '这台机器现在只有本机地址，没法生成给别的电脑用的接入地址：先在下面「高级 → 中继」里启用中继，或给它配一个公网地址。',
       'error.load': '无法读取电脑列表',
       'error.loadDetail': '{title}：{message}',
       'error.network': '无法连接到服务器，请检查网络后重试。',
@@ -287,6 +288,7 @@ window.__ModuleLoader__.load({
       'empty.title': 'No computers connected yet',
       'empty.hint': 'Paste the address from “Copy join address” into Settings → Computers → Join on the other computer. If that machine has no DSH, use the command line below.',
       'empty.cliAction': 'No DSH on that machine? Use the command line',
+      'join.blocked': 'This machine only has a local address right now, so there is no join address for other computers yet. Enable the relay under Advanced → Relay below, or give it a public address.',
       'error.load': 'Could not load the computer list',
       'error.loadDetail': '{title}: {message}',
       'error.network': 'Could not reach the server. Check the network and try again.',
@@ -2726,17 +2728,21 @@ window.__ModuleLoader__.load({
      * (`/state.fleet.joinUrl`) the primary action is copying it — that is the
      * string the user pastes on the other machine. The connect dialog is
      * demoted to the command-line fallback for machines that cannot run DSH.
-     * @param {object} props - `joinUrl`, optional `onCliFallback()`.
+     * @param {object} props - `joinUrl`, `joinBlocked`, optional `onCliFallback()`.
      * @returns {object} empty card.
      */
     function EmptyState(props) {
       const joinUrl = typeof props.joinUrl === 'string' ? props.joinUrl : '';
+      const joinBlocked = props.joinBlocked === true;
       return h('div', { className: 'dshc-empty' },
         h('div', { className: 'dshc-emptyIcon', 'aria-hidden': 'true' }, h(IconMonitor, { size: 20 })),
         h('div', { className: 'dshc-emptyTitle' }, t('empty.title')),
         h('p', { className: 'dshc-emptyHint' }, t('empty.hint')),
         joinUrl !== ''
           ? h('div', { className: 'dshc-emptyActions' }, h(CopyJoinButton, { value: joinUrl }))
+          : null,
+        joinBlocked
+          ? h('p', { className: 'dshc-emptyHint dshc-joinBlocked' }, t('join.blocked'))
           : null,
         typeof props.onCliFallback === 'function'
           ? h('button', {
@@ -3905,6 +3911,9 @@ window.__ModuleLoader__.load({
        * It is copied verbatim — the other machine pastes it into 接入. */
       const fleet = data !== null && data.fleet !== null && typeof data.fleet === 'object' ? data.fleet : null;
       const joinUrl = fleet !== null && typeof fleet.joinUrl === 'string' ? fleet.joinUrl : '';
+      // v1.7.2: a loopback-only machine cannot publish a join address; the host
+      // says why so we can tell the user what to do instead of showing one.
+      const joinBlocked = fleet !== null && fleet.joinUrl === '' && fleet.hasToken === true;
 
       let body;
       if (view.phase === 'loading' && computers === null) body = h(Skeleton);
@@ -3920,6 +3929,7 @@ window.__ModuleLoader__.load({
       } else if (computers === null || computers.length === 0) {
         body = h(EmptyState, {
           joinUrl,
+          joinBlocked,
           onCliFallback: canConnect ? () => setDialog({ kind: 'connect' }) : undefined,
         });
       }

@@ -857,6 +857,9 @@ v1.7.1 起 `url` 也能在界面里配置（`/state.relay.urlSource: 'ui' | 'con
 ```
 
 `#` 之后是 fragment：**浏览器与代理都不会把它发到服务器**，token 不会进访问日志。
+
+v1.7.2 起 `joinUrl` **永远不是回环地址**：它要粘到另一台机器上，`127.0.0.1` 在那台机器上指的是它自己。
+没有任何对外可达地址时 `joinUrl` 为空并给出 `reason`，UI 会提示去「高级 → 中继」启用中继或配置公网地址。
 `fleetToken` 持久化在 `${stateDir}/fleet.json`（0600），与 `state.json` / `relay.json` 分离——
 重置电脑列表不会让已发出的接入地址失效。
 
@@ -864,7 +867,7 @@ v1.7.1 起 `url` 也能在界面里配置（`/state.relay.urlSource: 'ui' | 'con
 
 | 路由 | 语义 |
 | --- | --- |
-| `GET /state` | 新增 `fleet: { joinUrl, hasToken }`（`joinUrl` 就是上面那串） |
+| `GET /state` | 新增 `fleet: { joinUrl, hasToken, reason }`（`joinUrl` 就是上面那串；`reason:'loopback-only'` 表示这台机器只有本机地址，**不会**给你一个 `127.0.0.1` 的假地址） |
 | `POST /agent/enroll` | `{ key }` 与 `{ join }` 二选一；**两者都有时 key 优先**；join 错误 → `401 invalid-join` |
 | `POST /fleet/rotate` | 重新生成 token，旧地址立刻失效（已接入的机器不受影响） |
 | `POST /runtime/connect` | `{ serverUrl }` 里带 `#join=` 时可省略 `key`；存入的 URL 永远不含 fragment |
