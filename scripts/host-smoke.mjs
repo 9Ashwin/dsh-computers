@@ -8620,8 +8620,8 @@ async function phaseAA(root) {
 
     await check('local relay: start spawns the package bin, stop kills it', async () => {
       const started = await call(app.origin, `${API}/relay/supervisor`, { method: 'POST', body: { action: 'start', port } })
-      assert.equal(started.status, 200)
-      assert.equal(started.data.supervisor.state, 'running')
+      assert.equal(started.status, 200, JSON.stringify(started.data))
+      assert.equal(started.data.supervisor.state, 'running', JSON.stringify(started.data.supervisor))
       assert.equal(started.data.supervisor.port, port)
       assert.equal(started.data.supervisor.adopted, false)
       assert.equal(typeof started.data.supervisor.since, 'string')
@@ -8705,6 +8705,49 @@ async function phaseAA(root) {
     await app.close()
     if (relayPid !== null) await waitForGone(relayPid)
   }
+
+  await check('local relay: an explicit start is remembered and resumed after a reload', async () => {
+    const dir = join(root, 'aa-resume')
+    const port = await freePort()
+    const firstSpawner = countingSpawn()
+    const first = await mount({ ...FAST_CONFIG, stateDir: dir }, {
+      relaySupervisorDeps: { binPath, spawn: firstSpawner.spawn, restartDelays: [10], stopGraceMs: 300 },
+    })
+    let relayPid = null
+    try {
+      const started = await call(first.origin, `${API}/relay/supervisor`, { method: 'POST', body: { action: 'start', port } })
+      assert.equal(started.status, 200, JSON.stringify(started.data))
+      relayPid = started.data.supervisor.pid
+      assert.equal(started.data.supervisor.state, 'running')
+      // The intent file is what makes "start it once" survive an upgrade.
+      const intent = JSON.parse(readFileSync(join(dir, 'relay-supervisor.json'), 'utf8'))
+      assert.deepEqual(intent, { autoStart: true, port })
+    } finally {
+      await first.close()
+    }
+    try {
+      await sleep(300)
+      const secondSpawner = countingSpawn()
+      const second = await mount({ ...FAST_CONFIG, stateDir: dir }, {
+        relaySupervisorDeps: { binPath, spawn: secondSpawner.spawn, restartDelays: [10], stopGraceMs: 300 },
+      })
+      try {
+        const resumed = await waitFor(
+          async () => (await call(second.origin, `${API}/relay/supervisor`)).data.supervisor,
+          (value) => value.state === 'running',
+          5000,
+          'the relay resumes without a click',
+        )
+        assert.equal(resumed.port, port, 'the remembered port is reused')
+        relayPid = resumed.pid
+        assert.ok(secondSpawner.calls >= 1, 'resume actually spawns the relay')
+      } finally {
+        await second.close()
+      }
+    } finally {
+      if (relayPid !== null) await waitForGone(relayPid)
+    }
+  })
 
   await check('local relay: an already-running relay is adopted, never duplicated', async () => {
     const health = await fakeHealthServer({ ok: true, hubs: [], accounts: 0 })

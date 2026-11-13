@@ -1,6 +1,6 @@
 {
   "name": "dsh-computers",
-  "version": "1.9.7",
+  "version": "1.9.8",
   "description": "Connect your own machines to a DSH Web deployment and run commands on them from the agent.",
   "type": "module",
   "license": "MIT",

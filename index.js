@@ -40,7 +40,7 @@ export const name = 'dsh-computers'
 export const inject = ['tools', 'webServer']
 
 /** Version reported by `/api/dsh-computers/health` (and asserted by the smoke harness). */
-export const PLUGIN_VERSION = '1.9.7'
+export const PLUGIN_VERSION = '1.9.8'
 
 /** The machine agent bundle, served at request time (never imported). */
 const AGENT_URL = new URL('./agent/dsh-computers-agent.mjs', import.meta.url)
@@ -593,9 +593,16 @@ export function apply(ctx, config) {
     // `autoStart` seam lets the smoke harness force/suppress it.
     ctx.effect(() => {
       try {
+        // v1.9.8: a plugin upgrade kills the child relay, so a user who started it
+        // once must not have to click again: resume() replays the persisted
+        // intent. Failing that, the operator's localAutoStart decides.
         const shouldAutoStart = relaySupervisorDeps.autoStart === true
           || (relaySupervisorDeps.autoStart !== false && resolved.relay.localAutoStart === true)
-        if (shouldAutoStart) void relaySupervisor.autoStart()
+        if (typeof relaySupervisor.resume === 'function') {
+          void relaySupervisor.resume(shouldAutoStart)
+        } else if (shouldAutoStart) {
+          void relaySupervisor.autoStart()
+        }
       } catch (error) {
         onWarn(`dsh-computers: the local relay could not auto-start: ${error && error.message ? error.message : error}`)
       }
