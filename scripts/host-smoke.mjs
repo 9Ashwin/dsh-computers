@@ -7340,6 +7340,22 @@ async function phaseY(root) {
       app.fake.setGate(undefined)
     })
 
+    // v1.9.6: the local runtime had no manual control surface at all — a failed
+    // start left 本地电脑 dead with nothing to retry.
+    await check('self-runtime: POST /self starts, restarts and stops the local runtime', async () => {
+      const started = await call(app.origin, `${API}/self`, { method: 'POST', body: {} })
+      assert.equal(started.status, 200, 'an empty body defaults to start')
+      assert.equal(started.data.runtime.state, 'running')
+      const restarted = await call(app.origin, `${API}/self`, { method: 'POST', body: { action: 'restart' } })
+      assert.equal(restarted.status, 200)
+      assert.equal(restarted.data.runtime.state, 'running')
+      const stopped = await call(app.origin, `${API}/self`, { method: 'POST', body: { action: 'stop' } })
+      assert.equal(stopped.status, 200)
+      assert.equal(stopped.data.runtime.state, 'stopped')
+      const bad = await call(app.origin, `${API}/self`, { method: 'POST', body: { action: 'nope' } })
+      assert.equal(bad.status, 400)
+    })
+
     await check('self-runtime: the 被控 switch enrolls this machine and starts the local runtime', async () => {
       const started = await call(app.origin, `${API}/account/controllable`, {
         method: 'POST',

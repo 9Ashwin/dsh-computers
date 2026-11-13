@@ -54,6 +54,15 @@ window.__ModuleLoader__.load({
        * process itself. GET is the status, POST is `{ action, port? }`; a host
        * that predates it answers 404 and the card hides the block. */
       relaySupervisor: 'api/dsh-computers/relay/supervisor',
+      /* Local runtime (v1.9.6): this machine's own executor for 「本地电脑」.
+       * GET is the status, POST is `{ action? }` (an empty body starts). The
+       * same payload is mirrored at `/state.account.self`, so the 5 s poll is
+       * usually enough; this route is the fallback and carries the actions. */
+      self: 'api/dsh-computers/self',
+      /* Public probe: the PLUGIN version (semver) — `/state.version` is the
+       * wire-protocol revision, not the plugin's. One read per page mount,
+       * only when the advanced block needs the version line. */
+      health: 'api/dsh-computers/health',
       /* Account center (PROTOCOL account): one account on the relay; machines
        * sign into it instead of pairing with each other one by one. The host
        * may not have these routes yet — every call below degrades quietly. */
@@ -228,6 +237,30 @@ window.__ModuleLoader__.load({
       'relay.local.restartFailed': '重启中继失败：{message}',
       'relay.local.readyHint': '中继已启动，地址已填好：点「启用」就能用它',
       'relay.local.remote': '中继也可以部署在别的机器上，填它的地址即可',
+      /* v1.9.6: 本地运行时 — 「本地电脑」 in the composer is only executable
+       * while this machine's own runtime is up. It used to have no UI at all,
+       * so a failed start surfaced as a bare 503 in chat. Same shape as
+       * 本机中继: state line, actions, a collapsible 日志. */
+      'self.title': '本地运行时',
+      'self.running': '运行中 · PID {pid} · 已连接',
+      'self.runningNoPid': '运行中 · 已连接',
+      'self.stopped': '未运行',
+      'self.starting': '启动中…',
+      'self.failed': '启动失败',
+      'self.start': '启动',
+      'self.restart': '重启',
+      'self.stop': '停止',
+      'self.logs': '日志',
+      'self.logsRefresh': '刷新',
+      'self.logsEmpty': '还没有日志',
+      'self.stoppedNote': '本机作为执行目标需要它运行，「被控」开着时会自动启动',
+      'self.blockedNote': '这台机器现在不允许被控，别的电脑无法在这里执行',
+      'self.startFailed': '启动本地运行时失败：{message}',
+      'self.stopFailed': '停止本地运行时失败：{message}',
+      'self.restartFailed': '重启本地运行时失败：{message}',
+      /* v1.9.6: the plugin version, at the bottom of 高级. With the registry
+       * list gone this is the only place version drift is visible. */
+      'version.plugin': '插件 {version}',
       'target.offline': '离线',
       'target.failed': '切换失败：{message}',
       /* Account devices in the picker: a second group after the local ones. */
@@ -383,6 +416,30 @@ window.__ModuleLoader__.load({
       'relay.local.restartFailed': 'Could not restart the relay: {message}',
       'relay.local.readyHint': 'The relay is running and the address is filled in — click Enable to use it',
       'relay.local.remote': 'The relay can also run on another machine — just enter its address',
+      /* v1.9.6: 本地运行时 — 「本地电脑」 in the composer is only executable
+       * while this machine's own runtime is up. It used to have no UI at all,
+       * so a failed start surfaced as a bare 503 in chat. Same shape as the
+       * local relay: state line, actions, a collapsible Logs section. */
+      'self.title': 'Local runtime',
+      'self.running': 'Running · PID {pid} · Connected',
+      'self.runningNoPid': 'Running · Connected',
+      'self.stopped': 'Not running',
+      'self.starting': 'Starting…',
+      'self.failed': 'Failed to start',
+      'self.start': 'Start',
+      'self.restart': 'Restart',
+      'self.stop': 'Stop',
+      'self.logs': 'Logs',
+      'self.logsRefresh': 'Refresh',
+      'self.logsEmpty': 'No logs yet',
+      'self.stoppedNote': 'This machine needs it running to be an execution target; it starts automatically while Controllable is on',
+      'self.blockedNote': 'This machine is not controllable right now — other machines cannot run commands here',
+      'self.startFailed': 'Could not start the local runtime: {message}',
+      'self.stopFailed': 'Could not stop the local runtime: {message}',
+      'self.restartFailed': 'Could not restart the local runtime: {message}',
+      /* v1.9.6: the plugin version, at the bottom of Advanced. With the
+       * registry list gone this is the only place version drift is visible. */
+      'version.plugin': 'Plugin {version}',
       'target.offline': 'Offline',
       'target.failed': 'Could not switch: {message}',
       'target.notControllable': 'Not controllable',
@@ -1401,6 +1458,92 @@ window.__ModuleLoader__.load({
   overflow-wrap: anywhere;
 }
 .dshc-relayLogsEmpty { margin: 8px 0 0; }
+/* v1.9.6: 本地运行时 — the hub's own executor for 「本地电脑」. A sibling card
+ * above 中继 with the same visual language as 本机中继 (state line, one primary
+ * action, a collapsible capped monospace log). */
+.dshc-selfRt {
+  margin-bottom: 18px;
+  padding: 14px 15px 13px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 16px;
+  background: var(--dsw-alias-bg-layer-1);
+}
+.dshc-selfRtHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.dshc-selfRtTitle {
+  font-size: 12.5px;
+  line-height: 18px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+.dshc-selfRtState {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 17px;
+  color: var(--dsw-alias-label-secondary);
+}
+.dshc-selfRtState[data-kind="failed"] { color: var(--dsw-alias-state-warn-primary); }
+.dshc-selfRtActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 9px;
+}
+.dshc-selfRt .dshc-primary {
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-size: 12.5px;
+}
+.dshc-selfNote {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--dsw-alias-label-secondary);
+  overflow-wrap: anywhere;
+}
+.dshc-selfLogsWrap { margin-top: 8px; }
+.dshc-selfLogsHead {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.dshc-selfLogsToggle { margin-top: 0; }
+.dshc-selfLogsRefresh { margin-left: auto; }
+.dshc-selfLogs {
+  max-height: 168px;
+  overflow: auto;
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--dsw-alias-border-l1);
+  border-radius: 9px;
+  background: var(--dsw-alias-bg-base);
+  color: var(--dsw-alias-label-secondary);
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  font-size: 11.5px;
+  line-height: 16px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.dshc-selfLogsEmpty { margin: 8px 0 0; }
+/* The version line closes 高级: tiny, muted, no link. */
+.dshc-versionLine {
+  margin: 0 0 2px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--dsw-alias-label-secondary);
+  text-align: right;
+  overflow-wrap: anywhere;
+}
 /* Composer menu: the manage-access row replaces the old muted footer. */
 .dshc-menuSep {
   height: 1px;
@@ -1704,6 +1847,15 @@ window.__ModuleLoader__.load({
         body: payload,
         signal,
       }),
+      /* Local runtime (v1.9.6). `{}` starts, `{ action }` restarts/stops; both
+       * directions answer the same `{ controllable, runtime }` shape. */
+      readSelf: (signal) => requestJson(API.self, { signal }),
+      selfAction: (payload, signal) => requestJson(API.self, {
+        method: 'POST',
+        body: payload,
+        signal,
+      }),
+      readHealth: (signal) => requestJson(API.health, { signal }),
       /* Account center (PROTOCOL account). The GET is the source of truth; the
        * POSTs answer with the same shape so the UI reconciles without a poll. */
       readAccount: (signal) => requestJson(API.account, { signal }),
@@ -1821,6 +1973,61 @@ window.__ModuleLoader__.load({
         ? payload.localUrl
         : `http://127.0.0.1:${supervisor.port}`;
       return { supervisor, localUrl };
+    }
+
+    /** The local-runtime states the block knows (anything else reads as stopped). */
+    const SELF_RUNTIME_STATES = ['stopped', 'starting', 'running', 'failed'];
+
+    /**
+     * Normalize the local runtime status the host reports. The contract is
+     * `{ state, pid, since, lastError, computerId, logs }` (mirrored at
+     * `/state.account.self.runtime`); a host with a string `logs`, a missing
+     * `computerId` or a non-numeric pid must not break the block.
+     * @param {object|null} raw - the `runtime` object.
+     * @returns {object|null} normalized status, or null when absent.
+     */
+    function normalizeSelfRuntime(raw) {
+      if (raw === null || typeof raw !== 'object') return null;
+      const state = typeof raw.state === 'string' && SELF_RUNTIME_STATES.includes(raw.state) ? raw.state : 'stopped';
+      const pid = Number(raw.pid);
+      const logs = Array.isArray(raw.logs)
+        ? raw.logs.filter((line) => typeof line === 'string')
+        : (typeof raw.logs === 'string' ? raw.logs.split('\n').filter((line) => line !== '') : []);
+      return {
+        state,
+        /* Like the relay block: a pid is only meaningful while running. */
+        pid: state === 'running' && Number.isFinite(pid) && pid > 0 ? pid : null,
+        since: typeof raw.since === 'string' ? raw.since : null,
+        lastError: typeof raw.lastError === 'string' && raw.lastError.trim() !== '' ? raw.lastError.trim() : null,
+        computerId: typeof raw.computerId === 'string' && raw.computerId !== '' ? raw.computerId : null,
+        logs,
+      };
+    }
+
+    /**
+     * The `{ controllable, runtime }` payload both `/self` and
+     * `/state.account.self` share. `controllable` defaults to true: a host that
+     * predates the flag must not claim the machine is blocked.
+     * @param {object|null} payload - route body or `state.account.self`.
+     * @returns {{controllable: boolean, runtime: object}|null} normalized payload.
+     */
+    function selfPayloadOf(payload) {
+      if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return null;
+      const runtime = normalizeSelfRuntime(payload.runtime);
+      if (runtime === null) return null;
+      return { controllable: payload.controllable !== false, runtime };
+    }
+
+    /**
+     * The PLUGIN version, when a value looks like one. `/state.version` is the
+     * wire-protocol revision (a small integer), so the version line only
+     * accepts a semver-shaped value and otherwise falls back to `/health`.
+     * @param {unknown} value - `state.version` or `health.version`.
+     * @returns {string|null} e.g. `1.9.5`, or null.
+     */
+    function pluginVersionOf(value) {
+      const text = typeof value === 'string' ? value.trim() : '';
+      return /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/.test(text) ? text : null;
     }
 
     /**
@@ -2941,7 +3148,8 @@ window.__ModuleLoader__.load({
     /**
      * The 电脑 page (v1.9.2): the 账号 card — login form, or 已登录 + the
      * account's machines with the 被控 switch — and, on a hub, the collapsed
-     * 高级 block with 中继 (including 本机中继) and 账号中心.
+     * 高级 block with 本地运行时 (v1.9.6), 中继 (including 本机中继) and
+     * 账号中心, closed by the plugin version line.
      *
      * The local computer registry is an internal detail now: no 已连接的电脑
      * list, no join address, no manual join. Accounts are the only way in.
@@ -2961,6 +3169,21 @@ window.__ModuleLoader__.load({
       const [supervisorBusy, setSupervisorBusy] = React.useState(false);
       const supervisorBusyRef = React.useRef(false);
       const supervisorRequested = React.useRef(false);
+      /* Local runtime (v1.9.6): this machine's executor for 「本地电脑」.
+       * `data` is the normalized `{ state, pid, since, lastError, computerId,
+       * logs }` from `/state.account.self.runtime` (preferred: the 5 s poll
+       * carries it) or the one-time `/self` GET on a host that does not mirror
+       * it. `supported: false` hides the block on an old host. */
+      const [selfRuntime, setSelfRuntime] = React.useState({
+        phase: 'idle', data: null, error: null, supported: false, controllable: true,
+      });
+      const [selfRuntimeBusy, setSelfRuntimeBusy] = React.useState(false);
+      const selfRuntimeBusyRef = React.useRef(false);
+      const selfRuntimeRequested = React.useRef(false);
+      /* Plugin version for the bottom of 高级 (v1.9.6). `/state.version` is the
+       * protocol revision, so the health endpoint supplies the semver one. */
+      const [pluginVersion, setPluginVersion] = React.useState(null);
+      const healthRequested = React.useRef(false);
       /* Relay setup state: `pending` is the optimistic overlay for the POST
        * in flight (`enabled` and/or `url`), `error` is the inline failure
        * line. One state drives the switch, 启用 and 修改 alike. */
@@ -3120,6 +3343,112 @@ window.__ModuleLoader__.load({
 
       const refreshSupervisor = React.useCallback(() => { void loadSupervisor(true); }, [loadSupervisor]);
 
+      /**
+       * Read the local runtime (v1.9.6). Normally `/state.account.self` already
+       * carries it on the 5 s poll; this GET is the fallback for a host that
+       * does not mirror it, and the block's 日志 刷新. A 404/network failure
+       * means "this host has no local runtime UI", so the block hides instead
+       * of offering a button that cannot work.
+       * @param {boolean} force - re-read even after the first successful call.
+       * @returns {Promise<void>} resolves when the read settled.
+       */
+      const loadSelfRuntime = React.useCallback(async (force) => {
+        if (!force && selfRuntimeRequested.current) return;
+        selfRuntimeRequested.current = true;
+        try {
+          const payload = await scope.current.run((signal) => api.readSelf(signal));
+          if (!alive.current) return;
+          const parsed = selfPayloadOf(payload);
+          if (parsed === null) {
+            setSelfRuntime((current) => (current.data === null
+              ? { phase: 'ready', data: null, error: null, supported: false, controllable: true }
+              : current));
+            return;
+          }
+          setSelfRuntime({
+            phase: 'ready',
+            data: parsed.runtime,
+            error: null,
+            supported: true,
+            controllable: parsed.controllable,
+          });
+        } catch (error) {
+          if (!alive.current) return;
+          if (error && error.name === 'AbortError') return;
+          setSelfRuntime((current) => (current.data === null
+            ? { phase: 'ready', data: null, error: null, supported: false, controllable: true }
+            : current));
+        }
+      }, []);
+
+      /**
+       * Start/stop/restart this machine's local runtime (v1.9.6): `{}` starts,
+       * `{ action }` restarts or stops. The answer is the same
+       * `{ controllable, runtime }` shape, so the block reconciles at once; a
+       * rejection keeps the server's message inline.
+       * @param {string} action - 'start' | 'stop' | 'restart'.
+       * @returns {Promise<void>} resolves when the POST settled.
+       */
+      const submitSelfRuntime = React.useCallback(async (action) => {
+        if (selfRuntimeBusyRef.current) return;
+        const start = action !== 'restart' && action !== 'stop';
+        const body = start ? {} : { action };
+        selfRuntimeBusyRef.current = true;
+        setSelfRuntimeBusy(true);
+        setSelfRuntime((current) => ({ ...current, error: null }));
+        try {
+          const payload = await scope.current.run((signal) => api.selfAction(body, signal));
+          if (!alive.current) return;
+          const parsed = selfPayloadOf(payload);
+          if (parsed === null) {
+            setSelfRuntime((current) => ({
+              ...current,
+              error: t('self.startFailed', { message: t('error.badResponse') }),
+            }));
+            return;
+          }
+          selfRuntimeRequested.current = true;
+          setSelfRuntime({
+            phase: 'ready',
+            data: parsed.runtime,
+            error: null,
+            supported: true,
+            controllable: parsed.controllable,
+          });
+        } catch (error) {
+          if (error && error.name === 'AbortError') return;
+          const key = action === 'stop'
+            ? 'self.stopFailed'
+            : (action === 'restart' ? 'self.restartFailed' : 'self.startFailed');
+          setSelfRuntime((current) => ({ ...current, error: t(key, { message: messageOf(error) }) }));
+        } finally {
+          selfRuntimeBusyRef.current = false;
+          if (alive.current) setSelfRuntimeBusy(false);
+        }
+      }, []);
+
+      const refreshSelfRuntime = React.useCallback(() => { void loadSelfRuntime(true); }, [loadSelfRuntime]);
+
+      /**
+       * The plugin version for the bottom of 高级 (v1.9.6). `/state.version`
+       * is the wire-protocol revision, so when it is not semver-shaped the
+       * public `/health` probe is read once (it reports the plugin version).
+       * A missing answer simply leaves the version line out.
+       * @returns {Promise<void>} resolves when the read settled.
+       */
+      const loadPluginVersion = React.useCallback(async () => {
+        if (healthRequested.current) return;
+        healthRequested.current = true;
+        try {
+          const payload = await scope.current.run((signal) => api.readHealth(signal));
+          if (!alive.current) return;
+          const version = pluginVersionOf(payload !== null && typeof payload === 'object' ? payload.version : null);
+          if (version !== null) setPluginVersion(version);
+        } catch (error) {
+          /* No version line is fine; never surface a probe failure. */
+        }
+      }, []);
+
       const load = React.useCallback(async (options) => {
         const initial = options !== undefined && options !== null && options.initial === true;
         const relayEpochAtStart = relayEpoch.current;
@@ -3179,12 +3508,41 @@ window.__ModuleLoader__.load({
           } else if (roleOf(next) !== 'runtime') {
             void loadSupervisor(false);
           }
+          /* The local runtime (v1.9.6) rides `state.account.self`; a host that
+           * only has the route is asked once (and by the block's 刷新). It is
+           * meaningless on a runtime-only machine (no 高级 there). */
+          const rawSelf = next.account !== null && typeof next.account === 'object'
+            && next.account.self !== null && typeof next.account.self === 'object'
+            ? next.account.self
+            : null;
+          const parsedSelf = selfPayloadOf(rawSelf);
+          if (parsedSelf !== null) {
+            selfRuntimeRequested.current = true;
+            setSelfRuntime({
+              phase: 'ready',
+              data: parsedSelf.runtime,
+              error: null,
+              supported: true,
+              controllable: parsedSelf.controllable,
+            });
+          } else if (roleOf(next) !== 'runtime') {
+            void loadSelfRuntime(false);
+          }
+          /* The version line at the bottom of 高级 (v1.9.6): a semver-shaped
+           * `/state.version` is used directly, otherwise the plugin version
+           * comes from the public `/health` probe once. */
+          const stateVersion = pluginVersionOf(next.version);
+          if (stateVersion !== null) {
+            setPluginVersion(stateVersion);
+          } else if (roleOf(next) !== 'runtime') {
+            void loadPluginVersion();
+          }
         } catch (error) {
           if (!alive.current) return;
           if (error && error.name === 'AbortError') return;
           setView((current) => ({ phase: current.data === null ? 'error' : 'ready', data: current.data, error }));
         }
-      }, [loadAccount, loadSupervisor]);
+      }, [loadAccount, loadSupervisor, loadSelfRuntime, loadPluginVersion]);
 
       /**
        * Configure the relay (PROTOCOL relay): `{ enabled }` flips the switch,
@@ -3269,6 +3627,22 @@ window.__ModuleLoader__.load({
         if (status !== null && typeof status === 'object') {
           accountRequested.current = true;
           setAccount({ phase: 'ready', data: status, error: null });
+          /* The 被控 switch answer carries `self` too (routes reply with
+           * `{ ...accountStatus(), self }`), so the local-runtime note and
+           * actions reconcile at once instead of on the next poll. */
+          if (status.self !== null && typeof status.self === 'object') {
+            const parsed = selfPayloadOf(status.self);
+            if (parsed !== null) {
+              selfRuntimeRequested.current = true;
+              setSelfRuntime({
+                phase: 'ready',
+                data: parsed.runtime,
+                error: null,
+                supported: true,
+                controllable: parsed.controllable,
+              });
+            }
+          }
         }
         if (typeof message === 'string' && message !== '') showNotice('success', message);
       }, [showNotice]);
@@ -3346,9 +3720,18 @@ window.__ModuleLoader__.load({
             onAccount: handleAccountStatus,
           })
           : null,
-        /* ADVANCED (v1.9.2): 中继 (with 本机中继) + 账号中心, collapsed. */
+        /* ADVANCED (v1.9.2): 中继 (with 本机中继) + 账号中心, collapsed.
+         * v1.9.6: 本地运行时 sits ABOVE 中继 (「本地电脑」 was invisible), and
+         * the plugin version closes the block. */
         showComputers && data !== null
           ? h(AdvancedSection, null,
+            h(SelfRuntimeBlock, {
+              key: 'self',
+              view: selfRuntime,
+              busy: selfRuntimeBusy,
+              onAction: (action) => { void submitSelfRuntime(action); },
+              onRefresh: refreshSelfRuntime,
+            }),
             h(RelayCard, {
               key: 'relay',
               relay,
@@ -3373,7 +3756,11 @@ window.__ModuleLoader__.load({
               onNeedAccount: needAccount,
               onCreated: handleAccountCreated,
               onAccount: handleAccountStatus,
-            }))
+            }),
+            pluginVersion !== null
+              ? h('p', { key: 'version', className: 'dshc-versionLine' },
+                t('version.plugin', { version: pluginVersion }))
+              : null)
           : null);
     }
 
@@ -3682,6 +4069,121 @@ window.__ModuleLoader__.load({
         /* v1.9.2: the only sentence about running the relay elsewhere. No
          * nginx, no systemd, no config file — just an address. */
         h('p', { className: 'dshc-hint dshc-relayRemote' }, t('relay.local.remote')),
+        error !== null ? h('p', { className: 'dshc-formError', role: 'alert' }, error) : null);
+    }
+
+    /**
+     * 「本地运行时」 block at the top of 高级 (v1.9.6): this machine's own
+     * executor, the thing 「本地电脑」 in the composer actually runs on.
+     *
+     * Until now it had no UI: a failed start showed up as a bare 503 in chat
+     * and 本地电脑 stayed 离线 with nothing to click. The block mirrors 本机中继:
+     * stopped → 未运行 + 启动 + the one-line note about 被控; running →
+     * 运行中 · PID <pid> · 已连接 + 重启/停止 + a collapsible 日志 with 刷新;
+     * starting → 启动中… with every action disabled; failed → 启动失败 +
+     * lastError verbatim + 重启. `controllable === false` adds one muted note.
+     * An older host (`supported:false`) renders nothing.
+     * @param {object} props - `view` (`{ data, supported, controllable, error }`),
+     *   `busy`, `onAction(action)`, `onRefresh()`.
+     * @returns {object|null} the block, or null when the host has no runtime.
+     */
+    function SelfRuntimeBlock(props) {
+      const [logsOpen, setLogsOpen] = React.useState(false);
+      const view = props.view;
+      if (view === null || typeof view !== 'object' || view.supported !== true
+        || view.data === null || typeof view.data !== 'object') return null;
+      const status = view.data;
+      const state = status.state;
+      const busy = props.busy === true;
+      const running = state === 'running';
+      const starting = state === 'starting';
+      const failed = state === 'failed';
+      const logs = Array.isArray(status.logs) ? status.logs.slice(-40) : [];
+      const statusText = running
+        ? (status.pid !== null
+          ? t('self.running', { pid: String(status.pid) })
+          : t('self.runningNoPid'))
+        : (starting
+          ? t('self.starting')
+          : (failed ? t('self.failed') : t('self.stopped')));
+      const dotState = running ? 'running' : (starting ? 'connecting' : (failed ? 'failed' : 'stopped'));
+      const error = typeof view.error === 'string' && view.error !== '' ? view.error : null;
+      const action = (name) => { if (!busy) props.onAction(name); };
+      const logsVisible = running || (failed && logs.length > 0);
+      return h('div', {
+        className: 'dshc-selfRt',
+        'data-state': state,
+        role: 'group',
+        'aria-label': t('self.title'),
+      },
+        h('div', { className: 'dshc-selfRtHead' },
+          h('span', { className: 'dshc-selfRtTitle' }, t('self.title')),
+          h('span', {
+            className: 'dshc-selfRtState',
+            'data-kind': failed ? 'failed' : 'muted',
+            role: 'status',
+            'aria-live': 'polite',
+          },
+            h('span', { className: 'dshc-dot', 'data-state': dotState, 'aria-hidden': 'true' }),
+            starting ? h(Spinner) : null,
+            h('span', null, statusText))),
+        failed && status.lastError !== null
+          ? h('p', { className: 'dshc-relayLine', 'data-kind': 'failed', role: 'alert' }, status.lastError)
+          : null,
+        h('div', { className: 'dshc-selfRtActions' },
+          running
+            ? h('button', {
+              type: 'button',
+              className: 'dshc-textBtn dshc-selfRestart',
+              disabled: busy,
+              onClick: () => action('restart'),
+            }, t('self.restart'))
+            : null,
+          running
+            ? h('button', {
+              type: 'button',
+              className: 'dshc-textBtn dshc-selfStop',
+              disabled: busy,
+              onClick: () => action('stop'),
+            }, t('self.stop'))
+            : null,
+          !running
+            ? h('button', {
+              type: 'button',
+              className: failed ? 'dshc-primary dshc-selfRestart' : 'dshc-primary dshc-selfStart',
+              disabled: busy || starting,
+              onClick: () => action(failed ? 'restart' : 'start'),
+            }, failed ? t('self.restart') : t('self.start'))
+            : null),
+        state === 'stopped'
+          ? h('p', { className: 'dshc-selfNote dshc-selfStoppedNote' }, t('self.stoppedNote'))
+          : null,
+        view.controllable === false
+          ? h('p', { className: 'dshc-selfNote dshc-selfBlockedNote' }, t('self.blockedNote'))
+          : null,
+        logsVisible
+          ? h('div', { className: 'dshc-selfLogsWrap' },
+            h('div', { className: 'dshc-selfLogsHead' },
+              h('button', {
+                type: 'button',
+                className: 'dshc-textBtn dshc-selfLogsToggle',
+                'aria-expanded': logsOpen ? 'true' : 'false',
+                onClick: () => setLogsOpen((value) => !value),
+              }, t('self.logs')),
+              h('button', {
+                type: 'button',
+                className: 'dshc-textBtn dshc-selfLogsRefresh',
+                disabled: busy,
+                onClick: () => {
+                  if (typeof props.onRefresh === 'function') props.onRefresh();
+                },
+              }, t('self.logsRefresh'))),
+            logsOpen
+              ? (logs.length > 0
+                ? h('pre', { className: 'dshc-selfLogs' }, logs.join('\n'))
+                : h('p', { className: 'dshc-hint dshc-selfLogsEmpty' }, t('self.logsEmpty')))
+              : null)
+          : null,
         error !== null ? h('p', { className: 'dshc-formError', role: 'alert' }, error) : null);
     }
 
