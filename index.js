@@ -40,7 +40,7 @@ export const name = 'dsh-computers'
 export const inject = ['tools', 'webServer']
 
 /** Version reported by `/api/dsh-computers/health` (and asserted by the smoke harness). */
-export const PLUGIN_VERSION = '1.9.8'
+export const PLUGIN_VERSION = '1.9.9'
 
 /** The machine agent bundle, served at request time (never imported). */
 const AGENT_URL = new URL('./agent/dsh-computers-agent.mjs', import.meta.url)
@@ -620,48 +620,6 @@ export function apply(ctx, config) {
       hub,
       fsOps,
       computers: () => store.read().computers,
-      // v1.9.2: the slash menu shows only the machine PINNED in the viewing
-      // session, not every connected machine's skills. DSH hands the viewing
-      // agent to `list()` as `options.scope`, so this resolver maps that agent's
-      // session to its pin:
-      // - no session (or no pin) → 本地电脑 only;
-      // - a pinned account device (`acct:<machineId>`) → nothing, because that
-      //   device reports its skills to ITS OWN hub, not to this one;
-      // - any other pin → exactly that computer.
-      scopeComputer: (agent) => {
-        let sessionId = null
-        try {
-          sessionId = normalizeSessionId(agent?.session?.id ?? agent?.id)
-        } catch {
-          sessionId = null
-        }
-        if (sessionId === null) return 'local'
-        let pinned = null
-        try {
-          pinned = selections.get(sessionId)
-        } catch {
-          pinned = null
-        }
-        if (pinned === null) return 'local'
-        if (pinned.startsWith('acct:')) return 'none'
-        return pinned
-      },
-      // The registry record of THIS machine's own runtime, so `'local'` can be
-      // resolved even before the (now lazy) runtime enrolled in this process:
-      // the persisted isolated identity is the fallback.
-      selfComputerId: () => {
-        try {
-          const id = selfRuntime.status().computerId
-          if (typeof id === 'string' && id !== '') return id
-        } catch {
-          // Fall through to the persisted identity.
-        }
-        try {
-          return readSelfComputerId(stateDir) || null
-        } catch {
-          return null
-        }
-      },
       onWarn,
     })
     try {

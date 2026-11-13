@@ -8434,26 +8434,24 @@ async function phaseAB(root) {
     const beta = await enroll('beta.local', '/Users/beta', [{ name: 'release', description: 'from beta' }])
     const { provider } = service.registrations[0]
 
-    await check('skills scope: a pinned session sees only that machine', async () => {
+    await check('skills: every machine is listed with its prefix (v1.9.9 dropped the per-session filter)', async () => {
       const pin = (sessionId, computerId) => call(app.origin, `${API}/selection`, { method: 'POST', body: { sessionId, computerId } })
       assert.equal((await pin('ab-alpha-session', alpha.computerId)).status, 200)
-      assert.equal((await pin('ab-beta-session', beta.computerId)).status, 200)
-      const alphaNames = (await provider.list({ scope: { session: { id: 'ab-alpha-session' } } })).map((candidate) => candidate.name)
-      assert.deepEqual(alphaNames, ['alpha-local-deploy'])
-      const betaNames = (await provider.list({ scope: { session: { id: 'ab-beta-session' } } })).map((candidate) => candidate.name)
-      assert.deepEqual(betaNames, ['beta-local-release'])
-      // The agent object shape DSH passes (`agent.session.id`) is honoured, and
-      // the bare `agent.id` fallback works too.
-      assert.deepEqual((await provider.list({ scope: { id: 'ab-beta-session' } })).map((candidate) => candidate.name), ['beta-local-release'])
+      const names = (await provider.list({ scope: { session: { id: 'ab-alpha-session' } } })).map((candidate) => candidate.name)
+      assert.deepEqual(names, ['alpha-local-deploy', 'beta-local-release'], 'a pin changes nothing any more')
+      const descriptions = (await provider.list({})).map((candidate) => candidate.description)
+      assert.ok(descriptions.some((text) => text.includes('[alpha.local]')), 'the machine name stays in the description')
     })
 
-    await check('skills scope: an account-device pin contributes nothing', async () => {
-      assert.deepEqual(await provider.list({ scope: { session: { id: 'ab-acct-session' } } }), [], 'an acct: pin cannot see this hub’s machines')
+    await check('skills: an account-device pin is ignored, not filtered', async () => {
+      const names = (await provider.list({ scope: { session: { id: 'ab-acct-session' } } })).map((candidate) => candidate.name)
+      assert.deepEqual(names, ['alpha-local-deploy', 'beta-local-release'], 'the catalog no longer depends on the pin')
     })
 
-    await check('skills scope: an unpinned session sees only 本地电脑', async () => {
-      // No self-runtime yet: the filter must still hide both remote machines.
-      assert.deepEqual(await provider.list({ scope: { session: { id: 'ab-none-session' } } }), [], 'unpinned sessions do not inherit every machine')
+    await check('skills: this machine\'s own runtime contributes too (no pin involved)', async () => {
+      // v1.9.9: the catalog is machine-independent, so both enrolled machines are
+      // already listed before this machine's runtime even exists.
+      assert.equal((await provider.list({ scope: { session: { id: 'ab-none-session' } } })).length, 2)
       // Start this machine's own runtime and give it a reported skill.
       const self = await call(app.origin, `${API}/account/controllable`, { method: 'POST', body: { enabled: true } })
       assert.equal(self.status, 200)
@@ -8470,11 +8468,13 @@ async function phaseAB(root) {
       })
       assert.equal(beat.status, 200)
       const local = await provider.list({ scope: { session: { id: 'ab-none-session' } } })
-      assert.equal(local.length, 1, 'only the local machine contributes')
-      assert.equal(local[0].locator.computerId, selfId)
-      assert.ok(local[0].name.endsWith('-local-only'))
-      // ...and a session pinned to another machine still does not see it.
-      assert.deepEqual((await provider.list({ scope: { session: { id: 'ab-alpha-session' } } })).map((candidate) => candidate.name), ['alpha-local-deploy'])
+      assert.equal(local.length, 3, 'the local machine joins the other two')
+      const own = local.find((candidate) => candidate.locator.computerId === selfId)
+      assert.ok(own !== undefined, 'the local runtime is in the catalog')
+      assert.ok(own.name.endsWith('-local-only'))
+      // The same three, whatever the session is pinned to.
+      assert.deepEqual((await provider.list({ scope: { session: { id: 'ab-alpha-session' } } })).map((candidate) => candidate.name).sort(),
+        ['alpha-local-deploy', 'beta-local-release', own.name].sort())
     })
   } finally {
     for (const stream of streams) stream.close()
