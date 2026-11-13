@@ -7458,12 +7458,20 @@ async function phaseY(root) {
   /** The id the lazy runtime enrolled as (asserted again after a reload). */
   let lazyComputerId = ''
 
-  await check('self-runtime: load spawns nothing; the first 本地电脑 tool call starts it and waits', async () => {
+  await check('self-runtime: load starts the runtime when 被控 is on; a null pin still resolves lazily', async () => {
     const lazyDir = join(root, 'y-lazy')
+    // v1.9.6: 被控 ON means "others may execute here", which needs a live runtime,
+    // so the load hook starts it. Explicitly opt out here so the LAZY path (被控
+    // off, local user still wants 本地电脑) keeps its own coverage.
+    mkdirSync(lazyDir, { recursive: true })
+    writeFileSync(accountFile(lazyDir), JSON.stringify({
+      version: 1, relayUrl: 'https://relay.example.com', accountId: 'acct_0123456789abcdef',
+      secret: 'dshf_0123456789abcdef0123456789abcdef', machineId: 'mach_0123456789abcdef',
+      name: 'lazy', controllable: false,
+    }, null, 2), { mode: 0o600 })
     const spawner = countingSpawn()
     const lazyApp = await mount({ ...FAST_CONFIG, stateDir: lazyDir }, {
       selfRuntimeDeps: {
-        // v1.9.2: production defaults — no load-time start, lazy start allowed.
         lazyStart: true,
         agentPath,
         spawn: spawner.spawn,

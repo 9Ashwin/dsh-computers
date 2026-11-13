@@ -40,7 +40,7 @@ export const name = 'dsh-computers'
 export const inject = ['tools', 'webServer']
 
 /** Version reported by `/api/dsh-computers/health` (and asserted by the smoke harness). */
-export const PLUGIN_VERSION = '1.9.6'
+export const PLUGIN_VERSION = '1.9.7'
 
 /** The machine agent bundle, served at request time (never imported). */
 const AGENT_URL = new URL('./agent/dsh-computers-agent.mjs', import.meta.url)
@@ -575,7 +575,12 @@ export function apply(ctx, config) {
         // true while the local runtime is running — so an eager start IS the
         // semantics of the switch. Lazy start remains for the 被控-off case (the
         // local user still wants 本地电脑) via the tools' ensureStarted().
-        if (selfRuntimeDeps.autoStart !== false && controllable) void selfRuntime.autoStart()
+        // `autoStart()` is a deliberate no-op unless the harness opts in, so the
+        // eager path has to call `start()` itself. This was why 被控 was ON while
+        // the runtime stayed stopped on two real machines.
+        if (selfRuntimeDeps.autoStart !== false && controllable && typeof selfRuntime.start === 'function') {
+          void selfRuntime.start()
+        }
       } catch (error) {
         onWarn(`dsh-computers: the self runtime could not auto-start: ${error && error.message ? error.message : error}`)
       }
