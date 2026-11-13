@@ -8619,11 +8619,12 @@ async function phaseAA(root) {
       assert.equal(existsSync(join(offDir, RELAY_DATA_DIR_NAME)), true, 'the relay data directory is created')
       assert.equal(statSync(join(offDir, RELAY_DATA_DIR_NAME)).mode & 0o777, 0o700)
 
-      // v1.9.3: one click — starting the local relay also points the link at it
-      // and enables it, so there is no second "启用" step to forget.
+      // v1.9.3: one click — starting the local relay also enables the link (no
+      // second "启用" step). v1.9.5: it must NOT replace a public relay address
+      // with the loopback one; here nothing was configured, so the local url wins.
       const afterStart = await call(app.origin, `${API}/relay`)
       assert.equal(afterStart.data.enabled, true, 'a successful start enables the link')
-      assert.equal(afterStart.data.url, `ws://127.0.0.1:${port}`, 'the link points at the local relay')
+      assert.equal(afterStart.data.url, `ws://127.0.0.1:${port}`, 'an empty address becomes the local relay')
 
       // The child's output lands in the ring buffer's tail.
       const logs = await waitFor(
