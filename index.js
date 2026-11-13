@@ -40,7 +40,7 @@ export const name = 'dsh-computers'
 export const inject = ['tools', 'webServer']
 
 /** Version reported by `/api/dsh-computers/health` (and asserted by the smoke harness). */
-export const PLUGIN_VERSION = '1.9.2'
+export const PLUGIN_VERSION = '1.9.3'
 
 /** The machine agent bundle, served at request time (never imported). */
 const AGENT_URL = new URL('./agent/dsh-computers-agent.mjs', import.meta.url)
@@ -571,7 +571,11 @@ export function apply(ctx, config) {
         } catch {
           controllable = true
         }
-        if (selfRuntimeDeps.autoStart === true && controllable) void selfRuntime.autoStart()
+        // v1.9.3: 被控 ON means "other machines may execute here", which is only
+        // true while the local runtime is running — so an eager start IS the
+        // semantics of the switch. Lazy start remains for the 被控-off case (the
+        // local user still wants 本地电脑) via the tools' ensureStarted().
+        if (selfRuntimeDeps.autoStart !== false && controllable) void selfRuntime.autoStart()
       } catch (error) {
         onWarn(`dsh-computers: the self runtime could not auto-start: ${error && error.message ? error.message : error}`)
       }

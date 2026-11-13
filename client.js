@@ -147,8 +147,8 @@ window.__ModuleLoader__.load({
       'account.devices.controllableAria': '允许账号里的其他电脑控制「{name}」',
       'account.devices.controllableFailed': '切换被控状态失败：{message}',
       'account.center.title': '账号中心',
-      'account.center.hint': '在这台机器上创建账号中心，其他电脑用账号密钥登录，就能互相看到并连过来。',
-      'account.center.create': '创建账号中心',
+      'account.center.hint': '整个账号只需要创建一次：在这台机器上点一下，拿到账号密钥；其他电脑用它登录即可。',
+      'account.center.create': '创建账号',
       'account.center.creating': '创建中…',
       'account.center.adminKey': '管理员密钥（可选）',
       'account.center.adminKeyPlaceholder': 'relay --admin-key',
@@ -187,7 +187,6 @@ window.__ModuleLoader__.load({
       'access.computersEmpty': '还没有连接的电脑',
       'access.presetDenied': '该电脑的 Bot 权限未包含当前预设',
       'relay.title': '中继',
-      'relay.hubLabel': '中继 ID',
       'relay.urlLabel': '公网地址',
       'relay.status.connected': '已连接',
       'relay.status.connecting': '连接中…',
@@ -195,7 +194,7 @@ window.__ModuleLoader__.load({
       'relay.status.disabled': '已停用',
       'relay.failedLine': '中继连接失败：{message}。检查中继地址，或启动本机中继',
       'relay.unknownError': '未知错误',
-      'relay.hint': '别的电脑和手机用这个地址连到这台电脑，不需要公网 IP 或开放端口',
+      'relay.hint': '中继让同一个账号下的电脑互相可达，不需要公网 IP，也不用开放端口',
       'relay.enable': '启用',
       /* The setup button; same word as the switch label in zh, but en needs
        * the verb for a button and the state word for the switch. */
@@ -305,8 +304,8 @@ window.__ModuleLoader__.load({
       'account.devices.controllableAria': 'Let other computers in this account control “{name}”',
       'account.devices.controllableFailed': 'Could not change controllability: {message}',
       'account.center.title': 'Account center',
-      'account.center.hint': 'Create the account center on this machine; other computers sign in with the account key and can then see and reach each other.',
-      'account.center.create': 'Create account center',
+      'account.center.hint': 'An account is created once: click here on this machine to get the account key, then sign the other computers in with it.',
+      'account.center.create': 'Create account',
       'account.center.creating': 'Creating…',
       'account.center.adminKey': 'Admin key (optional)',
       'account.center.adminKeyPlaceholder': 'relay --admin-key',
@@ -345,7 +344,6 @@ window.__ModuleLoader__.load({
       'access.computersEmpty': 'No computers connected yet',
       'access.presetDenied': 'This computer’s Bot access does not include the current preset',
       'relay.title': 'Relay',
-      'relay.hubLabel': 'Relay ID',
       'relay.urlLabel': 'Public address',
       'relay.status.connected': 'Connected',
       'relay.status.connecting': 'Connecting…',
@@ -353,7 +351,7 @@ window.__ModuleLoader__.load({
       'relay.status.disabled': 'Disabled',
       'relay.failedLine': 'Relay connection failed: {message}. Check the relay address, or start the local relay',
       'relay.unknownError': 'unknown error',
-      'relay.hint': 'Other computers and phones use this address to reach this computer — no public IP or open port needed',
+      'relay.hint': 'The relay makes the computers in one account reachable to each other — no public IP or forwarded port needed',
       'relay.enable': 'Enabled',
       'relay.enableAction': 'Enable',
       /* The relay card sets itself up here: no config file, no restart. */
@@ -3608,18 +3606,9 @@ window.__ModuleLoader__.load({
             if (typeof props.onSupervisorRefresh === 'function') props.onSupervisorRefresh();
           },
         }),
-        hubId !== ''
-          ? h('div', { className: 'dshc-runtimeMeta' },
-            h('span', { className: 'dshc-runtimeMetaKey' }, t('relay.hubLabel')),
-            h('code', { className: 'dshc-relayId', title: hubId }, hubId))
-          : null,
         urlCapable && hasUrl
           ? h('div', { className: 'dshc-copyStack dshc-relayAddr' },
             h(CopyRow, { label: t('relay.urlField'), value: effectiveUrl, stacked: true }))
-          : null,
-        publicUrl !== ''
-          ? h('div', { className: 'dshc-copyStack dshc-relayUrl' },
-            h(CopyRow, { label: t('relay.urlLabel'), value: publicUrl, stacked: true }))
           : null,
         phase === 'failed'
           ? h('p', { className: 'dshc-relayLine', 'data-kind': 'failed', role: 'status' },
